@@ -31,8 +31,8 @@ https://github.com/omkardamame/openchamber-token-meter.git
 - **Subagents** — each subagent still working, its own live rate, and how many
   of the tree are running.
 - **Totals** — In, Out, Think, Total out, Cache, Cache hit, TTFT, Consumed.
-- **Cost** — the session's total, the last turn, the model, and its effective
-  cost per million tokens.
+- **Cost** — the session's total, the last turn, the model, its blended cost
+  per million and its actual input, output and cache-hit rates.
 - **Per step** — every step the meter keeps (up to 400), orange for the session
   and blue for a subagent, with the green average and the best step marked.
 - **Work Status** — the same numbers as a compact strip in the chat panel, so
@@ -54,9 +54,12 @@ its own estimated rate, with its own learned ratio. The rail panel lists each
 running subagent separately, so the combined number can be read apart.
 
 The last-turn cost starts at the last user message, or at the turn-start event
-when the meter is already watching. The model's rate is **effective**: this
-session's cost divided by every token it processed. A provider's list price is
-not part of the extension's read access, so it cannot be shown.
+when the meter is already watching. The model's own $/1M rates are recovered
+from OpenCode's per-step costs: each step gives one equation in input, generated
+and cache-read tokens, so a least-squares fit returns the provider's real linear
+price. It needs a few differently shaped steps; when a tier or a cache-write
+charge makes the cost non-linear, the rates are withheld instead of guessed.
+The blended effective rate sits beside them.
 
 Totals, per-step speed and TTFT are measured. The live `N t/s` is an estimate:
 streamed characters × a ratio learned from finished steps, kept per session so

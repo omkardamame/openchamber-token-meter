@@ -45,7 +45,12 @@ const state = (over = {}) =>
       lastStep: { tokens: 1100, ms: 7800, tps: 33, aborted: false },
       estimated: true,
     },
-    cost: { total: 0.31, lastTurn: 0.08, perMillion: 0.0504 },
+    cost: {
+      total: 0.31,
+      lastTurn: 0.08,
+      perMillion: 0.0504,
+      rates: { model: 'deepseek-v4.1-flash', input: 0.15, output: 0.6, cacheRead: 0.003 },
+    },
     subagents: { count: 0, running: 0, streaming: 0, tool: 0, active: [] },
     series: { t0: Date.now() - 5000, step: 250, v: [30, 34, 36] },
     stepsSeq: 3,
@@ -218,7 +223,7 @@ try {
   );
   check(
     'panel names the actual input, output and cache rates',
-    /token rates · in 0\.9% · out 52\.7% · cache 99\.07%/.test(idle.text),
+    /model rates \/ 1M · in \$0\.15 · out \$0\.60 · cache \$0\.003/.test(idle.text),
     idle.text.slice(-160),
   );
 
@@ -269,6 +274,11 @@ try {
   await panel.set(subState({ status: 'tool' }));
   const subTool = await panel.read();
   check('panel says the subagent is running a tool', /a subagent is running a tool/.test(subTool.text), subTool.text.slice(0, 90));
+  const mismatchState = state();
+  mismatchState.cost = { ...mismatchState.cost, rates: { model: 'other-model', input: 1, output: 2, cacheRead: 3 } };
+  await panel.set(mismatchState);
+  const mismatch = await panel.read();
+  check('panel hides rates that belong to another model', /model rates \/ 1M · —/.test(mismatch.text), mismatch.text.slice(-120));
 
   await panel.set({ ok: false, error: 'OpenCode access is not available.', totals: null });
   const broken = await panel.read();

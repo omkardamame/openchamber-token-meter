@@ -68,6 +68,8 @@ export function createCollector(id) {
     lineageAt: 0,
     lineageTriedAt: 0,
     lineageLoading: false,
+    // The model the session is running, for the recovered cost rates.
+    model: null,
     status: 'idle',
     error: null,
     totals: emptyTotals(),
@@ -227,6 +229,7 @@ function raisedTotals(current, shape, cost = null, steps = null) {
 export function applyRecord(collector, record) {
   if (!record) return;
   if (typeof record.title === 'string' && record.title) collector.title = record.title;
+  if (typeof record.model?.id === 'string') collector.model = record.model.id;
   const busy = record.time?.busy;
   const idle = record.time?.idle;
   // A session is working when it went busy after it last went idle. It may be
@@ -279,6 +282,7 @@ function stepFromMessage(message) {
   return {
     id: message.id,
     at: typeof streamed === 'number' ? streamed : created,
+    model: typeof message.model?.id === 'string' ? message.model.id : null,
     tokens: output,
     total: (tokens.input ?? 0) + output,
     cost: typeof message.cost === 'number' ? message.cost : 0,
@@ -367,6 +371,7 @@ export async function loadHistory(collector, apiGet, deadline = 0, { stepsOnly =
       steps.sort((a, b) => a.at - b.at);
     }
     collector.steps = steps.slice(-MAX_STEPS);
+    collector.model = steps.at(-1)?.model ?? collector.model;
     collector.stepsSeq += 1;
     collector.lastStep = [...collector.steps].reverse().find((step) => step.tps) ?? null;
     collector.lastTtftMs = [...collector.steps].reverse().find((step) => step.ttftMs > 0)?.ttftMs ?? null;
@@ -446,10 +451,12 @@ export function applyEvent(collector, event) {
       if (collector.status === 'waiting-question') collector.status = 'idle';
       return;
     case 'session.step.started':
+      if (typeof data.model?.id === 'string') collector.model = data.model.id;
       collector.stream = {
         started: typeof data.started === 'number' ? data.started : at,
         startedAt: at,
         streamedAt: null,
+        model: collector.model,
         messageID: data.assistantMessageID ?? null,
         chars: 0,
         firstOutputAt: null,
@@ -477,6 +484,7 @@ export function applyEvent(collector, event) {
         const step = {
           id: data.assistantMessageID ?? null,
           at: endAt,
+          model: stream?.model ?? collector.model,
           tokens: output,
           total: tokens.input + output,
           cost: typeof data.cost === 'number' ? data.cost : 0,
@@ -578,6 +586,76 @@ function treeStatus(collector, tree) {
   return { status: collector.status, subagent: false };
 }
 
+/**
+ * What a model charges per million tokens, recovered from OpenCode's own step
+ * costs. Every finished step gives one equation:
+ *
+ *   cost × 1e6 = input·a + (output + thinking)·b + cacheRead·c
+ *
+ * Three unknowns, many steps, so a least-squares solve recovers a, b and c.
+ * It is the provider's real linear price, not a table we carry; a provider with
+ * tiers or a cache-write charge leaves a residual, and the rates are withheld
+ * instead of guessed. Costs are exact in OpenCode's records (measured: the
+ * recovered rates matched the model card to the cent).
+ */
+function modelRates(steps, model) {
+  if (!model) return null;
+  const rows = [];
+  for (const step of steps) {
+    if (step.model !== model || !(step.cost > 0)) continue;
+    const input = step.total - step.tokens;
+    if (!(input >= 0) || !(step.cacheRead >= 0)) continue;
+    rows.push([input, step.tokens, step.cacheRead, step.cost * 1e6]);
+  }
+  if (rows.length < 8 || !rows.some((row) => row[2] > 0)) return null;
+  const n = 3;
+  // Scale each token column to unit RMS so a small output column is not lost
+  // in the conditioning of a large cache column.
+  const scale = Array.from({ length: n }, (_, column) =>
+    Math.sqrt(rows.reduce((sum, row) => sum + row[column] * row[column], 0) / rows.length),
+  );
+  if (scale.some((value) => !(value > 0))) return null;
+  const a = Array.from({ length: n }, () => Array(n).fill(0));
+  const b = Array(n).fill(0);
+  for (const row of rows) {
+    for (let i = 0; i < n; i += 1) {
+      const left = row[i] / scale[i];
+      b[i] += left * row[3];
+      for (let j = 0; j < n; j += 1) a[i][j] += left * (row[j] / scale[j]);
+    }
+  }
+  const maxPivot = Math.max(...a.map((row, i) => Math.abs(row[i])));
+  for (let column = 0; column < n; column += 1) {
+    let pivot = column;
+    for (let row = column + 1; row < n; row += 1) {
+      if (Math.abs(a[row][column]) > Math.abs(a[pivot][column])) pivot = row;
+    }
+    if (Math.abs(a[pivot][column]) < maxPivot * 1e-10) return null;
+    [a[column], a[pivot]] = [a[pivot], a[column]];
+    [b[column], b[pivot]] = [b[pivot], b[column]];
+    for (let row = 0; row < n; row += 1) {
+      if (row === column) continue;
+      const factor = a[row][column] / a[column][column];
+      for (let k = column; k < n; k += 1) a[row][k] -= factor * a[column][k];
+      b[row] -= factor * b[column];
+    }
+  }
+  const x = b.map((value, i) => value / a[i][i] / scale[i]);
+  if (x.some((value) => !Number.isFinite(value) || value < -1e-6)) return null;
+  let error = 0;
+  let scaleY = 0;
+  for (const row of rows) {
+    const predicted = row[0] * x[0] + row[1] * x[1] + row[2] * x[2];
+    error += (row[3] - predicted) ** 2;
+    scaleY += row[3] ** 2;
+  }
+  if (scaleY <= 0) return null;
+  const relative = Math.sqrt(error / rows.length) / Math.sqrt(scaleY / rows.length);
+  if (relative > 1e-4) return null;
+  const round = (value) => Math.round(value * 1e6) / 1e6;
+  return { model, input: round(x[0]), output: round(x[1]), cacheRead: round(x[2]) };
+}
+
 export function snapshot(collector, now = Date.now(), tree = [collector]) {
   const members = tree.length ? tree : [collector];
   const totals = emptyTotals();
@@ -617,6 +695,8 @@ export function snapshot(collector, now = Date.now(), tree = [collector]) {
     (best, member) => (member.lastStep && (!best || member.lastStep.at > best.at) ? member.lastStep : best),
     null,
   );
+  const model = collector.model ?? lastStepRaw?.model ?? null;
+  const modelCostRates = modelRates(steps, model);
   const status = treeStatus(collector, members);
   // Every subagent still working, with its own rate: the headline adds them up,
   // the list says what makes it. Eight is enough to draw; `running` keeps the
@@ -668,6 +748,9 @@ export function snapshot(collector, now = Date.now(), tree = [collector]) {
       lastTurn: lastTurnCost,
       // Effective, not list price: every token and cache read in the cost.
       perMillion: consumed > 0 ? Math.round((totalCost / consumed) * 1e6 * 1e4) / 1e4 : null,
+      // The model's own rates, recovered from its step costs; null when the
+      // steps cannot pin them down.
+      rates: modelCostRates,
     },
     live: {
       tps: live,

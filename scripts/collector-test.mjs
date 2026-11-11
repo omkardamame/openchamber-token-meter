@@ -357,6 +357,63 @@ emitCost('session.step.ended', costStep('msg_cost_3', 0.01), 4_000);
 const nextTurn = snapshot(costRun, costAt + 4_100);
 check('a new turn resets the last-turn cost', nextTurn.cost.lastTurn === 0.01, `$${nextTurn.cost.lastTurn}`);
 
+// ---------------------------------------------------------------- model rates
+// OpenCode's step costs are linear in input, generated and cache-read tokens.
+// A fit recovers the model's own $/1M rates without a price table or a blocked
+// API read.
+const rateRun = createCollector('ses_rate_test');
+rateRun.model = 'rate-model';
+const rateAt = 1_794_000_000_000;
+for (let i = 0; i < 12; i += 1) {
+  const input = 1000 + i * 137;
+  const output = 100 + (i % 5) * 17;
+  const cacheRead = 5000 + i * 311;
+  rateRun.steps.push({
+    id: `msg_rate_${i}`,
+    at: rateAt + i * 1000,
+    model: 'rate-model',
+    tokens: output,
+    total: input + output,
+    cost: (input * 0.15 + output * 0.6 + cacheRead * 0.003) / 1e6,
+    cacheRead,
+    cacheWrite: 0,
+    ms: 1000,
+    tps: output,
+    aborted: false,
+  });
+}
+rateRun.stepsSeq = rateRun.steps.length;
+rateRun.lastStep = rateRun.steps.at(-1);
+const rateSnap = snapshot(rateRun);
+check(
+  'the model rates are recovered from its step costs',
+  rateSnap.cost.rates?.input === 0.15 &&
+    rateSnap.cost.rates?.output === 0.6 &&
+    rateSnap.cost.rates?.cacheRead === 0.003,
+  JSON.stringify(rateSnap.cost.rates),
+);
+const tieredRun = createCollector('ses_rate_tiered');
+tieredRun.model = 'tiered-model';
+for (let i = 0; i < 12; i += 1) {
+  const input = 1000 + i * 137;
+  const output = 100 + (i % 5) * 17;
+  const cacheRead = 5000 + i * 311;
+  tieredRun.steps.push({
+    id: `msg_tier_${i}`,
+    at: rateAt + i * 1000,
+    model: 'tiered-model',
+    tokens: output,
+    total: input + output,
+    cost: ((input * 0.15 + output * 0.6 + cacheRead * 0.003) / 1e6) * (i % 2 ? 1.2 : 1),
+    cacheRead,
+    cacheWrite: 0,
+    ms: 1000,
+    tps: output,
+    aborted: false,
+  });
+}
+check('a non-linear cost yields no rate instead of a guess', snapshot(tieredRun).cost.rates === null, JSON.stringify(snapshot(tieredRun).cost.rates));
+
 // OpenCode's own two readings differ by a rounding step; a running meter keeps the larger
 emit('session.usage.updated', { cost: 0.01, tokens: { input: 900, output: 399, reasoning: 100, cache: { read: 12_000, write: 40 } } }, 3300);
 const merged = snapshot(live, at + 3400);

@@ -1,6 +1,6 @@
 import { HostRequestError, connectHost } from '@openchamber/sdk';
 import { applyHostReady, mountBanner, mountEmpty } from '@openchamber/sdk/ui';
-import { compact, percent, seconds } from '../../shared/summary.js';
+import { compact, seconds } from '../../shared/summary.js';
 import { compress, easeToward, nextScale } from '../../shared/chart.js';
 import { dotState, mountCells, paintCells } from '../../shared/cells.js';
 import { el } from '../../shared/dom.js';
@@ -107,7 +107,7 @@ function build() {
         <div class="cell"><span class="cell-label">Total</span><span class="cell-value cost-total">—</span></div>
         <div class="cell"><span class="cell-label">Last turn</span><span class="cell-value cost-turn">—</span></div>
         <div class="cell"><span class="cell-label">Model</span><span class="cell-value cost-model">—</span></div>
-        <div class="cell"><span class="cell-label">Cost rate</span><span class="cell-value cost-rate">—</span></div>
+        <div class="cell"><span class="cell-label">Effective</span><span class="cell-value cost-rate">—</span></div>
       </div>
       <div class="cost-rates"></div>
     </section>
@@ -172,6 +172,16 @@ function rateMoney(value) {
   return `$${n < 1 ? n.toFixed(2) : n.toFixed(1)}`;
 }
 
+/** A model's list rate: 0.003 shows as $0.003, 0.15 as $0.15. */
+function listRate(value) {
+  const n = Number(value) || 0;
+  if (!n) return '$0';
+  if (n < 0.001) return `$${n.toFixed(4)}`;
+  if (n < 0.01) return `$${n.toFixed(3)}`;
+  if (n < 1) return `$${n.toFixed(2)}`;
+  return `$${n.toFixed(1)}`;
+}
+
 /**
  * What this session and its subagents cost: all of it, the turn that is running
  * (or the last one), and the model behind it with its effective rate. The rate
@@ -188,17 +198,18 @@ function paintCost(data) {
   ui.costModel.title = modelLabel || '';
   ui.costRate.textContent = typeof cost.perMillion === 'number' ? `${rateMoney(cost.perMillion)} / 1M` : '—';
   ui.costRate.title = 'effective: this session’s cost divided by every token it processed';
-  // The three shares the grid already carries, named as rates: input is the
-  // part sent fresh, output is the answer part of the generated tokens, and
-  // cache is the hit rate. True list prices are not in the extension's reads.
-  const prompt = totals.prompt ?? 0;
-  const generated = totals.generated ?? 0;
-  const rates = [];
-  if (prompt > 0) rates.push(`in ${percent((totals.input ?? 0) / prompt, 1)}`);
-  if (generated > 0) rates.push(`out ${percent((totals.output ?? 0) / generated, 1)}`);
-  if (prompt > 0) rates.push(`cache ${percent((totals.cacheRead ?? 0) / prompt, 2)}`);
-  ui.costRates.textContent = rates.length ? `token rates · ${rates.join(' · ')}` : 'token rates · —';
-  ui.costRates.title = 'in: share of the prompt sent fresh; out: share of generated tokens that are output, not thinking; cache: share of the prompt served from cache';
+  // The model's own list rates, recovered from OpenCode's step costs. They are
+  // what the provider charged per million, not the blended rate above. A model
+  // switch mid-session shows a dash until the new model has its own steps.
+  const rates = cost.rates && (!modelLabel || cost.rates.model === modelLabel) ? cost.rates : null;
+  ui.costRates.textContent = rates
+    ? `model rates / 1M · in ${listRate(rates.input)} · out ${listRate(rates.output)} · cache ${listRate(rates.cacheRead)}`
+    : 'model rates / 1M · —';
+  ui.costRates.title = rates
+    ? `recovered from this session's own step costs for ${rates.model}`
+    : cost.rates
+      ? `the rates recovered so far are for ${cost.rates.model}, not the session's current ${modelLabel}`
+      : 'not enough differently shaped steps to recover the model’s input, output and cache rates';
 }
 
 function drawLive(data) {
