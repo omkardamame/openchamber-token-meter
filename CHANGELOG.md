@@ -3,6 +3,30 @@
 Every release of Token Meter, newest first. A release is a tag; nothing here is
 dated by guesswork — each entry is what shipped in that tag.
 
+## [1.4.0] - 2026-11-11
+
+### Added
+
+- A **Subagents** block lists every subagent still working, with its own rate and title.
+- **Per step** draws every step the meter keeps (up to 400), with its total count, orange for the session and blue for a subagent.
+- The green average and red best step are labelled and drawn, with a start/now axis under the bars.
+- A **Cost** block shows the total and the last turn, the model, its blended rate, and its actual input/output/cache-hit $/1M rates.
+- The model rates are recovered from OpenCode's own step costs, so no price table or blocked API read is needed.
+
+### Fixed
+
+- The per-step average and peak now describe the bars drawn, not the whole tree.
+- The step count shows the session's full total, not the 400-step drawing cap.
+- The model name no longer overflows the header; it ellipsizes.
+- Rates are withheld when a tiered or cache-write cost makes the step costs non-linear.
+
+### Changed
+
+- The step list travels only when its sequence changes; an ordinary poll stays around 1.7 KB.
+- Total and last-turn costs show four decimals.
+- Consumed renders at the same size as the other stats in both frames.
+- The per-step header separates its count, average and peak with muted dots.
+
 ## [1.3.0] - 2026-11-11
 
 ### Added
