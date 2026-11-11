@@ -3,6 +3,29 @@
 Every release of Token Meter, newest first. A release is a tag; nothing here is
 dated by guesswork — each entry is what shipped in that tag.
 
+## [1.5.0] - 2026-11-12
+
+### Added
+
+- The rail panel polls every 250 ms, one sample per service series point.
+- History reads up to 2,000 messages; the chart draws up to 1,000 steps, and the count is the session's total.
+- The panel says when a session or subagent history is still loading or partial.
+
+### Fixed
+
+- A subagent history beyond 400 steps was counted as 400.
+- A cold start on a long session could undercount its totals; the session record is now a usage floor.
+- A history cut at the page cap was reported complete; it is marked partial.
+- A missed turn end after the 55 s stream cut could leave the dot breathing or a tool glowing; the session record now reconciles status.
+- A tool-only step's history rate included the tool run; it now measures the input stream.
+- A first history read during a turn could drop the live step from the chart; live steps are merged by id.
+- A model missing from the host context left the header and Cost model blank; the recovered rates now name it.
+- The per-step header could overflow a narrow rail; it wraps.
+
+### Changed
+
+- The README uses the owner's live rail-panel capture.
+
 ## [1.4.0] - 2026-11-11
 
 ### Added
