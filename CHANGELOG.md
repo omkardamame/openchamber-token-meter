@@ -3,6 +3,27 @@
 Every release of Token Meter, newest first. A release is a tag; nothing here is
 dated by guesswork — each entry is what shipped in that tag.
 
+## [1.3.0] - 2026-11-11
+
+### Added
+
+- A session's meter follows its subagents: their rates join the headline, their steps join the chart, and their tokens and cost count in the totals.
+- A subagent step is marked in the chart and the last-step line, and the totals say how many subagents they include.
+
+### Fixed
+
+- A parent read 0 t/s while its subagents streamed, because their events carry the child's session id and the collector dropped them.
+- Subagent tokens spent before the meter opened were missing from the totals; they now come from OpenCode's own session records.
+- A streamed part was counted twice in the live rate when its full text arrived at the end; the ended text now counts only when no deltas streamed it.
+- A subagent's first-token wait was hidden behind the parent's older step; the streaming member's own wait now wins.
+- A failed lineage read retried on every tick; it now waits a minute.
+- Eviction could drop a watched session while its subagent was still streaming; it no longer does.
+
+### Changed
+
+- A subagent's history is read for its step chart only, so its exact usage record cannot be replaced by a partial sum.
+- The totals merge lives in one helper, and the README and cell hints say that totals include subagents.
+
 ## [1.2.2] - 2026-11-11
 
 ### Changed
