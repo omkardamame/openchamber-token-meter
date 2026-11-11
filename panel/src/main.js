@@ -208,8 +208,8 @@ function paintCost(data) {
   ui.costTotal.textContent = money4(total);
   ui.costTurn.textContent = typeof cost.lastTurn === 'number' ? money4(cost.lastTurn) : '—';
   ui.costTurn.title =
-    (data.subagents?.loading ?? 0) > 0
-      ? 'subagent histories are still loading; the last turn can grow'
+    (data.subagents?.loading ?? 0) > 0 || (data.subagents?.partial ?? 0) > 0 || data.historyPartial
+      ? 'history is partial; the last turn can grow'
       : '';
   ui.costModel.textContent = modelLabel || cost.rates?.model || '—';
   ui.costModel.title = modelLabel || cost.rates?.model || '';
@@ -333,8 +333,8 @@ function drawSteps(data) {
   const known = data.stepsKnown ?? all.length;
   ui.stepsCount.textContent = `${known} step${known === 1 ? '' : 's'}`;
   ui.stepsCount.title =
-    (data.subagents?.loading ?? 0) > 0
-      ? 'subagent histories are still loading; the count will grow'
+    (data.subagents?.loading ?? 0) > 0 || (data.subagents?.partial ?? 0) > 0 || data.historyPartial
+      ? 'history is partial; the count is a lower bound'
       : known > all.length
         ? `the last ${all.length} steps are drawn`
         : 'every step the meter keeps';
@@ -476,6 +476,8 @@ function render(data) {
   const activeSubs = Array.isArray(subagents.active) ? subagents.active : [];
   const runningSubs = subagents.running ?? activeSubs.length;
   const loadingSubs = subagents.loading ?? 0;
+  const partialSubs = subagents.partial ?? 0;
+  const historyPartial = Boolean(data.historyPartial);
   const subLabel = subagents.count > 0 ? `${subagents.count} subagent${subagents.count === 1 ? '' : 's'}` : '';
   ui.dot.dataset.state = dotState(data.status);
   ui.statusLabel.textContent = STATUS[data.status] ?? STATUS.idle;
@@ -529,14 +531,18 @@ function render(data) {
   ui.foot.textContent = data.error
     ? `cannot read history: ${data.error}`
     : loadingSubs > 0
-      ? `reading ${loadingSubs} subagent${loadingSubs === 1 ? '' : 's'} history`
-      : data.stream?.state === 'open'
-        ? 'live from OpenCode events'
-        : data.stream?.state === 'retrying'
-          ? 'events reconnecting'
-          : data.stream?.state === 'off'
-            ? 'totals update each turn · live rate unavailable'
-            : 'connecting to OpenCode events';
+      ? `reading ${loadingSubs} subagent histor${loadingSubs === 1 ? 'y' : 'ies'}`
+      : partialSubs > 0
+        ? `${partialSubs} subagent histor${partialSubs === 1 ? 'y is' : 'ies are'} partial`
+        : historyPartial
+          ? 'history is partial'
+          : data.stream?.state === 'open'
+            ? 'live from OpenCode events'
+            : data.stream?.state === 'retrying'
+              ? 'events reconnecting'
+              : data.stream?.state === 'off'
+                ? 'totals update each turn · live rate unavailable'
+                : 'connecting to OpenCode events';
 }
 
 function handleError(error) {

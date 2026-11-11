@@ -96,6 +96,7 @@ function createCollector(id) {
     lastTtftMs: null,
     lastStep: null,
     historyAt: 0,
+    historyPartial: false,
     historyTriedAt: 0,
     loading: null,
     touchedAt: Date.now()
@@ -202,7 +203,7 @@ function raisedTotals(current, shape, cost = null, steps = null) {
     steps: typeof steps === "number" ? Math.max(current.steps, steps) : current.steps
   };
 }
-function applyRecord(collector, record, { totals = true } = {}) {
+function applyRecord(collector, record) {
   if (!record)
     return;
   if (typeof record.title === "string" && record.title)
@@ -225,7 +226,7 @@ function applyRecord(collector, record, { totals = true } = {}) {
     }
   }
   const tokens = record.tokens;
-  if (!totals || !tokens)
+  if (!tokens)
     return;
   collector.totals = raisedTotals(collector.totals, sameShape(tokens), record.cost);
   collector.totalsFrom = "usage";
@@ -303,6 +304,8 @@ async function loadHistory(collector, apiGet, deadline = 0, { stepsOnly = false 
       if (!cursor || data.length === 0)
         break;
     }
+    if (cursor)
+      complete = false;
     messages.sort((a, b) => (a?.time?.created ?? 0) - (b?.time?.created ?? 0));
     const totals = emptyTotals();
     const steps = [];
@@ -346,11 +349,13 @@ async function loadHistory(collector, apiGet, deadline = 0, { stepsOnly = false 
     collector.lastTtftMs = [...collector.steps].reverse().find((step) => step.ttftMs > 0)?.ttftMs ?? null;
     if (tokens > 0 && chars > 0)
       calibrate(collector, chars, tokens);
+    collector.historyPartial = !complete;
     collector.historyAt = Date.now();
     collector.error = null;
     return complete;
   })().catch((error) => {
     collector.error = error?.message ?? String(error);
+    collector.historyPartial = true;
     return false;
   }).finally(() => {
     collector.loading = null;
@@ -667,6 +672,7 @@ function snapshot(collector, now = Date.now(), tree = [collector]) {
     count: members.length - 1,
     running: active.length,
     loading: members.filter((member) => member !== collector && member.historyAt === 0).length,
+    partial: members.filter((member) => member !== collector && member.historyPartial).length,
     streaming: members.filter((member) => member !== collector && member.status === "streaming").length,
     tool: members.filter((member) => member !== collector && member.status === "tool").length,
     active: active.slice(0, 8).map((entry) => entry.item)
@@ -676,6 +682,7 @@ function snapshot(collector, now = Date.now(), tree = [collector]) {
     session: collector.id,
     status: status.status,
     error: collector.error,
+    historyPartial: Boolean(collector.historyPartial),
     totals: {
       input: totals.input,
       output: totals.output,
@@ -879,7 +886,7 @@ function createService({ fetchImpl = fetch, log = () => {}, base = BASE, token =
       }
       const ownAnswer = await own;
       if (ownAnswer?.data)
-        applyRecord(root, ownAnswer.data, { totals: false });
+        applyRecord(root, ownAnswer.data);
       root.lineageAt = Date.now();
       root.lineageTriedAt = 0;
     } catch (error) {

@@ -43,7 +43,10 @@ async function pickSession() {
       await realFetch(`${base}/api/session/${session.id}/message?type=assistant&limit=40`)
     ).json();
     const rows = (messages?.data ?? []).filter((message) => message.tokens);
-    if (rows.length) candidates.push({ session, rows });
+    // Keep the endpoint check against a quiet record: a running session's
+    // record can move between the pick and the service's own read.
+    const quiet = !session.time?.busy || (session.time?.idle && session.time.idle >= session.time.busy);
+    if (rows.length && quiet) candidates.push({ session, rows });
   }
   candidates.sort((a, b) => b.rows.length - a.rows.length);
   // A parent's totals are its tree's; keep this check to one session so it can
@@ -86,6 +89,14 @@ async function independentTotals(sessionId) {
 // ---------------------------------------------------------------- collector
 const { session, rows } = await pickSession();
 const expected = await independentTotals(session.id);
+const recorded = session.tokens ?? {};
+const baseline = {
+  input: Math.max(expected.input, recorded.input ?? 0),
+  output: Math.max(expected.output, recorded.output ?? 0),
+  reasoning: Math.max(expected.reasoning, recorded.reasoning ?? 0),
+  cacheRead: Math.max(expected.cacheRead, recorded.cache?.read ?? 0),
+  cacheWrite: Math.max(expected.cacheWrite, recorded.cache?.write ?? 0),
+};
 
 const collector = createCollector(session.id);
 await loadHistory(collector, async (pathname) => (await realFetch(`${base}${pathname}`)).json());
@@ -481,6 +492,30 @@ check(
 );
 check('history keeps more than one page of steps', paging.totals.steps === 3, `${paging.totals.steps} steps`);
 
+// regression: a history cut at the page cap is flagged, not called complete
+const capped = createCollector('ses_capped_history');
+let cappedPage = 0;
+await loadHistory(capped, async () => {
+  cappedPage += 1;
+  return {
+    data: [
+      {
+        id: `msg_cap_${cappedPage}`,
+        type: 'assistant',
+        time: { created: cappedPage, streamed: cappedPage + 1 },
+        tokens: { input: 1, output: 1, reasoning: 0, cache: { read: 0, write: 0 } },
+        content: [],
+      },
+    ],
+    cursor: { next: `CAP${cappedPage}` },
+  };
+});
+check(
+  'a page-capped history is marked partial',
+  capped.historyPartial === true && capped.knownSteps === 20,
+  `${capped.historyPartial}/${capped.knownSteps}`,
+);
+
 // regression: a provider can spend many tokens for each visible character
 const hotTokens = createCollector('ses_hot_test');
 const hotAt = Date.now();
@@ -736,7 +771,7 @@ const wrongToken = await fetch(`http://127.0.0.1:${port}/state?session=${session
 });
 check('service refuses a wrong bearer', wrongToken.status === 401, String(wrongToken.status));
 const served = await get(`session=${session.id}`);
-check('service answers with the same totals', served.status === 200 && served.body.totals.input === expected.input, `${served.body.totals?.input}`);
+check('service answers with the same totals', served.status === 200 && served.body.totals.input === baseline.input, `${served.body.totals?.input} vs ${baseline.input}`);
 
 const push = (event) => stream.controller.enqueue(new TextEncoder().encode(`data: ${JSON.stringify(event)}\n\n`));
 await new Promise((resolve) => setTimeout(resolve, 100));
@@ -762,12 +797,12 @@ push({
   type: 'session.step.ended',
   data: { sessionID: session.id, assistantMessageID: 'msg_live', finish: 'stop', cost: 0, tokens: { input: 10, output: 500, reasoning: 0, cache: { read: 0, write: 0 } } },
 });
-push({ id: 'evt_usage', created: Date.now() + 1250, type: 'session.usage.updated', data: { sessionID: session.id, cost: 0, tokens: { input: expected.input + 10, output: expected.output + 500, reasoning: expected.reasoning, cache: { read: expected.cacheRead, write: expected.cacheWrite } } } });
+push({ id: 'evt_usage', created: Date.now() + 1250, type: 'session.usage.updated', data: { sessionID: session.id, cost: 0, tokens: { input: baseline.input + 10, output: baseline.output + 500, reasoning: baseline.reasoning, cache: { read: baseline.cacheRead, write: baseline.cacheWrite } } } });
 await new Promise((resolve) => setTimeout(resolve, 400));
 const ended = await get(`session=${session.id}`);
 check('a finished step adds one chart point', ended.body.steps.length >= snap.steps.length, `${ended.body.steps.length} points`);
 check('the new step carries a measured rate', ended.body.live.lastStep?.tokens === 500, JSON.stringify(ended.body.live.lastStep));
-check('totals follow the usage event', ended.body.totals.output === expected.output + 500, `${ended.body.totals.output}`);
+check('totals follow the usage event', ended.body.totals.output === baseline.output + 500, `${ended.body.totals.output} vs ${baseline.output + 500}`);
 
 // the step list is only sent when the client's sequence is stale
 const seqNow = (await get(`session=${session.id}`)).body.stepsSeq;

@@ -205,7 +205,7 @@ export function createService({ fetchImpl = fetch, log = () => {}, base = BASE, 
         }
       }
       const ownAnswer = await own;
-      if (ownAnswer?.data) applyRecord(root, ownAnswer.data, { totals: false });
+      if (ownAnswer?.data) applyRecord(root, ownAnswer.data);
       root.lineageAt = Date.now();
       root.lineageTriedAt = 0;
     } catch (error) {

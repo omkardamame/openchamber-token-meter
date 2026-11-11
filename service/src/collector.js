@@ -92,6 +92,7 @@ export function createCollector(id) {
     lastTtftMs: null,
     lastStep: null,
     historyAt: 0,
+    historyPartial: false,
     historyTriedAt: 0,
     loading: null,
     touchedAt: Date.now(),
@@ -227,12 +228,8 @@ function raisedTotals(current, shape, cost = null, steps = null) {
  * that session's own work only. A child's record therefore carries everything
  * a subagent did before the meter was pointed at its parent, and summing the
  * records of a tree does not count a step twice.
- *
- * `totals: false` takes only the live status, title and model: a watched
- * session's own history and usage events already own its totals, and its
- * record can be a rounding step ahead of them.
  */
-export function applyRecord(collector, record, { totals = true } = {}) {
+export function applyRecord(collector, record) {
   if (!record) return;
   if (typeof record.title === 'string' && record.title) collector.title = record.title;
   if (typeof record.model?.id === 'string') collector.model = record.model.id;
@@ -258,7 +255,7 @@ export function applyRecord(collector, record, { totals = true } = {}) {
     }
   }
   const tokens = record.tokens;
-  if (!totals || !tokens) return;
+  if (!tokens) return;
   collector.totals = raisedTotals(collector.totals, sameShape(tokens), record.cost);
   collector.totalsFrom = 'usage';
 }
@@ -352,6 +349,9 @@ export async function loadHistory(collector, apiGet, deadline = 0, { stepsOnly =
       cursor = answer?.cursor?.next ?? null;
       if (!cursor || data.length === 0) break;
     }
+    // The page cap or the first-load deadline leaves a cursor behind: the
+    // totals and step count are a lower bound until the next reconcile.
+    if (cursor) complete = false;
     messages.sort((a, b) => (a?.time?.created ?? 0) - (b?.time?.created ?? 0));
 
     const totals = emptyTotals();
@@ -375,8 +375,9 @@ export async function loadHistory(collector, apiGet, deadline = 0, { stepsOnly =
     }
     collector.knownSteps = Math.max(collector.knownSteps, totals.steps);
     if (!stepsOnly) {
-      // History fills what the live events missed. It covers at most 800 steps,
-      // so it must not pull a counter back from a record or an event.
+      // History fills what the live events missed. It covers at most
+      // HISTORY_PAGES × HISTORY_PAGE_SIZE steps, so it must not pull a counter
+      // back from a record or an event.
       const cumulative = collector.totalsFrom === 'usage';
       collector.totals = raisedTotals(collector.totals, totals, totals.cost, totals.steps);
       // A cumulative reading stays cumulative: the next step may not be added on
@@ -398,12 +399,14 @@ export async function loadHistory(collector, apiGet, deadline = 0, { stepsOnly =
     collector.lastStep = [...collector.steps].reverse().find((step) => step.tps) ?? null;
     collector.lastTtftMs = [...collector.steps].reverse().find((step) => step.ttftMs > 0)?.ttftMs ?? null;
     if (tokens > 0 && chars > 0) calibrate(collector, chars, tokens);
+    collector.historyPartial = !complete;
     collector.historyAt = Date.now();
     collector.error = null;
     return complete;
   })()
     .catch((error) => {
       collector.error = error?.message ?? String(error);
+      collector.historyPartial = true;
       return false;
     })
     .finally(() => {
@@ -753,6 +756,7 @@ export function snapshot(collector, now = Date.now(), tree = [collector]) {
     // A child seeded from a record has totals but not its step history yet;
     // the count, last turn and chart are still partial until it loads.
     loading: members.filter((member) => member !== collector && member.historyAt === 0).length,
+    partial: members.filter((member) => member !== collector && member.historyPartial).length,
     streaming: members.filter((member) => member !== collector && member.status === 'streaming').length,
     tool: members.filter((member) => member !== collector && member.status === 'tool').length,
     active: active.slice(0, 8).map((entry) => entry.item),
@@ -762,6 +766,7 @@ export function snapshot(collector, now = Date.now(), tree = [collector]) {
     session: collector.id,
     status: status.status,
     error: collector.error,
+    historyPartial: Boolean(collector.historyPartial),
     totals: {
       input: totals.input,
       output: totals.output,
