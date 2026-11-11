@@ -33,8 +33,9 @@ https://github.com/omkardamame/openchamber-token-meter.git
 - **Totals** — In, Out, Think, Total out, Cache, Cache hit, TTFT, Consumed.
 - **Cost** — the session's total, the last turn, the model, its blended cost
   per million and its actual input, output and cache-hit rates.
-- **Per step** — every step the meter keeps (up to 400), orange for the session
-  and blue for a subagent, with the green average and the best step marked.
+- **Per step** — every step the meter keeps (up to 400), with its count and a
+  start/now time axis, orange for the session and blue for a subagent, the green
+  average and the red best step.
 - **Work Status** — the same numbers as a compact strip in the chat panel, so
   the speed sits next to the conversation.
 
