@@ -167,6 +167,27 @@
         line-height: 1.05;
         letter-spacing: -0.02em;
         font-variant-numeric: tabular-nums;
+        transition: color 250ms ease, text-shadow 250ms ease;
+      }
+      /* The rate's colour is its tier: slow coral, steady emerald, fast sky
+         blue, blazing gold, ultra violet. The top two glow softly; the hexes
+         are fixed so a rate reads the same in every theme. */
+      .speed-value b[data-tier='slow'] {
+        color: #f87171;
+      }
+      .speed-value b[data-tier='steady'] {
+        color: #10b981;
+      }
+      .speed-value b[data-tier='fast'] {
+        color: #3b82f6;
+      }
+      .speed-value b[data-tier='blazing'] {
+        color: #ffd700;
+        text-shadow: 0 0 8px #ffd70073;
+      }
+      .speed-value b[data-tier='ultra'] {
+        color: #a855f7;
+        text-shadow: 0 0 8px #a855f773;
       }
       .speed-value i {
         font-style: normal;
@@ -176,6 +197,7 @@
       .speed-value b.quiet {
         color: var(--oc-muted);
         opacity: 0.75;
+        text-shadow: none;
       }
       .speed-note,
       .speed-last {

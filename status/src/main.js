@@ -4,6 +4,7 @@ import { seconds } from '../../shared/summary.js';
 import { compress, easeToward, nextScale } from '../../shared/chart.js';
 import { dotState, mountCells, paintCells } from '../../shared/cells.js';
 import { el } from '../../shared/dom.js';
+import { speedTier } from '../../shared/speed-color.js';
 
 const host = connectHost();
 const root = document.querySelector('#root');
@@ -29,15 +30,36 @@ let lastStepsSeq = -1;
 let targetTps = 0;
 let shownTps = 0;
 let lastRounded = -1;
+let streamingNow = false;
+let lastTier = '';
 
-/** Same easing as the panel: the value is measured, the movement is drawn. */
+/**
+ * Same easing as the panel: the value is measured, the movement is drawn. The
+ * colour follows the number on screen, not the target, so the two never
+ * disagree.
+ */
 function animateSpeed(dt) {
   if (!ui) return;
   shownTps = easeToward(shownTps, targetTps, dt);
   const rounded = Math.round(shownTps);
-  if (rounded === lastRounded) return;
-  lastRounded = rounded;
-  ui.tps.textContent = String(rounded);
+  if (rounded !== lastRounded) {
+    lastRounded = rounded;
+    ui.tps.textContent = String(rounded);
+  }
+  paintTier();
+}
+
+/**
+ * Colour the headline by its tier. This runs on every animation frame, so it
+ * writes the attribute only when the tier changes. A quiet or idle rate carries
+ * no tier and keeps the neutral text colour: a resting 0 is not a slow stream.
+ */
+function paintTier() {
+  const tier = ui && streamingNow && lastRounded >= 0 ? speedTier(lastRounded) : '';
+  if (tier === lastTier) return;
+  lastTier = tier;
+  if (tier) ui.tps.dataset.tier = tier;
+  else delete ui.tps.dataset.tier;
 }
 
 /** The compact live series as the {t, v} points the spark draws. */
@@ -164,7 +186,10 @@ function render(data) {
     lastRounded = Math.round(shownTps);
     ui.tps.textContent = String(lastRounded);
   }
-  ui.tps.classList.toggle('quiet', streaming && quiet);
+  const quietRate = streaming && quiet;
+  streamingNow = streaming && !quiet;
+  ui.tps.classList.toggle('quiet', quietRate);
+  paintTier();
   const lastStep = data.live?.lastStep;
   const lastSub = lastStep?.sub ? ' · sub' : '';
   const lastRate = data.status !== 'tool' && Boolean(lastStep?.tps);
@@ -289,6 +314,9 @@ host.onReady((ctx) => {
   const nextSession = ctx.session?.id ?? null;
   if (nextSession === sessionId) return;
   lastStepsSeq = -1;
+  streamingNow = false;
+  lastTier = '';
+  delete ui.tps.dataset.tier;
   sessionId = nextSession;
   current = null;
   clearNotice();

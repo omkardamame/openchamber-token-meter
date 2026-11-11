@@ -112,9 +112,17 @@ const harness = `<!doctype html><meta charset="utf-8"><title>page test</title>
     const doc = frame.contentDocument;
     const text = doc.body.innerText.replace(/\\s+/g, ' ').trim();
     const dot = doc.querySelector('.dot');
+    const rate = doc.querySelector('.tps-value') || doc.querySelector('.tps');
+    const rateStyle = rate ? getComputedStyle(rate) : null;
     return {
       text,
       dotState: dot ? dot.getAttribute('data-state') : null,
+      tpsTier: rate ? rate.getAttribute('data-tier') : null,
+      tpsColor: rateStyle ? rateStyle.color : null,
+      tpsShadow: rateStyle ? rateStyle.textShadow : null,
+      tpsWeight: rateStyle ? rateStyle.fontWeight : null,
+      tpsTransition: rateStyle ? rateStyle.transitionProperty : null,
+      tpsTransitionMs: rateStyle ? rateStyle.transitionDuration : null,
       cells: [...doc.querySelectorAll('.totals-grid .cell-label')].map((n) => n.textContent),
       values: [...doc.querySelectorAll('.totals-grid .cell-value')].map((n) => n.textContent.trim()),
       tps: (doc.querySelector('.tps-value') || doc.querySelector('.tps') || {}).textContent,
@@ -283,6 +291,47 @@ try {
   const streaming = await settle(panel, 'tps', '36');
   check('panel draws the live rate while generating', streaming.tps === '36', String(streaming.tps));
   check('panel breathes the dot while generating', streaming.dotState === 'streaming', String(streaming.dotState));
+  check(
+    'panel colours a 36 t/s rate emerald and keeps it semibold',
+    streaming.tpsTier === 'steady' && streaming.tpsColor === 'rgb(16, 185, 129)' && streaming.tpsWeight === '600',
+    `${streaming.tpsTier} ${streaming.tpsColor} ${streaming.tpsWeight}`,
+  );
+  check(
+    'panel transitions the rate colour',
+    String(streaming.tpsTransition).includes('color') &&
+      String(streaming.tpsTransitionMs)
+        .split(',')
+        .every((duration) => duration.trim() === '0.25s'),
+    `${streaming.tpsTransition} ${streaming.tpsTransitionMs}`,
+  );
+
+  await panel.set(state({ status: 'streaming', live: { ...state().live, tps: 12 } }));
+  const slowRate = await settle(panel, 'tps', '12');
+  check('panel turns the live rate coral below 20 t/s', slowRate.tpsTier === 'slow' && slowRate.tpsColor === 'rgb(248, 113, 113)', `${slowRate.tpsTier} ${slowRate.tpsColor}`);
+
+  await panel.set(state({ status: 'streaming', live: { ...state().live, tps: 68 } }));
+  const fastRate = await settle(panel, 'tps', '68');
+  check('panel turns the live rate sky blue from 50 t/s', fastRate.tpsTier === 'fast' && fastRate.tpsColor === 'rgb(59, 130, 246)', `${fastRate.tpsTier} ${fastRate.tpsColor}`);
+
+  await panel.set(state({ status: 'streaming', live: { ...state().live, tps: 120 } }));
+  const blazingRate = await settle(panel, 'tps', '120');
+  check(
+    'panel turns the live rate gold from 90 t/s and glows',
+    blazingRate.tpsTier === 'blazing' && blazingRate.tpsColor === 'rgb(255, 215, 0)' && /8px/.test(String(blazingRate.tpsShadow)),
+    `${blazingRate.tpsTier} ${blazingRate.tpsColor} ${blazingRate.tpsShadow}`,
+  );
+
+  await panel.set(state({ status: 'streaming', live: { ...state().live, tps: 240 } }));
+  const ultraRate = await settle(panel, 'tps', '240');
+  check(
+    'panel turns the live rate violet above 150 t/s and glows',
+    ultraRate.tpsTier === 'ultra' && ultraRate.tpsColor === 'rgb(168, 85, 247)' && /8px/.test(String(ultraRate.tpsShadow)),
+    `${ultraRate.tpsTier} ${ultraRate.tpsColor} ${ultraRate.tpsShadow}`,
+  );
+
+  await panel.set(state({ status: 'idle' }));
+  const settledIdle = await settle(panel, 'tps', '0');
+  check('panel lets a resting rate keep the neutral colour', settledIdle.tpsTier === null, `${settledIdle.tpsTier} ${settledIdle.tpsColor}`);
 
   // an answer that leaves the step list off must keep the bars already drawn
   const cached = state({ status: 'streaming' });
@@ -359,6 +408,23 @@ try {
   const sStreaming = await settle(status, 'tps', '36');
   check('status draws the live rate while generating', sStreaming.tps === '36', String(sStreaming.tps));
   check('status breathes the dot while generating', sStreaming.dotState === 'streaming', String(sStreaming.dotState));
+  check(
+    'status colours a 36 t/s rate emerald and keeps it semibold',
+    sStreaming.tpsTier === 'steady' && sStreaming.tpsColor === 'rgb(16, 185, 129)' && sStreaming.tpsWeight === '600',
+    `${sStreaming.tpsTier} ${sStreaming.tpsColor} ${sStreaming.tpsWeight}`,
+  );
+
+  await status.set(state({ status: 'streaming', live: { ...state().live, tps: 120 } }));
+  const sBlazing = await settle(status, 'tps', '120');
+  check(
+    'status turns the live rate gold from 90 t/s and glows',
+    sBlazing.tpsTier === 'blazing' && sBlazing.tpsColor === 'rgb(255, 215, 0)' && /8px/.test(String(sBlazing.tpsShadow)),
+    `${sBlazing.tpsTier} ${sBlazing.tpsColor} ${sBlazing.tpsShadow}`,
+  );
+
+  await status.set(state({ status: 'idle' }));
+  const sIdleRate = await settle(status, 'tps', '0');
+  check('status lets a resting rate keep the neutral colour', sIdleRate.tpsTier === null, `${sIdleRate.tpsTier} ${sIdleRate.tpsColor}`);
 
   const statusBase = state();
   await status.set({

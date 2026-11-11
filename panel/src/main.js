@@ -4,6 +4,7 @@ import { compact, seconds } from '../../shared/summary.js';
 import { compress, easeToward, nextScale } from '../../shared/chart.js';
 import { dotState, mountCells, paintCells } from '../../shared/cells.js';
 import { el } from '../../shared/dom.js';
+import { speedTier } from '../../shared/speed-color.js';
 
 const host = connectHost();
 const root = document.querySelector('#root');
@@ -27,20 +28,38 @@ let lastStepsSeq = -1;
 let targetTps = 0;
 let shownTps = 0;
 let lastRounded = -1;
+let streamingNow = false;
+let lastTier = '';
 let modelLabel = '';
 
 /**
  * Move the headline towards the measured rate instead of snapping to it. The
  * value stays the service's 3 s average; only the way it is drawn is eased, so
- * a 300 ms poll reads as a continuous needle.
+ * a 300 ms poll reads as a continuous needle. The colour follows the number on
+ * screen, not the target, so the two never disagree.
  */
 function animateSpeed(dt) {
   if (!ui) return;
   shownTps = easeToward(shownTps, targetTps, dt);
   const rounded = Math.round(shownTps);
-  if (rounded === lastRounded) return;
-  lastRounded = rounded;
-  ui.tpsValue.textContent = String(rounded);
+  if (rounded !== lastRounded) {
+    lastRounded = rounded;
+    ui.tpsValue.textContent = String(rounded);
+  }
+  paintTier();
+}
+
+/**
+ * Colour the headline by its tier. This runs on every animation frame, so it
+ * writes the attribute only when the tier changes. A quiet or idle rate carries
+ * no tier and keeps the neutral text colour: a resting 0 is not a slow stream.
+ */
+function paintTier() {
+  const tier = ui && streamingNow && lastRounded >= 0 ? speedTier(lastRounded) : '';
+  if (tier === lastTier) return;
+  lastTier = tier;
+  if (tier) ui.tpsValue.dataset.tier = tier;
+  else delete ui.tpsValue.dataset.tier;
 }
 
 /**
@@ -488,7 +507,10 @@ function render(data) {
     lastRounded = Math.round(shownTps);
     ui.tpsValue.textContent = String(lastRounded);
   }
-  ui.tpsValue.classList.toggle('quiet', data.status === 'streaming' && quiet);
+  const quietRate = data.status === 'streaming' && quiet;
+  streamingNow = data.status === 'streaming' && !quiet;
+  ui.tpsValue.classList.toggle('quiet', quietRate);
+  paintTier();
   ui.tpsSub.textContent =
     data.status === 'streaming'
       ? quiet
@@ -662,6 +684,9 @@ host.onReady((ctx) => {
   const nextSession = ctx.session?.id ?? null;
   if (nextSession === sessionId) return;
   lastRounded = -1;
+  streamingNow = false;
+  lastTier = '';
+  delete ui.tpsValue.dataset.tier;
   lastSteps = [];
   lastStepsSeq = -1;
   sessionId = nextSession;

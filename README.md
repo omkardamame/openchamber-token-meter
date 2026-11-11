@@ -25,8 +25,9 @@ https://github.com/omkardamame/openchamber-token-meter.git
 
 ## What it shows
 
-- **Live `t/s`** — the sum of the session and every streaming subagent, with the
-  last finished step underneath.
+- **Live `t/s`** — the sum of the session and every streaming subagent, coloured
+  by speed tier (coral, emerald, blue, gold, violet), with the last finished step
+  underneath.
 - **Graph** — the last 60 seconds, with the session's average and best step marked.
 - **Subagents** — each subagent still working, its own live rate, and how many
   of the tree are running.
