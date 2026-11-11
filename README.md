@@ -44,6 +44,10 @@ streamed characters × a ratio learned from finished steps.
 - A collapsed Work Status section shows only its title; OpenChamber's extension
   API has no slot for a value there, so leave it expanded.
 
+## Changelog
+
+Every release, with what changed, in [CHANGELOG.md](CHANGELOG.md).
+
 ## License
 
 MIT — see [LICENSE](LICENSE). Copyright (c) 2026 Omkar Damame.

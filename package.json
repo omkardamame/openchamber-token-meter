@@ -57,7 +57,7 @@
     "check": "bunx openchamber-guest-check",
     "test": "node scripts/collector-test.mjs",
     "secret-scan": "bash scripts/secret-scan.sh",
-    "verify": "bun run build && bun run check && bash scripts/secret-scan.sh && node scripts/collector-test.mjs && node scripts/page-test.mjs",
+    "verify": "bun run build && bun run check && bash scripts/secret-scan.sh && bash scripts/check-changelog.sh && node scripts/collector-test.mjs && node scripts/page-test.mjs",
     "dev": "bash scripts/dev.sh",
     "status-report": "bash scripts/status-report.sh",
     "next-version": "bash scripts/next-version.sh",
