@@ -113,8 +113,9 @@ function build() {
     </section>
 
     <section class="block steps">
-      <div class="block-head"><span>Per step</span><span class="block-meta"><span class="steps-avg"></span> <span class="steps-peak"></span></span></div>
+      <div class="block-head"><span>Per step</span><span class="block-meta"><span class="steps-count"></span> <span class="steps-avg"></span> <span class="steps-peak"></span></span></div>
       <div class="chart-wrap"><svg class="chart" data-chart="steps" aria-hidden="true"></svg></div>
+      <div class="steps-axis" hidden><span class="steps-start"></span><span class="steps-now"></span></div>
       <div class="legend" hidden><span><i class="swatch main"></i>session</span><span><i class="swatch sub"></i>subagent</span></div>
     </section>
 
@@ -143,8 +144,12 @@ function build() {
     subsList: app.querySelector('.subs-list'),
     legend: app.querySelector('.legend'),
     stepsChart: app.querySelector('[data-chart="steps"]'),
+    stepsCount: app.querySelector('.steps-count'),
     stepsAvg: app.querySelector('.steps-avg'),
     stepsPeak: app.querySelector('.steps-peak'),
+    stepsAxis: app.querySelector('.steps-axis'),
+    stepsStart: app.querySelector('.steps-start'),
+    stepsNow: app.querySelector('.steps-now'),
     foot: app.querySelector('.foot-text'),
   };
 }
@@ -157,11 +162,19 @@ function niceMax(value) {
   return step * pow;
 }
 
-/** Dollars, with enough digits for a single turn's spend. */
-function money(value) {
-  const n = Number(value) || 0;
-  if (!n) return '$0';
-  return n < 0.01 ? `$${n.toFixed(4)}` : `$${n.toFixed(2)}`;
+/** Four decimal places, for the cost totals. */
+function money4(value) {
+  return `$${(Number(value) || 0).toFixed(4)}`;
+}
+
+/** A 24-hour wall clock for the step chart's start and now labels. */
+function clock(ms) {
+  const at = Number(ms);
+  if (!Number.isFinite(at) || at <= 0) return '';
+  const date = new Date(at);
+  return [date.getHours(), date.getMinutes(), date.getSeconds()]
+    .map((value) => String(value).padStart(2, '0'))
+    .join(':');
 }
 
 /** A per-million rate, where the interesting digits are small. */
@@ -192,8 +205,8 @@ function paintCost(data) {
   const cost = data.cost ?? {};
   const totals = data.totals ?? {};
   const total = typeof cost.total === 'number' ? cost.total : (totals.cost ?? 0);
-  ui.costTotal.textContent = money(total);
-  ui.costTurn.textContent = typeof cost.lastTurn === 'number' ? money(cost.lastTurn) : '—';
+  ui.costTotal.textContent = money4(total);
+  ui.costTurn.textContent = typeof cost.lastTurn === 'number' ? money4(cost.lastTurn) : '—';
   ui.costModel.textContent = modelLabel || '—';
   ui.costModel.title = modelLabel || '';
   ui.costRate.textContent = typeof cost.perMillion === 'number' ? `${rateMoney(cost.perMillion)} / 1M` : '—';
@@ -275,8 +288,8 @@ function drawLive(data) {
     const near = Math.abs(y - lineY(rates.avg)) < 13;
     const labelY = near || y < pad + 10 ? y + 11 : y - 4;
     pieces.push(
-      `<line x1="0" y1="${y.toFixed(1)}" x2="${width}" y2="${y.toFixed(1)}" stroke="var(--oc-muted)" stroke-width="1" stroke-dasharray="6 3 2 3" opacity="0.55" />`,
-      `<text x="${width - 2}" y="${labelY.toFixed(1)}" text-anchor="end" fill="var(--oc-muted)" font-size="9.5" opacity="0.9">peak ${Math.round(rates.peak)} t/s</text>`,
+      `<line x1="0" y1="${y.toFixed(1)}" x2="${width}" y2="${y.toFixed(1)}" stroke="var(--oc-error)" stroke-width="1" stroke-dasharray="6 3 2 3" opacity="0.65" />`,
+      `<text x="${width - 2}" y="${labelY.toFixed(1)}" text-anchor="end" fill="var(--oc-error)" font-size="9.5" opacity="0.95">peak ${Math.round(rates.peak)} t/s</text>`,
     );
   }
 
@@ -309,15 +322,23 @@ function drawSteps(data) {
   const height = Math.max(86, svg.clientHeight || 86);
   const pad = 6;
   svg.setAttribute('viewBox', `0 0 ${width} ${height}`);
-  const steps = (Array.isArray(data.steps) ? data.steps : []).filter(
-    (step) => step.tps && step.tps > 0 && !step.aborted,
-  );
+  const all = Array.isArray(data.steps) ? data.steps : [];
+  const steps = all.filter((step) => step.tps && step.tps > 0 && !step.aborted);
+  // The count is every step record the meter keeps, not only the bars it can
+  // rate: a step too short to rate is still a step.
+  ui.stepsCount.textContent = `${all.length} step${all.length === 1 ? '' : 's'}`;
   if (steps.length === 0) {
     svg.innerHTML = `<text x="${(width / 2).toFixed(1)}" y="${(height / 2).toFixed(1)}" text-anchor="middle" fill="var(--oc-muted)" font-size="11">no finished steps yet</text>`;
     ui.stepsAvg.textContent = '';
     ui.stepsPeak.textContent = '';
+    ui.stepsAxis.hidden = true;
     return;
   }
+  ui.stepsAxis.hidden = false;
+  ui.stepsStart.textContent = data.stepsFrom ? `start ${clock(data.stepsFrom)}` : '';
+  ui.stepsStart.title = 'the first step on the chart';
+  ui.stepsNow.textContent = `now ${clock(Date.now())}`;
+  ui.stepsNow.title = 'the current time';
   // Tokens over stream time across the bars on screen: the green line and the
   // label describe the same steps the chart draws.
   const totalTokens = steps.reduce((sum, step) => sum + step.tokens, 0);
@@ -350,7 +371,7 @@ function drawSteps(data) {
   if (peak > 0) {
     const peakY = height - pad - (peak / max) * (height - pad * 2);
     pieces.push(
-      `<line x1="0" y1="${peakY.toFixed(1)}" x2="${width}" y2="${peakY.toFixed(1)}" stroke="var(--oc-muted)" stroke-width="1" stroke-dasharray="2 3" opacity="0.6" />`,
+      `<line x1="0" y1="${peakY.toFixed(1)}" x2="${width}" y2="${peakY.toFixed(1)}" stroke="var(--oc-error)" stroke-width="1" stroke-dasharray="2 3" opacity="0.7" />`,
     );
   }
   svg.innerHTML = pieces.join('');

@@ -675,6 +675,7 @@ export function snapshot(collector, now = Date.now(), tree = [collector]) {
     }
   }
   steps.sort((a, b) => a.at - b.at);
+  const shownSteps = steps.slice(-MAX_STEPS);
   const rates = ratesOf(steps);
   const prompt = totals.input + totals.cacheRead + totals.cacheWrite;
   const generated = totals.output + totals.reasoning;
@@ -784,13 +785,15 @@ export function snapshot(collector, now = Date.now(), tree = [collector]) {
     // The chart draws every step the meter keeps (400 at most), and only when
     // its sequence is stale. Nothing else travels: the wire carried eleven
     // fields for four the frame reads, which was two thirds of a 34 KB answer.
-    steps: steps.slice(-MAX_STEPS).map((step) => ({
+    steps: shownSteps.map((step) => ({
       tokens: step.tokens,
       ms: step.ms,
       tps: step.tps,
       aborted: step.aborted,
       ...(subSteps.has(step) ? { sub: true } : {}),
     })),
+    // The time of the leftmost bar, for the chart's own start label.
+    stepsFrom: shownSteps[0]?.at ?? null,
     // Worked out over every step, so the drawn average stays the session's.
     rates: { avg: Math.round(rates.avg * 10) / 10, peak: Math.round(rates.peak * 10) / 10 },
     generatedAt: now,

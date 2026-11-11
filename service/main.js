@@ -611,6 +611,7 @@ function snapshot(collector, now = Date.now(), tree = [collector]) {
     }
   }
   steps.sort((a, b) => a.at - b.at);
+  const shownSteps = steps.slice(-MAX_STEPS);
   const rates = ratesOf(steps);
   const prompt = totals.input + totals.cacheRead + totals.cacheWrite;
   const generated = totals.output + totals.reasoning;
@@ -696,13 +697,14 @@ function snapshot(collector, now = Date.now(), tree = [collector]) {
       v: collector.series.slice(-SERIES_POINTS).map((point) => point.v)
     },
     stepsSeq: members.reduce((sum, member) => sum + member.stepsSeq, 0),
-    steps: steps.slice(-MAX_STEPS).map((step) => ({
+    steps: shownSteps.map((step) => ({
       tokens: step.tokens,
       ms: step.ms,
       tps: step.tps,
       aborted: step.aborted,
       ...subSteps.has(step) ? { sub: true } : {}
     })),
+    stepsFrom: shownSteps[0]?.at ?? null,
     rates: { avg: Math.round(rates.avg * 10) / 10, peak: Math.round(rates.peak * 10) / 10 },
     generatedAt: now
   };

@@ -332,14 +332,21 @@
         border-top: 1px solid var(--oc-border);
         padding-top: 8px;
       }
-      .cell-emphasis .cell-value {
-        font-size: 20px;
-      }
       .steps-avg {
         color: var(--oc-success);
       }
       .steps-peak {
+        color: var(--oc-error);
+      }
+      .steps-axis {
+        display: flex;
+        justify-content: space-between;
+        font-size: 11px;
         color: var(--oc-muted);
+        font-variant-numeric: tabular-nums;
+      }
+      .steps-axis[hidden] {
+        display: none;
       }
       .cost-grid .cost-model {
         overflow: hidden;

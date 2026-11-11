@@ -16,7 +16,6 @@ export const CELLS = [
     label: 'Consumed',
     hint: 'every token the models processed in this session and its subagents: prompt (fresh + cached) plus generated',
     top: true,
-    emphasis: true,
   },
 ];
 
@@ -37,7 +36,7 @@ export function mountCells(grid) {
   const nodes = new Map();
   grid.textContent = '';
   for (const cell of CELLS) {
-    const wrap = el('div', ['cell', cell.top ? 'cell-top' : '', cell.emphasis ? 'cell-emphasis' : ''].filter(Boolean).join(' '));
+    const wrap = el('div', ['cell', cell.top ? 'cell-top' : ''].filter(Boolean).join(' '));
     const label = el('span', 'cell-label', cell.label);
     const value = el('span', 'cell-value', '0');
     const share = el('i', 'cell-share', '');

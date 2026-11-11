@@ -54,6 +54,7 @@ const state = (over = {}) =>
     subagents: { count: 0, running: 0, streaming: 0, tool: 0, active: [] },
     series: { t0: Date.now() - 5000, step: 250, v: [30, 34, 36] },
     stepsSeq: 3,
+    stepsFrom: Date.now() - 120_000,
     steps: [
       { tokens: 1100, ms: 7800, tps: 141, aborted: false },
       { tokens: 900, ms: 5000, tps: 180, aborted: false },
@@ -90,7 +91,7 @@ const harness = `<!doctype html><meta charset="utf-8"><title>page test</title>
           connection: { connected: true, account: null },
           settings: {},
           locale: 'en',
-          theme: { mode: 'dark', tokens: { success: '#4ade80', primary: '#e07a3f', info: '#3b82f6' } },
+          theme: { mode: 'dark', tokens: { success: '#4ade80', primary: '#e07a3f', info: '#3b82f6', error: '#ef4444' } },
           features: {},
         },
       }, '*');
@@ -131,6 +132,12 @@ const harness = `<!doctype html><meta charset="utf-8"><title>page test</title>
         const cell = [...doc.querySelectorAll('.totals-grid .cell')].find((node) => node.querySelector('.cell-label')?.textContent === 'In');
         return cell ? getComputedStyle(cell.querySelector('.cell-value')).fontSize : null;
       })(),
+      consumedFont: (() => {
+        const cell = [...doc.querySelectorAll('.totals-grid .cell')].find((node) => node.querySelector('.cell-label')?.textContent === 'Consumed');
+        return cell ? getComputedStyle(cell.querySelector('.cell-value')).fontSize : null;
+      })(),
+      stepsPeakColor: doc.querySelector('.steps-peak') ? getComputedStyle(doc.querySelector('.steps-peak')).color : null,
+      stepsAxisText: doc.querySelector('.steps-axis') ? doc.querySelector('.steps-axis').innerText.replace(/\\s+/g, ' ').trim() : null,
       labels: [...doc.querySelectorAll('svg text')].map((n) => n.textContent),
     };
   };
@@ -207,11 +214,19 @@ try {
   check('panel sits on a dim dot when idle', idle.dotState === 'idle', String(idle.dotState));
   check('panel hides the subagent list and legend when there are none', idle.subsHidden === true && idle.legendHidden === true, `${idle.subsHidden}/${idle.legendHidden}`);
   check('panel shows the per-step average and peak together', /avg 156 t\/s\s+peak 180 t\/s/.test(idle.text), idle.text.slice(0, 120));
+  check('panel counts every step it keeps', /2 steps/.test(idle.text), idle.text.slice(0, 120));
   check('panel colours the per-step average green', idle.stepsAvgColor === 'rgb(74, 222, 128)', String(idle.stepsAvgColor));
+  check('panel colours the peak red', idle.stepsPeakColor === 'rgb(239, 68, 68)', String(idle.stepsPeakColor));
+  check(
+    'panel shows the steps start and current time',
+    /start \d\d:\d\d:\d\d/.test(idle.stepsAxisText ?? '') && /now \d\d:\d\d:\d\d/.test(idle.stepsAxisText ?? ''),
+    String(idle.stepsAxisText),
+  );
+  check('panel sets Consumed to the same size as the other stats', idle.consumedFont === idle.inFont, `${idle.consumedFont}/${idle.inFont}`);
   check(
     'panel shows total cost, last-turn cost, model and rate',
-    /Total \$0\.31/i.test(idle.text) &&
-      /Last turn \$0\.08/i.test(idle.text) &&
+    /Total \$0\.3100/i.test(idle.text) &&
+      /Last turn \$0\.0800/i.test(idle.text) &&
       /deepseek-v4\.1-flash/.test(idle.text) &&
       /\$0\.05 \/ 1M/.test(idle.text),
     idle.text.slice(-160),
@@ -291,6 +306,7 @@ try {
   check('status draws all eight cells', sIdle.cells.join(',') === 'In,Out,Think,Total out,Cache,Cache hit,TTFT,Consumed', sIdle.cells.join(','));
   check('status draws the consumed total', sIdle.values.some((v) => v.startsWith('49.2M')), sIdle.values.join(' | '));
   check('status shows the last measured step', /last 33 t\/s/.test(sIdle.text), sIdle.text.slice(0, 60));
+  check('status sets Consumed to the same size as the other stats', sIdle.consumedFont === sIdle.inFont, `${sIdle.consumedFont}/${sIdle.inFont}`);
 
   await status.set(state({ status: 'streaming' }));
   const sStreaming = await status.read();
