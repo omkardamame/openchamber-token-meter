@@ -116,6 +116,16 @@ const harness = `<!doctype html><meta charset="utf-8"><title>page test</title>
       legendHidden: doc.querySelector('.legend') ? doc.querySelector('.legend').hidden : null,
       legendText: doc.querySelector('.legend') ? doc.querySelector('.legend').innerText.replace(/\\s+/g, ' ').trim() : null,
       stepsAvgColor: doc.querySelector('.steps-avg') ? getComputedStyle(doc.querySelector('.steps-avg')).color : null,
+      costModelFont: doc.querySelector('.cost-model') ? getComputedStyle(doc.querySelector('.cost-model')).fontSize : null,
+      costTotalFont: doc.querySelector('.cost-total') ? getComputedStyle(doc.querySelector('.cost-total')).fontSize : null,
+      ttftFont: (() => {
+        const cell = [...doc.querySelectorAll('.totals-grid .cell')].find((node) => node.querySelector('.cell-label')?.textContent === 'TTFT');
+        return cell ? getComputedStyle(cell.querySelector('.cell-value')).fontSize : null;
+      })(),
+      inFont: (() => {
+        const cell = [...doc.querySelectorAll('.totals-grid .cell')].find((node) => node.querySelector('.cell-label')?.textContent === 'In');
+        return cell ? getComputedStyle(cell.querySelector('.cell-value')).fontSize : null;
+      })(),
       labels: [...doc.querySelectorAll('svg text')].map((n) => n.textContent),
     };
   };
@@ -199,6 +209,16 @@ try {
       /Last turn \$0\.08/i.test(idle.text) &&
       /deepseek-v4\.1-flash/.test(idle.text) &&
       /\$0\.05 \/ 1M/.test(idle.text),
+    idle.text.slice(-160),
+  );
+  check(
+    'panel matches the model and TTFT fonts to the other stats',
+    idle.costModelFont === idle.costTotalFont && idle.ttftFont === idle.inFont,
+    `${idle.costModelFont}/${idle.costTotalFont} · ${idle.ttftFont}/${idle.inFont}`,
+  );
+  check(
+    'panel names the actual input, output and cache rates',
+    /token rates · in 0\.9% · out 52\.7% · cache 99\.07%/.test(idle.text),
     idle.text.slice(-160),
   );
 

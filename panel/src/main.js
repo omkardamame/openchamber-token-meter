@@ -107,8 +107,9 @@ function build() {
         <div class="cell"><span class="cell-label">Total</span><span class="cell-value cost-total">—</span></div>
         <div class="cell"><span class="cell-label">Last turn</span><span class="cell-value cost-turn">—</span></div>
         <div class="cell"><span class="cell-label">Model</span><span class="cell-value cost-model">—</span></div>
-        <div class="cell"><span class="cell-label">Rate</span><span class="cell-value cost-rate">—</span></div>
+        <div class="cell"><span class="cell-label">Cost rate</span><span class="cell-value cost-rate">—</span></div>
       </div>
+      <div class="cost-rates"></div>
     </section>
 
     <section class="block steps">
@@ -136,6 +137,7 @@ function build() {
     costTurn: app.querySelector('.cost-turn'),
     costModel: app.querySelector('.cost-model'),
     costRate: app.querySelector('.cost-rate'),
+    costRates: app.querySelector('.cost-rates'),
     subsBlock: app.querySelector('.subagents'),
     subsMeta: app.querySelector('.subs-meta'),
     subsList: app.querySelector('.subs-list'),
@@ -178,13 +180,25 @@ function rateMoney(value) {
  */
 function paintCost(data) {
   const cost = data.cost ?? {};
-  const total = typeof cost.total === 'number' ? cost.total : (data.totals?.cost ?? 0);
+  const totals = data.totals ?? {};
+  const total = typeof cost.total === 'number' ? cost.total : (totals.cost ?? 0);
   ui.costTotal.textContent = money(total);
   ui.costTurn.textContent = typeof cost.lastTurn === 'number' ? money(cost.lastTurn) : '—';
   ui.costModel.textContent = modelLabel || '—';
   ui.costModel.title = modelLabel || '';
   ui.costRate.textContent = typeof cost.perMillion === 'number' ? `${rateMoney(cost.perMillion)} / 1M` : '—';
   ui.costRate.title = 'effective: this session’s cost divided by every token it processed';
+  // The three shares the grid already carries, named as rates: input is the
+  // part sent fresh, output is the answer part of the generated tokens, and
+  // cache is the hit rate. True list prices are not in the extension's reads.
+  const prompt = totals.prompt ?? 0;
+  const generated = totals.generated ?? 0;
+  const rates = [];
+  if (prompt > 0) rates.push(`in ${percent((totals.input ?? 0) / prompt, 1)}`);
+  if (generated > 0) rates.push(`out ${percent((totals.output ?? 0) / generated, 1)}`);
+  if (prompt > 0) rates.push(`cache ${percent((totals.cacheRead ?? 0) / prompt, 2)}`);
+  ui.costRates.textContent = rates.length ? `token rates · ${rates.join(' · ')}` : 'token rates · —';
+  ui.costRates.title = 'in: share of the prompt sent fresh; out: share of generated tokens that are output, not thinking; cache: share of the prompt served from cache';
 }
 
 function drawLive(data) {
