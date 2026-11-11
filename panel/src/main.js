@@ -1,7 +1,7 @@
 import { HostRequestError, connectHost } from '@openchamber/sdk';
 import { applyHostReady, mountBanner, mountEmpty } from '@openchamber/sdk/ui';
 import { compact, seconds } from '../../shared/summary.js';
-import { compress, easeToward, nextScale } from '../../shared/chart.js';
+import { easeToward, nextScale } from '../../shared/chart.js';
 import { dotState, mountCells, paintCells } from '../../shared/cells.js';
 import { el } from '../../shared/dom.js';
 import { speedTier } from '../../shared/speed-color.js';
@@ -176,14 +176,6 @@ function build() {
   };
 }
 
-function niceMax(value) {
-  if (!Number.isFinite(value) || value <= 0) return 1;
-  const pow = Math.pow(10, Math.floor(Math.log10(value)));
-  const scaled = value / pow;
-  const step = scaled <= 1 ? 1 : scaled <= 2 ? 2 : scaled <= 5 ? 5 : 10;
-  return step * pow;
-}
-
 /** Four decimal places, for the cost totals. */
 function money4(value) {
   return `$${(Number(value) || 0).toFixed(4)}`;
@@ -266,24 +258,25 @@ function drawLive(data) {
   // worked out by the service over every step it knows.
   const rates = data.rates ?? { avg: 0, peak: 0 };
 
-  // The scale follows what the session usually does, not one spike: a single
-  // 1,000 t/s burst next to a 10 t/s stream would flatten the stream to a line.
-  // The 92nd percentile is the ceiling, the spike clips at the top, and the
-  // peak label still names the true maximum.
-  const ranked = visible.map((point) => point.v).sort((a, b) => a - b);
-  const typical = ranked.length ? ranked[Math.min(ranked.length - 1, Math.floor(ranked.length * 0.92))] : 0;
-  liveScale = nextScale(liveScale, [typical * 1.15, rates.avg * 1.1, 8]);
-  const max = niceMax(Math.max(liveScale, 8));
-
-  // Draw a smoothed curve: the samples are a 250 ms average already, and the
-  // providers arrive in bursts, so a short exponential pass keeps the shape
-  // without inventing points the service did not measure.
+  // Draw a smoothed curve first: the samples are a 250 ms average already, and
+  // the providers arrive in bursts, so a short exponential pass keeps the shape
+  // without inventing points the service did not measure. The scale follows the
+  // smoothed peak, so the highest point the chart draws touches the top and the
+  // rail spends its height on the curve instead of reserving headroom nobody
+  // uses. Growing is immediate; a peak leaving the window lowers the scale
+  // slowly, which only ever adds temporary headroom, never clips.
   const smooth = [];
   for (const point of visible) {
     const previous = smooth[smooth.length - 1];
     const value = previous === undefined ? point.v : previous + (point.v - previous) * 0.3;
     smooth.push(value);
   }
+  const liveTop = smooth.reduce((best, value) => Math.max(best, value), 0);
+  liveScale = nextScale(liveScale, [liveTop, 8]);
+  const max = Math.max(1, liveScale);
+  // References above the visible peak sit on the top edge rather than leaving
+  // the plot; the drawn curve itself can never exceed `max`.
+  const share = (value) => Math.min(1, Math.max(0, value) / max);
 
   const pieces = [];
   pieces.push(
@@ -299,20 +292,23 @@ function drawLive(data) {
     `<line x1="0" y1="${midY.toFixed(1)}" x2="${width}" y2="${midY.toFixed(1)}" stroke="var(--oc-border)" stroke-width="1" stroke-dasharray="2 4" opacity="0.8" />`,
   );
 
-  const lineY = (value) => height - pad - compress(value, max) * (height - pad * 2);
+  const lineY = (value) => height - pad - share(value) * (height - pad * 2);
+  let avgLabelY = null;
   if (rates.avg > 0) {
     const y = lineY(rates.avg);
-    const labelY = y < pad + 10 ? y + 11 : y - 4;
+    avgLabelY = y < pad + 10 ? y + 11 : y - 4;
     pieces.push(
       `<line x1="0" y1="${y.toFixed(1)}" x2="${width}" y2="${y.toFixed(1)}" stroke="var(--oc-success)" stroke-width="1" stroke-dasharray="3 3" opacity="0.7" />`,
-      `<text x="${width - 2}" y="${labelY.toFixed(1)}" text-anchor="end" fill="var(--oc-success)" font-size="9.5" opacity="0.85">avg ${Math.round(rates.avg)} t/s</text>`,
+      `<text x="${width - 2}" y="${avgLabelY.toFixed(1)}" text-anchor="end" fill="var(--oc-success)" font-size="9.5" opacity="0.85">avg ${Math.round(rates.avg)} t/s</text>`,
     );
   }
   if (rates.peak > 0) {
     const y = lineY(rates.peak);
-    // Below its line when the average is close above it, so the two labels never overlap.
-    const near = Math.abs(y - lineY(rates.avg)) < 13;
-    const labelY = near || y < pad + 10 ? y + 11 : y - 4;
+    // Keep the labels apart even when both reference lines sit on the top edge
+    // because the visible peak is below them.
+    let labelY = y < pad + 10 ? y + 11 : y - 4;
+    if (avgLabelY !== null && Math.abs(labelY - avgLabelY) < 12) labelY = avgLabelY + 13;
+    if (labelY > height - 2) labelY = (avgLabelY ?? labelY) - 13;
     pieces.push(
       `<line x1="0" y1="${y.toFixed(1)}" x2="${width}" y2="${y.toFixed(1)}" stroke="var(--oc-error)" stroke-width="1" stroke-dasharray="6 3 2 3" opacity="0.65" />`,
       `<text x="${width - 2}" y="${labelY.toFixed(1)}" text-anchor="end" fill="var(--oc-error)" font-size="9.5" opacity="0.95">peak ${Math.round(rates.peak)} t/s</text>`,
@@ -322,7 +318,7 @@ function drawLive(data) {
   if (smooth.length > 1) {
     const coords = smooth.map((value, index) => {
       const x = ((visible[index].t - from) / 60_000) * width;
-      const y = height - pad - compress(value, max) * (height - pad * 2);
+      const y = height - pad - share(value) * (height - pad * 2);
       return `${x.toFixed(1)},${y.toFixed(1)}`;
     });
     const line = coords.join(' ');
@@ -378,7 +374,10 @@ function drawSteps(data) {
   const totalMs = steps.reduce((sum, step) => sum + step.ms, 0);
   const average = totalMs > 0 ? (totalTokens / totalMs) * 1000 : 0;
   const peak = steps.reduce((best, step) => Math.max(best, step.tps), 0);
-  const max = niceMax(peak);
+  // The tallest step is the top of the plot: the chart's job is to show the
+  // shape of the session against its own best, and any rounding above the peak
+  // only left an empty band above the bars.
+  const max = peak > 0 ? peak : 1;
   const slot = width / steps.length;
   // With every step on the chart a long session gets one-pixel bars; a gap
   // under half a pixel would just erase them.

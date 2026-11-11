@@ -155,6 +155,15 @@ const harness = `<!doctype html><meta charset="utf-8"><title>page test</title>
       stepsAvgSep: doc.querySelector('.steps-avg') ? getComputedStyle(doc.querySelector('.steps-avg'), '::before').content : null,
       stepsPeakSep: doc.querySelector('.steps-peak') ? getComputedStyle(doc.querySelector('.steps-peak'), '::before').content : null,
       stepsAxisText: doc.querySelector('.steps-axis') ? doc.querySelector('.steps-axis').innerText.replace(/\\s+/g, ' ').trim() : null,
+      liveTopY: (() => {
+        const line = doc.querySelector('[data-chart="live"] polyline');
+        if (!line) return null;
+        return Math.min(...line.getAttribute('points').trim().split(/\\s+/).map((pair) => Number(pair.split(',')[1])));
+      })(),
+      stepsPeakTop: (() => {
+        const rects = [...doc.querySelectorAll('[data-chart="steps"] rect')];
+        return rects.length ? Math.min(...rects.map((rect) => Number(rect.getAttribute('y')))) : null;
+      })(),
       labels: [...doc.querySelectorAll('svg text')].map((n) => n.textContent),
     };
   };
@@ -240,10 +249,12 @@ try {
   check('panel draws the consumed total', idle.values.some((v) => v.startsWith('49.2M')), idle.values.join(' | '));
   check('panel draws the measured ttft', idle.values.some((v) => v.includes('6.5 s')), idle.values.join(' | '));
   check('panel labels the average and the peak', idle.labels.some((l) => l.startsWith('avg 79')) && idle.labels.some((l) => l.startsWith('peak 334')), idle.labels.join(' | '));
+  check('panel makes the live curve use the full chart height', idle.liveTopY === 8, String(idle.liveTopY));
+  check('panel pins the tallest step to the top of its chart', idle.stepsPeakTop === 6, String(idle.stepsPeakTop));
   check('panel shows the last measured step', /last 33 t\/s/.test(idle.text), idle.text.slice(0, 60));
   check(
     'panel colours the last measured step by its tier',
-    idle.lastRateTier === 'steady' && idle.lastRateColor === 'rgb(16, 185, 129)' && idle.lastRateShadow === 'none',
+    idle.lastRateTier === 'steady' && idle.lastRateColor === 'rgb(118, 172, 79)' && idle.lastRateShadow === 'none',
     `${idle.lastRateTier} ${idle.lastRateColor} ${idle.lastRateShadow}`,
   );
   // The last line follows the finished step's own rate, not the live headline.
@@ -251,10 +262,10 @@ try {
   await panel.set({ ...hotBase, live: { ...hotBase.live, lastStep: { ...hotBase.live.lastStep, tps: 120 } } });
   const hotLast = await panel.read();
   check(
-    'panel glows a fast last step gold',
+    'panel glows a fast last step golden',
     hotLast.lastRateTier === 'blazing' &&
-      hotLast.lastRateColor === 'rgb(255, 215, 0)' &&
-      /^rgba\(255, 215, 0, 0\.45\) 0px 0px 8px$/.test(String(hotLast.lastRateShadow)),
+      hotLast.lastRateColor === 'rgb(212, 175, 55)' &&
+      /^rgba\(212, 175, 55, 0\.45\) 0px 0px 8px$/.test(String(hotLast.lastRateShadow)),
     `${hotLast.lastRateTier} ${hotLast.lastRateColor} ${hotLast.lastRateShadow}`,
   );
   check('panel sits on a dim dot when idle', idle.dotState === 'idle', String(idle.dotState));
@@ -310,9 +321,9 @@ try {
   check('panel draws the live rate while generating', streaming.tps === '36', String(streaming.tps));
   check('panel breathes the dot while generating', streaming.dotState === 'streaming', String(streaming.dotState));
   check(
-    'panel colours a 36 t/s rate emerald and keeps it semibold',
+    'panel colours a 36 t/s rate green and keeps it semibold',
     streaming.tpsTier === 'steady' &&
-      streaming.tpsColor === 'rgb(16, 185, 129)' &&
+      streaming.tpsColor === 'rgb(118, 172, 79)' &&
       streaming.tpsWeight === '600' &&
       streaming.tpsShadow === 'none',
     `${streaming.tpsTier} ${streaming.tpsColor} ${streaming.tpsWeight} ${streaming.tpsShadow}`,
@@ -329,8 +340,8 @@ try {
   await panel.set(state({ status: 'streaming', live: { ...state().live, tps: 12 } }));
   const slowRate = await settle(panel, 'tps', '12');
   check(
-    'panel turns the live rate coral below 20 t/s without a glow',
-    slowRate.tpsTier === 'slow' && slowRate.tpsColor === 'rgb(248, 113, 113)' && slowRate.tpsShadow === 'none',
+    'panel turns the live rate matte red below 20 t/s without a glow',
+    slowRate.tpsTier === 'slow' && slowRate.tpsColor === 'rgb(201, 106, 106)' && slowRate.tpsShadow === 'none',
     `${slowRate.tpsTier} ${slowRate.tpsColor} ${slowRate.tpsShadow}`,
   );
 
@@ -345,10 +356,10 @@ try {
   await panel.set(state({ status: 'streaming', live: { ...state().live, tps: 120 } }));
   const blazingRate = await settle(panel, 'tps', '120');
   check(
-    'panel turns the live rate gold from 90 t/s and glows',
+    'panel turns the live rate golden from 90 t/s and glows',
     blazingRate.tpsTier === 'blazing' &&
-      blazingRate.tpsColor === 'rgb(255, 215, 0)' &&
-      /^rgba\(255, 215, 0, 0\.45\) 0px 0px 8px$/.test(String(blazingRate.tpsShadow)),
+      blazingRate.tpsColor === 'rgb(212, 175, 55)' &&
+      /^rgba\(212, 175, 55, 0\.45\) 0px 0px 8px$/.test(String(blazingRate.tpsShadow)),
     `${blazingRate.tpsTier} ${blazingRate.tpsColor} ${blazingRate.tpsShadow}`,
   );
 
@@ -443,17 +454,17 @@ try {
   check('status shows the last measured step', /last 33 t\/s/.test(sIdle.text), sIdle.text.slice(0, 60));
   check(
     'status colours the last measured step by its tier',
-    sIdle.lastRateTier === 'steady' && sIdle.lastRateColor === 'rgb(16, 185, 129)' && sIdle.lastRateShadow === 'none',
+    sIdle.lastRateTier === 'steady' && sIdle.lastRateColor === 'rgb(118, 172, 79)' && sIdle.lastRateShadow === 'none',
     `${sIdle.lastRateTier} ${sIdle.lastRateColor} ${sIdle.lastRateShadow}`,
   );
   const statusHotBase = state();
   await status.set({ ...statusHotBase, live: { ...statusHotBase.live, lastStep: { ...statusHotBase.live.lastStep, tps: 120 } } });
   const sHotLast = await status.read();
   check(
-    'status glows a fast last step gold',
+    'status glows a fast last step golden',
     sHotLast.lastRateTier === 'blazing' &&
-      sHotLast.lastRateColor === 'rgb(255, 215, 0)' &&
-      /^rgba\(255, 215, 0, 0\.45\) 0px 0px 8px$/.test(String(sHotLast.lastRateShadow)),
+      sHotLast.lastRateColor === 'rgb(212, 175, 55)' &&
+      /^rgba\(212, 175, 55, 0\.45\) 0px 0px 8px$/.test(String(sHotLast.lastRateShadow)),
     `${sHotLast.lastRateTier} ${sHotLast.lastRateColor} ${sHotLast.lastRateShadow}`,
   );
   check('status sets Consumed to the same size as the other stats', sIdle.consumedFont === sIdle.inFont, `${sIdle.consumedFont}/${sIdle.inFont}`);
@@ -463,9 +474,9 @@ try {
   check('status draws the live rate while generating', sStreaming.tps === '36', String(sStreaming.tps));
   check('status breathes the dot while generating', sStreaming.dotState === 'streaming', String(sStreaming.dotState));
   check(
-    'status colours a 36 t/s rate emerald and keeps it semibold',
+    'status colours a 36 t/s rate green and keeps it semibold',
     sStreaming.tpsTier === 'steady' &&
-      sStreaming.tpsColor === 'rgb(16, 185, 129)' &&
+      sStreaming.tpsColor === 'rgb(118, 172, 79)' &&
       sStreaming.tpsWeight === '600' &&
       sStreaming.tpsShadow === 'none',
     `${sStreaming.tpsTier} ${sStreaming.tpsColor} ${sStreaming.tpsWeight} ${sStreaming.tpsShadow}`,
@@ -474,10 +485,10 @@ try {
   await status.set(state({ status: 'streaming', live: { ...state().live, tps: 120 } }));
   const sBlazing = await settle(status, 'tps', '120');
   check(
-    'status turns the live rate gold from 90 t/s and glows',
+    'status turns the live rate golden from 90 t/s and glows',
     sBlazing.tpsTier === 'blazing' &&
-      sBlazing.tpsColor === 'rgb(255, 215, 0)' &&
-      /^rgba\(255, 215, 0, 0\.45\) 0px 0px 8px$/.test(String(sBlazing.tpsShadow)),
+      sBlazing.tpsColor === 'rgb(212, 175, 55)' &&
+      /^rgba\(212, 175, 55, 0\.45\) 0px 0px 8px$/.test(String(sBlazing.tpsShadow)),
     `${sBlazing.tpsTier} ${sBlazing.tpsColor} ${sBlazing.tpsShadow}`,
   );
 

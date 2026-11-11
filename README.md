@@ -26,7 +26,7 @@ https://github.com/omkardamame/openchamber-token-meter.git
 ## What it shows
 
 - **Live `t/s`** — the sum of the session and every streaming subagent, coloured
-  by speed tier (coral, emerald, blue, gold, violet); the last measured step sits
+  by speed tier (matte red, green, blue, golden, violet); the last measured step sits
   underneath in the same tier colours.
 - **Graph** — the last 60 seconds, with the session's average and best step marked.
 - **Subagents** — each subagent still working, its own live rate, and how many
