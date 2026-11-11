@@ -9,7 +9,7 @@ const host = connectHost();
 const root = document.querySelector('#root');
 if (!root) throw new Error('Missing #root');
 
-const POLL_MS = 300;
+const POLL_MS = 250;
 
 let sessionId = null;
 let timer = null;
@@ -207,6 +207,10 @@ function paintCost(data) {
   const total = typeof cost.total === 'number' ? cost.total : (totals.cost ?? 0);
   ui.costTotal.textContent = money4(total);
   ui.costTurn.textContent = typeof cost.lastTurn === 'number' ? money4(cost.lastTurn) : '—';
+  ui.costTurn.title =
+    (data.subagents?.loading ?? 0) > 0
+      ? 'subagent histories are still loading; the last turn can grow'
+      : '';
   ui.costModel.textContent = modelLabel || cost.rates?.model || '—';
   ui.costModel.title = modelLabel || cost.rates?.model || '';
   ui.costRate.textContent = typeof cost.perMillion === 'number' ? `${rateMoney(cost.perMillion)} / 1M` : '—';
@@ -328,7 +332,12 @@ function drawSteps(data) {
   // bars the meter can draw or rate.
   const known = data.stepsKnown ?? all.length;
   ui.stepsCount.textContent = `${known} step${known === 1 ? '' : 's'}`;
-  ui.stepsCount.title = known > all.length ? `the last ${all.length} steps are drawn` : 'every step the meter keeps';
+  ui.stepsCount.title =
+    (data.subagents?.loading ?? 0) > 0
+      ? 'subagent histories are still loading; the count will grow'
+      : known > all.length
+        ? `the last ${all.length} steps are drawn`
+        : 'every step the meter keeps';
   if (steps.length === 0) {
     svg.innerHTML = `<text x="${(width / 2).toFixed(1)}" y="${(height / 2).toFixed(1)}" text-anchor="middle" fill="var(--oc-muted)" font-size="11">no finished steps yet</text>`;
     ui.stepsAvg.textContent = '';
@@ -463,9 +472,10 @@ function render(data) {
   }
 
   const quiet = (data.live?.charsPerSecond ?? 0) < 5;
-  const subagents = data.subagents ?? { count: 0, running: 0, streaming: 0, tool: 0, active: [] };
+  const subagents = data.subagents ?? { count: 0, running: 0, loading: 0, streaming: 0, tool: 0, active: [] };
   const activeSubs = Array.isArray(subagents.active) ? subagents.active : [];
   const runningSubs = subagents.running ?? activeSubs.length;
+  const loadingSubs = subagents.loading ?? 0;
   const subLabel = subagents.count > 0 ? `${subagents.count} subagent${subagents.count === 1 ? '' : 's'}` : '';
   ui.dot.dataset.state = dotState(data.status);
   ui.statusLabel.textContent = STATUS[data.status] ?? STATUS.idle;
@@ -518,13 +528,15 @@ function render(data) {
   ui.source.textContent = `${totals.source === 'usage' ? 'live' : 'from history'}${subLabel ? ` · ${subLabel}` : ''}`;
   ui.foot.textContent = data.error
     ? `cannot read history: ${data.error}`
-    : data.stream?.state === 'open'
-      ? 'live from OpenCode events'
-      : data.stream?.state === 'retrying'
-        ? 'events reconnecting'
-        : data.stream?.state === 'off'
-          ? 'totals update each turn · live rate unavailable'
-          : 'connecting to OpenCode events';
+    : loadingSubs > 0
+      ? `reading ${loadingSubs} subagent${loadingSubs === 1 ? '' : 's'} history`
+      : data.stream?.state === 'open'
+        ? 'live from OpenCode events'
+        : data.stream?.state === 'retrying'
+          ? 'events reconnecting'
+          : data.stream?.state === 'off'
+            ? 'totals update each turn · live rate unavailable'
+            : 'connecting to OpenCode events';
 }
 
 function handleError(error) {

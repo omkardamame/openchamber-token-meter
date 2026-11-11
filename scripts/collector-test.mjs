@@ -108,7 +108,7 @@ check(
 );
 check(
   'the wire carries only the fields the frame reads',
-  snap.steps.length <= 400 &&
+  snap.steps.length <= 1000 &&
     snap.steps.every((step) => {
       const keys = Object.keys(step).sort().join(',');
       return keys === 'aborted,ms,tokens,tps' || keys === 'aborted,ms,tokens,tps,sub';
@@ -117,7 +117,7 @@ check(
 );
 check(
   'the wire carries every step the chart draws',
-  snap.steps.length === Math.min(collector.steps.length, 400),
+  snap.steps.length === Math.min(collector.steps.length, 1000),
   `${snap.steps.length} of ${collector.steps.length} kept steps`,
 );
 check(
@@ -195,7 +195,7 @@ check(
 check('a parent totals its subagents cost', Math.abs(treeSnap.totals.cost - 0.03) < 1e-9, `$${treeSnap.totals.cost}`);
 check(
   'a parent names how many subagents it has',
-  treeSnap.subagents.count === 1 && treeSnap.subagents.streaming === 1,
+  treeSnap.subagents.count === 1 && treeSnap.subagents.streaming === 1 && treeSnap.subagents.loading === 1,
   JSON.stringify(treeSnap.subagents),
 );
 check(

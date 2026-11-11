@@ -51,7 +51,7 @@ const state = (over = {}) =>
       perMillion: 0.0504,
       rates: { model: 'deepseek-v4.1-flash', input: 0.15, output: 0.6, cacheRead: 0.003 },
     },
-    subagents: { count: 0, running: 0, streaming: 0, tool: 0, active: [] },
+    subagents: { count: 0, running: 0, loading: 0, streaming: 0, tool: 0, active: [] },
     series: { t0: Date.now() - 5000, step: 250, v: [30, 34, 36] },
     stepsSeq: 3,
     stepsFrom: Date.now() - 120_000,
@@ -263,6 +263,10 @@ try {
   const totalCount = await panel.read();
   check('panel counts steps older than the drawn list', /5 steps/.test(totalCount.text), totalCount.text.slice(0, 120));
 
+  await panel.set({ ...state(), subagents: { count: 5, running: 0, loading: 2, streaming: 0, tool: 0, active: [] } });
+  const loading = await panel.read();
+  check('panel says when subagent histories are still loading', /reading 2 subagents history/.test(loading.text), loading.text.slice(-100));
+
   await panel.set(state({ status: 'streaming' }));
   const streaming = await settle(panel, 'tps', '36');
   check('panel draws the live rate while generating', streaming.tps === '36', String(streaming.tps));
@@ -290,6 +294,7 @@ try {
       subagents: {
         count: 2,
         running: 1,
+        loading: 0,
         streaming: 1,
         tool: 0,
         active: [{ id: 'ses_page_child', title: 'SA-2 store+route coupon validation', status: 'streaming', tps: 37 }],

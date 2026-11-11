@@ -2,9 +2,9 @@
 // No DOM, no host: the server in ./main.js hands it an `apiGet` function.
 import { ratesOf } from '../../shared/chart.js';
 
-const HISTORY_PAGES = 8;
+const HISTORY_PAGES = 20;
 const HISTORY_PAGE_SIZE = 100;
-const MAX_STEPS = 400;
+const MAX_STEPS = 1000;
 const SERIES_POINTS = 240;
 const SERIES_INTERVAL_MS = 250;
 const LIVE_WINDOW_MS = 3_000;
@@ -750,6 +750,9 @@ export function snapshot(collector, now = Date.now(), tree = [collector]) {
   const subagents = {
     count: members.length - 1,
     running: active.length,
+    // A child seeded from a record has totals but not its step history yet;
+    // the count, last turn and chart are still partial until it loads.
+    loading: members.filter((member) => member !== collector && member.historyAt === 0).length,
     streaming: members.filter((member) => member !== collector && member.status === 'streaming').length,
     tool: members.filter((member) => member !== collector && member.status === 'tool').length,
     active: active.slice(0, 8).map((entry) => entry.item),

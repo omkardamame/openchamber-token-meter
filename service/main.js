@@ -19,9 +19,9 @@ function ratesOf(steps) {
 }
 
 // service/src/collector.js
-var HISTORY_PAGES = 8;
+var HISTORY_PAGES = 20;
 var HISTORY_PAGE_SIZE = 100;
-var MAX_STEPS = 400;
+var MAX_STEPS = 1000;
 var SERIES_POINTS = 240;
 var SERIES_INTERVAL_MS = 250;
 var LIVE_WINDOW_MS = 3000;
@@ -666,6 +666,7 @@ function snapshot(collector, now = Date.now(), tree = [collector]) {
   const subagents = {
     count: members.length - 1,
     running: active.length,
+    loading: members.filter((member) => member !== collector && member.historyAt === 0).length,
     streaming: members.filter((member) => member !== collector && member.status === "streaming").length,
     tool: members.filter((member) => member !== collector && member.status === "tool").length,
     active: active.slice(0, 8).map((entry) => entry.item)
