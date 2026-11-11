@@ -76,6 +76,8 @@ export function createCollector(id) {
     totalsFrom: 'history',
     steps: [],
     stepsSeq: 0,
+    // The full history count, even when steps is capped at 400.
+    knownSteps: 0,
     series: [],
     chars: [],
     charsPerToken: DEFAULT_CHARS_PER_TOKEN,
@@ -352,6 +354,7 @@ export async function loadHistory(collector, apiGet, deadline = 0, { stepsOnly =
       chars += textChars(message);
       tokens += shape.output + shape.reasoning;
     }
+    collector.knownSteps = Math.max(collector.knownSteps, totals.steps);
     if (!stepsOnly) {
       // History fills what the live events missed. It covers at most 800 steps,
       // so it must not pull a counter back from a record or an event.
@@ -681,9 +684,13 @@ export function snapshot(collector, now = Date.now(), tree = [collector]) {
   const generated = totals.output + totals.reasoning;
   const consumed = prompt + generated;
   const totalCost = Math.round(totals.cost * 1e6) / 1e6;
-  // The session's own count, tree-wide. A member's totals.steps is the full
-  // history count; its step list may be capped, so take the larger.
-  const stepsKnown = members.reduce((sum, member) => sum + Math.max(member.totals.steps, member.steps.length), 0);
+  // The session's own count, tree-wide: the history count, the kept list, or
+  // the full history a subagent read before its list was capped, whichever is
+  // largest.
+  const stepsKnown = members.reduce(
+    (sum, member) => sum + Math.max(member.totals.steps, member.steps.length, member.knownSteps),
+    0,
+  );
   // The turn that is running, or the last one that ran. A step ended before the
   // turn began belongs to an earlier turn; the root's start bounds the tree.
   let lastTurnCost = 0;

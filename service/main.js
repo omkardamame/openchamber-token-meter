@@ -83,6 +83,7 @@ function createCollector(id) {
     totalsFrom: "history",
     steps: [],
     stepsSeq: 0,
+    knownSteps: 0,
     series: [],
     chars: [],
     charsPerToken: DEFAULT_CHARS_PER_TOKEN,
@@ -313,6 +314,7 @@ async function loadHistory(collector, apiGet, deadline = 0, { stepsOnly = false 
       chars += textChars(message);
       tokens += shape.output + shape.reasoning;
     }
+    collector.knownSteps = Math.max(collector.knownSteps, totals.steps);
     if (!stepsOnly) {
       const cumulative = collector.totalsFrom === "usage";
       collector.totals = raisedTotals(collector.totals, totals, totals.cost, totals.steps);
@@ -617,7 +619,7 @@ function snapshot(collector, now = Date.now(), tree = [collector]) {
   const generated = totals.output + totals.reasoning;
   const consumed = prompt + generated;
   const totalCost = Math.round(totals.cost * 1e6) / 1e6;
-  const stepsKnown = members.reduce((sum, member) => sum + Math.max(member.totals.steps, member.steps.length), 0);
+  const stepsKnown = members.reduce((sum, member) => sum + Math.max(member.totals.steps, member.steps.length, member.knownSteps), 0);
   let lastTurnCost = 0;
   if (collector.turnStartedAt) {
     for (const step of steps) {

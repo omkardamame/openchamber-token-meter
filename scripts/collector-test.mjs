@@ -414,6 +414,14 @@ for (let i = 0; i < 12; i += 1) {
 }
 check('a non-linear cost yields no rate instead of a guess', snapshot(tieredRun).cost.rates === null, JSON.stringify(snapshot(tieredRun).cost.rates));
 
+// A subagent whose history is longer than the kept list still counts in full.
+const knownRun = createCollector('ses_known_test');
+knownRun.knownSteps = 450;
+knownRun.steps = [
+  { id: 'msg_known', at: 1, model: null, tokens: 1, total: 1, cost: 0, cacheRead: 0, cacheWrite: 0, ms: 0, tps: null, aborted: false },
+];
+check('the step count includes steps older than the kept list', snapshot(knownRun).stepsKnown === 450, `${snapshot(knownRun).stepsKnown}`);
+
 // OpenCode's own two readings differ by a rounding step; a running meter keeps the larger
 emit('session.usage.updated', { cost: 0.01, tokens: { input: 900, output: 399, reasoning: 100, cache: { read: 12_000, write: 40 } } }, 3300);
 const merged = snapshot(live, at + 3400);
