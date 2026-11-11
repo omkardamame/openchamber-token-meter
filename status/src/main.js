@@ -51,8 +51,10 @@ function animateSpeed(dt) {
 
 /**
  * Colour the headline by its tier. This runs on every animation frame, so it
- * writes the attribute only when the tier changes. A quiet or idle rate carries
- * no tier and keeps the neutral text colour: a resting 0 is not a slow stream.
+ * writes the attribute only when the tier changes. It classifies the rounded
+ * number, the digits on screen, so colour and value turn together at 20/50/90/
+ * 150. A quiet or idle rate carries no tier and keeps the neutral text colour:
+ * a resting 0 is not a slow stream.
  */
 function paintTier() {
   const tier = ui && streamingNow && lastRounded >= 0 ? speedTier(lastRounded) : '';

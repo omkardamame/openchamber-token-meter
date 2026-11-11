@@ -293,8 +293,11 @@ try {
   check('panel breathes the dot while generating', streaming.dotState === 'streaming', String(streaming.dotState));
   check(
     'panel colours a 36 t/s rate emerald and keeps it semibold',
-    streaming.tpsTier === 'steady' && streaming.tpsColor === 'rgb(16, 185, 129)' && streaming.tpsWeight === '600',
-    `${streaming.tpsTier} ${streaming.tpsColor} ${streaming.tpsWeight}`,
+    streaming.tpsTier === 'steady' &&
+      streaming.tpsColor === 'rgb(16, 185, 129)' &&
+      streaming.tpsWeight === '600' &&
+      streaming.tpsShadow === 'none',
+    `${streaming.tpsTier} ${streaming.tpsColor} ${streaming.tpsWeight} ${streaming.tpsShadow}`,
   );
   check(
     'panel transitions the rate colour',
@@ -307,17 +310,27 @@ try {
 
   await panel.set(state({ status: 'streaming', live: { ...state().live, tps: 12 } }));
   const slowRate = await settle(panel, 'tps', '12');
-  check('panel turns the live rate coral below 20 t/s', slowRate.tpsTier === 'slow' && slowRate.tpsColor === 'rgb(248, 113, 113)', `${slowRate.tpsTier} ${slowRate.tpsColor}`);
+  check(
+    'panel turns the live rate coral below 20 t/s without a glow',
+    slowRate.tpsTier === 'slow' && slowRate.tpsColor === 'rgb(248, 113, 113)' && slowRate.tpsShadow === 'none',
+    `${slowRate.tpsTier} ${slowRate.tpsColor} ${slowRate.tpsShadow}`,
+  );
 
   await panel.set(state({ status: 'streaming', live: { ...state().live, tps: 68 } }));
   const fastRate = await settle(panel, 'tps', '68');
-  check('panel turns the live rate sky blue from 50 t/s', fastRate.tpsTier === 'fast' && fastRate.tpsColor === 'rgb(59, 130, 246)', `${fastRate.tpsTier} ${fastRate.tpsColor}`);
+  check(
+    'panel turns the live rate sky blue from 50 t/s without a glow',
+    fastRate.tpsTier === 'fast' && fastRate.tpsColor === 'rgb(59, 130, 246)' && fastRate.tpsShadow === 'none',
+    `${fastRate.tpsTier} ${fastRate.tpsColor} ${fastRate.tpsShadow}`,
+  );
 
   await panel.set(state({ status: 'streaming', live: { ...state().live, tps: 120 } }));
   const blazingRate = await settle(panel, 'tps', '120');
   check(
     'panel turns the live rate gold from 90 t/s and glows',
-    blazingRate.tpsTier === 'blazing' && blazingRate.tpsColor === 'rgb(255, 215, 0)' && /8px/.test(String(blazingRate.tpsShadow)),
+    blazingRate.tpsTier === 'blazing' &&
+      blazingRate.tpsColor === 'rgb(255, 215, 0)' &&
+      /^rgba\(255, 215, 0, 0\.45\) 0px 0px 8px$/.test(String(blazingRate.tpsShadow)),
     `${blazingRate.tpsTier} ${blazingRate.tpsColor} ${blazingRate.tpsShadow}`,
   );
 
@@ -325,9 +338,17 @@ try {
   const ultraRate = await settle(panel, 'tps', '240');
   check(
     'panel turns the live rate violet above 150 t/s and glows',
-    ultraRate.tpsTier === 'ultra' && ultraRate.tpsColor === 'rgb(168, 85, 247)' && /8px/.test(String(ultraRate.tpsShadow)),
+    ultraRate.tpsTier === 'ultra' &&
+      ultraRate.tpsColor === 'rgb(168, 85, 247)' &&
+      /^rgba\(168, 85, 247, 0\.45\) 0px 0px 8px$/.test(String(ultraRate.tpsShadow)),
     `${ultraRate.tpsTier} ${ultraRate.tpsColor} ${ultraRate.tpsShadow}`,
   );
+
+  // "thinking": a stream is open but no characters arrived, so the number is
+  // muted and carries no tier however high it was a moment ago.
+  await panel.set(state({ status: 'streaming', live: { ...state().live, tps: 120, charsPerSecond: 0 } }));
+  const quietRate = await settle(panel, 'tps', '120');
+  check('panel drops the tier when nothing is streaming', quietRate.tpsTier === null, `${quietRate.tpsTier} ${quietRate.tpsColor}`);
 
   await panel.set(state({ status: 'idle' }));
   const settledIdle = await settle(panel, 'tps', '0');
@@ -344,6 +365,7 @@ try {
   const tool = await panel.read();
   check('panel says a tool is running', /a tool is running/.test(tool.text), tool.text.slice(0, 60));
   check('panel glows orange for a tool', tool.dotState === 'tool', String(tool.dotState));
+  check('panel drops the rate tier when only a tool runs', tool.tpsTier === null, `${tool.tpsTier} ${tool.tpsColor}`);
 
   // a parent whose subagent is generating: the headline is the tree's
   const subState = (over = {}) => {
@@ -410,15 +432,20 @@ try {
   check('status breathes the dot while generating', sStreaming.dotState === 'streaming', String(sStreaming.dotState));
   check(
     'status colours a 36 t/s rate emerald and keeps it semibold',
-    sStreaming.tpsTier === 'steady' && sStreaming.tpsColor === 'rgb(16, 185, 129)' && sStreaming.tpsWeight === '600',
-    `${sStreaming.tpsTier} ${sStreaming.tpsColor} ${sStreaming.tpsWeight}`,
+    sStreaming.tpsTier === 'steady' &&
+      sStreaming.tpsColor === 'rgb(16, 185, 129)' &&
+      sStreaming.tpsWeight === '600' &&
+      sStreaming.tpsShadow === 'none',
+    `${sStreaming.tpsTier} ${sStreaming.tpsColor} ${sStreaming.tpsWeight} ${sStreaming.tpsShadow}`,
   );
 
   await status.set(state({ status: 'streaming', live: { ...state().live, tps: 120 } }));
   const sBlazing = await settle(status, 'tps', '120');
   check(
     'status turns the live rate gold from 90 t/s and glows',
-    sBlazing.tpsTier === 'blazing' && sBlazing.tpsColor === 'rgb(255, 215, 0)' && /8px/.test(String(sBlazing.tpsShadow)),
+    sBlazing.tpsTier === 'blazing' &&
+      sBlazing.tpsColor === 'rgb(255, 215, 0)' &&
+      /^rgba\(255, 215, 0, 0\.45\) 0px 0px 8px$/.test(String(sBlazing.tpsShadow)),
     `${sBlazing.tpsTier} ${sBlazing.tpsColor} ${sBlazing.tpsShadow}`,
   );
 

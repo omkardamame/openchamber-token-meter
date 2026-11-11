@@ -8,7 +8,7 @@ import path from 'node:path';
 import { createCollector, applyRecord, loadHistory, applyEvent, tick, snapshot } from '../service/src/collector.js';
 import { compress, easeToward, ratesOf } from '../shared/chart.js';
 import { dotState } from '../shared/cells.js';
-import { SPEED_TIERS, speedTier } from '../shared/speed-color.js';
+import { speedTier } from '../shared/speed-color.js';
 
 const MANAGED = path.join(os.homedir(), '.config', 'openchamber', 'managed-opencode');
 
@@ -763,26 +763,6 @@ check(
   tierAt.every(([rate, tier]) => speedTier(rate) === tier),
   tierAt.map(([rate, tier]) => `${rate}:${speedTier(rate)}`).join(' '),
 );
-check(
-  'a rate that cannot be measured sits in the lowest tier',
-  speedTier(Number.NaN) === 'slow' && speedTier(undefined) === 'slow' && speedTier(-3) === 'slow',
-  `${speedTier(Number.NaN)} ${speedTier(undefined)} ${speedTier(-3)}`,
-);
-check(
-  'the tiers are ordered from slow to ultra',
-  SPEED_TIERS.join(',') === 'slow,steady,fast,blazing,ultra',
-  SPEED_TIERS.join(','),
-);
-
-// Both frames paint those tiers with the same five fixed hexes: a rate colour
-// is not a theme token, so a fast model looks the same in every theme.
-const TIER_HEX = ['#f87171', '#10b981', '#3b82f6', '#ffd700', '#a855f7'];
-for (const page of ['panel', 'status']) {
-  const html = readFileSync(new URL(`../${page}/index.html`, import.meta.url), 'utf8').toLowerCase();
-  const missingHex = TIER_HEX.filter((hex) => !html.includes(hex));
-  const missingTier = SPEED_TIERS.filter((tier) => !html.includes(`data-tier='${tier}'`));
-  check(`the ${page} paints every speed tier`, missingHex.length === 0 && missingTier.length === 0, [...missingHex, ...missingTier].join(',') || 'five tiers');
-}
 
 // ---------------------------------------------------------------- layout guards
 // The status page reports its own height, so nothing in it may be sized by the

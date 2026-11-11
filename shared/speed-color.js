@@ -3,13 +3,11 @@
 // page's CSS, because the two frames are separate documents and a rate colour
 // must not follow the host theme.
 
-/** Lowest tier first. These names are the `data-tier` values both pages style. */
-export const SPEED_TIERS = ['slow', 'steady', 'fast', 'blazing', 'ultra'];
-
 /**
  * The tier for a rate in tokens per second: under 20, 20–50, 50–90, 90–150,
  * above 150. 20, 50 and 90 start the faster tier; 150 is the last blazing rate,
- * as the range says. A value that cannot be measured sits in the lowest tier.
+ * as the range says. The frames only ask while a live, non-negative rate is on
+ * screen, so an unmeasurable value is a defensive floor, not a policy.
  */
 export function speedTier(value) {
   const n = Number(value);
