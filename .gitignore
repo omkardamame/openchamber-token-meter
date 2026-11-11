@@ -1,0 +1,24 @@
+node_modules/
+.DS_Store
+*.log
+
+# Local rules and setup: never published.
+AGENTS.md
+docs/STATE.md
+
+# Editors and OS
+.idea/
+.vscode/
+*.swp
+*.swo
+*.orig
+*.rej
+
+# Local scratch and secrets
+.env
+.env.*
+*.local
+*.zip
+*.tgz
+/tmp/
+coverage/
