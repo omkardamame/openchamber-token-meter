@@ -106,7 +106,7 @@ function build() {
       <span class="dot"></span>
       <div class="speed">
         <span class="speed-value" title="the session and every streaming subagent, added together"><b class="tps">0</b><span class="unit">t/s</span></span>
-        <span class="last">last —</span>
+        <span class="last"><span class="last-rate"></span><span class="last-rest"></span></span>
       </div>
       <svg class="spark" data-chart="spark" height="30" aria-hidden="true"></svg>
     </div>
@@ -118,7 +118,8 @@ function build() {
     app,
     dot: app.querySelector('.dot'),
     tps: app.querySelector('.tps'),
-    last: app.querySelector('.last'),
+    lastRate: app.querySelector('.last-rate'),
+    lastRest: app.querySelector('.last-rest'),
     spark: app.querySelector('[data-chart="spark"]'),
     grid: app.querySelector('.grid'),
     foot: app.querySelector('.foot'),
@@ -194,18 +195,19 @@ function render(data) {
   paintTier();
   const lastStep = data.live?.lastStep;
   const lastSub = lastStep?.sub ? ' · sub' : '';
-  const lastRate = data.status !== 'tool' && Boolean(lastStep?.tps);
-  ui.last.textContent =
-    data.status === 'tool'
-      ? data.live?.subagent
-        ? 'subagent tool'
-        : 'running a tool'
-      : lastStep?.tps
-        ? `last ${Math.round(lastStep.tps)} t/s${lastSub}`
-        : lastStep
-          ? `last step ${seconds(lastStep.ms)} · too short to rate${lastSub}`
-          : 'no finished step yet';
-  ui.last.classList.toggle('rate', lastRate);
+  if (data.status === 'tool') {
+    ui.lastRate.textContent = '';
+    delete ui.lastRate.dataset.tier;
+    ui.lastRest.textContent = data.live?.subagent ? 'subagent tool' : 'running a tool';
+  } else if (lastStep?.tps) {
+    ui.lastRate.textContent = `last ${Math.round(lastStep.tps)} t/s`;
+    ui.lastRate.dataset.tier = speedTier(lastStep.tps);
+    ui.lastRest.textContent = lastSub;
+  } else {
+    ui.lastRate.textContent = '';
+    delete ui.lastRate.dataset.tier;
+    ui.lastRest.textContent = lastStep ? `last step ${seconds(lastStep.ms)} · too short to rate${lastSub}` : 'no finished step yet';
+  }
 
   drawSpark(data);
 

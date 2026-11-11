@@ -106,7 +106,7 @@ function build() {
         <span class="stat-label">live <em>est</em></span>
         <span class="speed-value" title="the session and every streaming subagent, added together"><b class="tps-value">0</b><i>t/s</i></span>
         <span class="speed-note tps-sub">no generation right now</span>
-        <span class="speed-last last-line">no finished step yet</span>
+        <span class="speed-last last-line"><span class="last-rate"></span><span class="last-rest"></span></span>
       </div>
       <div class="chart-wrap"><svg class="chart" data-chart="live" aria-hidden="true"></svg></div>
       <div class="axis"><span>60 s ago</span><span class="axis-peak"></span><span>now</span></div>
@@ -150,7 +150,8 @@ function build() {
     statusLabel: app.querySelector('.status-label'),
     tpsValue: app.querySelector('.tps-value'),
     tpsSub: app.querySelector('.tps-sub'),
-    lastLine: app.querySelector('.last-line'),
+    lastRate: app.querySelector('.last-rate'),
+    lastRest: app.querySelector('.last-rest'),
     live: app.querySelector('[data-chart="live"]'),
     peak: app.querySelector('.axis-peak'),
     grid: app.querySelector('.grid'),
@@ -543,10 +544,13 @@ function render(data) {
   const lastStep = data.live?.lastStep;
   const lastSub = lastStep?.sub ? ' · subagent' : '';
   if (lastStep?.tps) {
-    const rate = el('span', 'last-rate', `last ${Math.round(lastStep.tps)} t/s`);
-    ui.lastLine.replaceChildren(rate, ` · ${seconds(lastStep.ms)} · ${compact(lastStep.tokens)} tok${lastSub}`);
+    ui.lastRate.textContent = `last ${Math.round(lastStep.tps)} t/s`;
+    ui.lastRate.dataset.tier = speedTier(lastStep.tps);
+    ui.lastRest.textContent = ` · ${seconds(lastStep.ms)} · ${compact(lastStep.tokens)} tok${lastSub}`;
   } else {
-    ui.lastLine.textContent = lastStep
+    ui.lastRate.textContent = '';
+    delete ui.lastRate.dataset.tier;
+    ui.lastRest.textContent = lastStep
       ? `last step ${seconds(lastStep.ms)} · ${compact(lastStep.tokens)} tok · too short to rate${lastSub}`
       : 'no finished step yet';
   }

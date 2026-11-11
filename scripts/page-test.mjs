@@ -114,6 +114,8 @@ const harness = `<!doctype html><meta charset="utf-8"><title>page test</title>
     const dot = doc.querySelector('.dot');
     const rate = doc.querySelector('.tps-value') || doc.querySelector('.tps');
     const rateStyle = rate ? getComputedStyle(rate) : null;
+    const last = doc.querySelector('.last-rate');
+    const lastStyle = last ? getComputedStyle(last) : null;
     return {
       text,
       dotState: dot ? dot.getAttribute('data-state') : null,
@@ -147,8 +149,9 @@ const harness = `<!doctype html><meta charset="utf-8"><title>page test</title>
         return cell ? getComputedStyle(cell.querySelector('.cell-value')).fontSize : null;
       })(),
       stepsPeakColor: doc.querySelector('.steps-peak') ? getComputedStyle(doc.querySelector('.steps-peak')).color : null,
-      lastRateColor: doc.querySelector('.last-rate') ? getComputedStyle(doc.querySelector('.last-rate')).color : null,
-      statusLastColor: doc.querySelector('.last') ? getComputedStyle(doc.querySelector('.last')).color : null,
+      lastRateTier: last ? last.getAttribute('data-tier') : null,
+      lastRateColor: lastStyle ? lastStyle.color : null,
+      lastRateShadow: lastStyle ? lastStyle.textShadow : null,
       stepsAvgSep: doc.querySelector('.steps-avg') ? getComputedStyle(doc.querySelector('.steps-avg'), '::before').content : null,
       stepsPeakSep: doc.querySelector('.steps-peak') ? getComputedStyle(doc.querySelector('.steps-peak'), '::before').content : null,
       stepsAxisText: doc.querySelector('.steps-axis') ? doc.querySelector('.steps-axis').innerText.replace(/\\s+/g, ' ').trim() : null,
@@ -238,7 +241,22 @@ try {
   check('panel draws the measured ttft', idle.values.some((v) => v.includes('6.5 s')), idle.values.join(' | '));
   check('panel labels the average and the peak', idle.labels.some((l) => l.startsWith('avg 79')) && idle.labels.some((l) => l.startsWith('peak 334')), idle.labels.join(' | '));
   check('panel shows the last measured step', /last 33 t\/s/.test(idle.text), idle.text.slice(0, 60));
-  check('panel colours the last rate yellow', idle.lastRateColor === 'rgb(245, 158, 11)', String(idle.lastRateColor));
+  check(
+    'panel colours the last measured step by its tier',
+    idle.lastRateTier === 'steady' && idle.lastRateColor === 'rgb(16, 185, 129)' && idle.lastRateShadow === 'none',
+    `${idle.lastRateTier} ${idle.lastRateColor} ${idle.lastRateShadow}`,
+  );
+  // The last line follows the finished step's own rate, not the live headline.
+  const hotBase = state();
+  await panel.set({ ...hotBase, live: { ...hotBase.live, lastStep: { ...hotBase.live.lastStep, tps: 120 } } });
+  const hotLast = await panel.read();
+  check(
+    'panel glows a fast last step gold',
+    hotLast.lastRateTier === 'blazing' &&
+      hotLast.lastRateColor === 'rgb(255, 215, 0)' &&
+      /^rgba\(255, 215, 0, 0\.45\) 0px 0px 8px$/.test(String(hotLast.lastRateShadow)),
+    `${hotLast.lastRateTier} ${hotLast.lastRateColor} ${hotLast.lastRateShadow}`,
+  );
   check('panel sits on a dim dot when idle', idle.dotState === 'idle', String(idle.dotState));
   check('panel hides the subagent list and legend when there are none', idle.subsHidden === true && idle.legendHidden === true, `${idle.subsHidden}/${idle.legendHidden}`);
   check('panel shows the per-step average and peak together', /avg 156 t\/s.*peak 180 t\/s/.test(idle.text), idle.text.slice(0, 120));
@@ -423,7 +441,21 @@ try {
   check('status draws all eight cells', sIdle.cells.join(',') === 'In,Out,Think,Total out,Cache,Cache hit,TTFT,Consumed', sIdle.cells.join(','));
   check('status draws the consumed total', sIdle.values.some((v) => v.startsWith('49.2M')), sIdle.values.join(' | '));
   check('status shows the last measured step', /last 33 t\/s/.test(sIdle.text), sIdle.text.slice(0, 60));
-  check('status colours the last rate yellow', sIdle.statusLastColor === 'rgb(245, 158, 11)', String(sIdle.statusLastColor));
+  check(
+    'status colours the last measured step by its tier',
+    sIdle.lastRateTier === 'steady' && sIdle.lastRateColor === 'rgb(16, 185, 129)' && sIdle.lastRateShadow === 'none',
+    `${sIdle.lastRateTier} ${sIdle.lastRateColor} ${sIdle.lastRateShadow}`,
+  );
+  const statusHotBase = state();
+  await status.set({ ...statusHotBase, live: { ...statusHotBase.live, lastStep: { ...statusHotBase.live.lastStep, tps: 120 } } });
+  const sHotLast = await status.read();
+  check(
+    'status glows a fast last step gold',
+    sHotLast.lastRateTier === 'blazing' &&
+      sHotLast.lastRateColor === 'rgb(255, 215, 0)' &&
+      /^rgba\(255, 215, 0, 0\.45\) 0px 0px 8px$/.test(String(sHotLast.lastRateShadow)),
+    `${sHotLast.lastRateTier} ${sHotLast.lastRateColor} ${sHotLast.lastRateShadow}`,
+  );
   check('status sets Consumed to the same size as the other stats', sIdle.consumedFont === sIdle.inFont, `${sIdle.consumedFont}/${sIdle.inFont}`);
 
   await status.set(state({ status: 'streaming' }));

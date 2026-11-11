@@ -171,21 +171,22 @@
       }
       /* The rate's colour is its tier: slow coral, steady emerald, fast sky
          blue, blazing gold, ultra violet. The top two glow softly; the hexes
-         are fixed so a rate reads the same in every theme. */
-      .speed-value b[data-tier='slow'] {
+         are fixed so a rate reads the same in every theme. It colours the live
+         headline and the last measured step alike. */
+      .meter [data-tier='slow'] {
         color: #f87171;
       }
-      .speed-value b[data-tier='steady'] {
+      .meter [data-tier='steady'] {
         color: #10b981;
       }
-      .speed-value b[data-tier='fast'] {
+      .meter [data-tier='fast'] {
         color: #3b82f6;
       }
-      .speed-value b[data-tier='blazing'] {
+      .meter [data-tier='blazing'] {
         color: #ffd700;
         text-shadow: 0 0 8px #ffd70073;
       }
-      .speed-value b[data-tier='ultra'] {
+      .meter [data-tier='ultra'] {
         color: #a855f7;
         text-shadow: 0 0 8px #a855f773;
       }
@@ -210,7 +211,7 @@
         opacity: 0.9;
       }
       .last-rate {
-        color: var(--oc-warning);
+        transition: color 250ms ease, text-shadow 250ms ease;
       }
       .chart {
         width: 100%;
