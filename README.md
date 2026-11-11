@@ -9,10 +9,10 @@ the headline moves, and their tokens count in the totals.
 
 The chat's Work Status panel keeps the speed beside the conversation.
 
-![The Token Meter panel](docs/panel.png)
+![The Token Meter rail panel](docs/panel.png)
 
-The rail panel adds the graph, the session totals, the running subagents and the
-per-step rates.
+The rail panel: live speed, running subagents, session totals, cost, and every
+kept step with its count and time axis.
 
 ## Install
 
