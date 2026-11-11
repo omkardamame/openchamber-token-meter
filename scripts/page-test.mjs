@@ -55,6 +55,7 @@ const state = (over = {}) =>
     series: { t0: Date.now() - 5000, step: 250, v: [30, 34, 36] },
     stepsSeq: 3,
     stepsFrom: Date.now() - 120_000,
+    stepsKnown: 2,
     steps: [
       { tokens: 1100, ms: 7800, tps: 141, aborted: false },
       { tokens: 900, ms: 5000, tps: 180, aborted: false },
@@ -241,6 +242,10 @@ try {
     /model rates \/ 1M · in \$0\.15 · out \$0\.60 · cache \$0\.003/.test(idle.text),
     idle.text.slice(-160),
   );
+
+  await panel.set({ ...state(), stepsKnown: 5 });
+  const totalCount = await panel.read();
+  check('panel counts steps older than the drawn list', /5 steps/.test(totalCount.text), totalCount.text.slice(0, 120));
 
   await panel.set(state({ status: 'streaming' }));
   const streaming = await panel.read();

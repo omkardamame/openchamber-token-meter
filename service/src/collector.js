@@ -681,6 +681,9 @@ export function snapshot(collector, now = Date.now(), tree = [collector]) {
   const generated = totals.output + totals.reasoning;
   const consumed = prompt + generated;
   const totalCost = Math.round(totals.cost * 1e6) / 1e6;
+  // The session's own count, tree-wide. A member's totals.steps is the full
+  // history count; its step list may be capped, so take the larger.
+  const stepsKnown = members.reduce((sum, member) => sum + Math.max(member.totals.steps, member.steps.length), 0);
   // The turn that is running, or the last one that ran. A step ended before the
   // turn began belongs to an earlier turn; the root's start bounds the tree.
   let lastTurnCost = 0;
@@ -794,6 +797,8 @@ export function snapshot(collector, now = Date.now(), tree = [collector]) {
     })),
     // The time of the leftmost bar, for the chart's own start label.
     stepsFrom: shownSteps[0]?.at ?? null,
+    // Every step the session and its subagents ran, not only the 400 drawn.
+    stepsKnown,
     // Worked out over every step, so the drawn average stays the session's.
     rates: { avg: Math.round(rates.avg * 10) / 10, peak: Math.round(rates.peak * 10) / 10 },
     generatedAt: now,

@@ -617,6 +617,7 @@ function snapshot(collector, now = Date.now(), tree = [collector]) {
   const generated = totals.output + totals.reasoning;
   const consumed = prompt + generated;
   const totalCost = Math.round(totals.cost * 1e6) / 1e6;
+  const stepsKnown = members.reduce((sum, member) => sum + Math.max(member.totals.steps, member.steps.length), 0);
   let lastTurnCost = 0;
   if (collector.turnStartedAt) {
     for (const step of steps) {
@@ -705,6 +706,7 @@ function snapshot(collector, now = Date.now(), tree = [collector]) {
       ...subSteps.has(step) ? { sub: true } : {}
     })),
     stepsFrom: shownSteps[0]?.at ?? null,
+    stepsKnown,
     rates: { avg: Math.round(rates.avg * 10) / 10, peak: Math.round(rates.peak * 10) / 10 },
     generatedAt: now
   };

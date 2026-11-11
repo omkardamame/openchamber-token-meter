@@ -324,9 +324,11 @@ function drawSteps(data) {
   svg.setAttribute('viewBox', `0 0 ${width} ${height}`);
   const all = Array.isArray(data.steps) ? data.steps : [];
   const steps = all.filter((step) => step.tps && step.tps > 0 && !step.aborted);
-  // The count is every step record the meter keeps, not only the bars it can
-  // rate: a step too short to rate is still a step.
-  ui.stepsCount.textContent = `${all.length} step${all.length === 1 ? '' : 's'}`;
+  // The count is every step the session and its subagents ran, not only the
+  // bars the meter can draw or rate.
+  const known = data.stepsKnown ?? all.length;
+  ui.stepsCount.textContent = `${known} step${known === 1 ? '' : 's'}`;
+  ui.stepsCount.title = known > all.length ? `the last ${all.length} steps are drawn` : 'every step the meter keeps';
   if (steps.length === 0) {
     svg.innerHTML = `<text x="${(width / 2).toFixed(1)}" y="${(height / 2).toFixed(1)}" text-anchor="middle" fill="var(--oc-muted)" font-size="11">no finished steps yet</text>`;
     ui.stepsAvg.textContent = '';
