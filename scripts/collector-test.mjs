@@ -108,8 +108,17 @@ check(
 );
 check(
   'the wire carries only the fields the frame reads',
-  snap.steps.length <= 40 && snap.steps.every((step) => Object.keys(step).sort().join(',') === 'aborted,ms,tokens,tps'),
+  snap.steps.length <= 400 &&
+    snap.steps.every((step) => {
+      const keys = Object.keys(step).sort().join(',');
+      return keys === 'aborted,ms,tokens,tps' || keys === 'aborted,ms,tokens,tps,sub';
+    }),
   `${snap.steps.length} steps, ${Object.keys(snap.steps[0] ?? {}).length} fields`,
+);
+check(
+  'the wire carries every step the chart draws',
+  snap.steps.length === Math.min(collector.steps.length, 400),
+  `${snap.steps.length} of ${collector.steps.length} kept steps`,
 );
 check(
   'the drawn rates cover every step, not just the ones on the wire',
@@ -318,6 +327,35 @@ check(
   `${snapshot(ttftParent, Date.now(), [ttftParent, ttftChild]).live.ttftMs}`,
 );
 check('an idle parent keeps its own last first-token wait', snapshot(ttftParent).live.ttftMs === 9_000, `${snapshot(ttftParent).live.ttftMs}`);
+
+// ---------------------------------------------------------------- cost
+const costRun = createCollector('ses_cost_test');
+const costAt = 1_794_000_000_000;
+const emitCost = (type, data = {}, offset = 0) =>
+  applyEvent(costRun, { type, created: costAt + offset, data: { sessionID: 'ses_cost_test', ...data } });
+const costStep = (id, cost) => ({
+  assistantMessageID: id,
+  finish: 'stop',
+  cost,
+  tokens: { input: 10, output: 90, reasoning: 0, cache: { read: 0, write: 0 } },
+});
+emitCost('session.execution.started', { started: costAt });
+emitCost('session.step.started', { assistantMessageID: 'msg_cost_1', started: costAt }, 100);
+emitCost('session.step.ended', costStep('msg_cost_1', 0.02), 1_000);
+emitCost('session.step.started', { assistantMessageID: 'msg_cost_2', started: costAt + 1_100 }, 1_100);
+emitCost('session.step.ended', costStep('msg_cost_2', 0.03), 2_000);
+const costSnap = snapshot(costRun, costAt + 2_100);
+check('the last-turn cost is the sum of its steps', costSnap.cost.lastTurn === 0.05, `$${costSnap.cost.lastTurn}`);
+check(
+  'the effective rate is the cost per million tokens processed',
+  costSnap.cost.perMillion === 250,
+  `$${costSnap.cost.perMillion} per 1M`,
+);
+emitCost('session.execution.started', { started: costAt + 3_000 }, 3_000);
+emitCost('session.step.started', { assistantMessageID: 'msg_cost_3', started: costAt + 3_100 }, 3_100);
+emitCost('session.step.ended', costStep('msg_cost_3', 0.01), 4_000);
+const nextTurn = snapshot(costRun, costAt + 4_100);
+check('a new turn resets the last-turn cost', nextTurn.cost.lastTurn === 0.01, `$${nextTurn.cost.lastTurn}`);
 
 // OpenCode's own two readings differ by a rounding step; a running meter keeps the larger
 emit('session.usage.updated', { cost: 0.01, tokens: { input: 900, output: 399, reasoning: 100, cache: { read: 12_000, write: 40 } } }, 3300);

@@ -330,13 +330,17 @@
       .cell-emphasis .cell-value {
         font-size: 20px;
       }
-      .summary {
-        font-size: 12px;
-        color: var(--oc-muted);
-        font-variant-numeric: tabular-nums;
+      .steps-avg {
+        color: var(--oc-success);
       }
-      .summary:empty {
-        display: none;
+      .steps-peak {
+        color: var(--oc-muted);
+      }
+      .cost-grid .cost-model {
+        overflow: hidden;
+        font-size: 12.5px;
+        text-overflow: ellipsis;
+        white-space: nowrap;
       }
       .block.steps {
         flex: 1 1 auto;

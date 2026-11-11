@@ -77,8 +77,13 @@ export function createCollector(id) {
     series: [],
     chars: [],
     charsPerToken: DEFAULT_CHARS_PER_TOKEN,
-    stream: null, // { started, streamed, messageID, chars, firstOutputAt, startedAt, toolChars }
+    stream: null, // { started, streamed, messageID, chars, firstOutputAt, startedAt, toolChars, deltaParts }
     turnActive: false,
+    // When the current or last user turn began, for the last-turn cost. The
+    // service fills it from the last user message when it opens mid-turn.
+    turnStartedAt: 0,
+    turnStartTriedAt: 0,
+    turnStartLoading: false,
     ttftMs: null,
     lastTtftMs: null,
     lastStep: null,
@@ -276,6 +281,7 @@ function stepFromMessage(message) {
     at: typeof streamed === 'number' ? streamed : created,
     tokens: output,
     total: (tokens.input ?? 0) + output,
+    cost: typeof message.cost === 'number' ? message.cost : 0,
     cacheRead: tokens.cache?.read ?? 0,
     cacheWrite: tokens.cache?.write ?? 0,
     ms,
@@ -404,6 +410,9 @@ export function applyEvent(collector, event) {
       collector.turnActive = true;
       collector.status = 'streaming';
       collector.error = null;
+      // The last-turn cost starts here. `started` is the request's own time;
+      // the event's created time is the fallback.
+      collector.turnStartedAt = typeof data.started === 'number' ? data.started : at;
       return;
     case 'session.tool.called':
       collector.status = 'tool';
@@ -470,6 +479,7 @@ export function applyEvent(collector, event) {
           at: endAt,
           tokens: output,
           total: tokens.input + output,
+          cost: typeof data.cost === 'number' ? data.cost : 0,
           cacheRead: tokens.cacheRead,
           cacheWrite: tokens.cacheWrite,
           ms,
@@ -587,8 +597,20 @@ export function snapshot(collector, now = Date.now(), tree = [collector]) {
     }
   }
   steps.sort((a, b) => a.at - b.at);
+  const rates = ratesOf(steps);
   const prompt = totals.input + totals.cacheRead + totals.cacheWrite;
   const generated = totals.output + totals.reasoning;
+  const consumed = prompt + generated;
+  const totalCost = Math.round(totals.cost * 1e6) / 1e6;
+  // The turn that is running, or the last one that ran. A step ended before the
+  // turn began belongs to an earlier turn; the root's start bounds the tree.
+  let lastTurnCost = 0;
+  if (collector.turnStartedAt) {
+    for (const step of steps) {
+      if (step.at >= collector.turnStartedAt) lastTurnCost += step.cost ?? 0;
+    }
+  }
+  lastTurnCost = Math.round(lastTurnCost * 1e6) / 1e6;
   const live = collector.series[collector.series.length - 1]?.v ?? 0;
   const streamer = members.find((member) => member.status === 'streaming' && member.ttftMs != null);
   const lastStepRaw = members.reduce(
@@ -633,13 +655,19 @@ export function snapshot(collector, now = Date.now(), tree = [collector]) {
       reasoning: totals.reasoning,
       cacheRead: totals.cacheRead,
       cacheWrite: totals.cacheWrite,
-      cost: Math.round(totals.cost * 1e6) / 1e6,
+      cost: totalCost,
       steps: totals.steps,
       prompt,
       generated,
-      consumed: prompt + generated,
+      consumed,
       cacheHitRate: prompt > 0 ? totals.cacheRead / prompt : 0,
       source: collector.totalsFrom,
+    },
+    cost: {
+      total: totalCost,
+      lastTurn: lastTurnCost,
+      // Effective, not list price: every token and cache read in the cost.
+      perMillion: consumed > 0 ? Math.round((totalCost / consumed) * 1e6 * 1e4) / 1e4 : null,
     },
     live: {
       tps: live,
@@ -670,10 +698,10 @@ export function snapshot(collector, now = Date.now(), tree = [collector]) {
     // Every member's counter only grows, so their sum changes as soon as a
     // step arrives anywhere in the tree and the client knows to fetch the list.
     stepsSeq: members.reduce((sum, member) => sum + member.stepsSeq, 0),
-    // The chart draws the last 32 bars; forty is enough to draw and to hover.
-    // Nothing else travels: the wire carried eleven fields for four the frame
-    // reads, which was two thirds of a 34 KB answer.
-    steps: steps.slice(-40).map((step) => ({
+    // The chart draws every step the meter keeps (400 at most), and only when
+    // its sequence is stale. Nothing else travels: the wire carried eleven
+    // fields for four the frame reads, which was two thirds of a 34 KB answer.
+    steps: steps.slice(-MAX_STEPS).map((step) => ({
       tokens: step.tokens,
       ms: step.ms,
       tps: step.tps,
@@ -681,10 +709,7 @@ export function snapshot(collector, now = Date.now(), tree = [collector]) {
       ...(subSteps.has(step) ? { sub: true } : {}),
     })),
     // Worked out over every step, so the drawn average stays the session's.
-    rates: {
-      avg: Math.round(ratesOf(steps).avg * 10) / 10,
-      peak: Math.round(ratesOf(steps).peak * 10) / 10,
-    },
+    rates: { avg: Math.round(rates.avg * 10) / 10, peak: Math.round(rates.peak * 10) / 10 },
     generatedAt: now,
   };
 }

@@ -45,6 +45,8 @@ const state = (over = {}) =>
       lastStep: { tokens: 1100, ms: 7800, tps: 33, aborted: false },
       estimated: true,
     },
+    cost: { total: 0.31, lastTurn: 0.08, perMillion: 0.0504 },
+    subagents: { count: 0, running: 0, streaming: 0, tool: 0, active: [] },
     series: { t0: Date.now() - 5000, step: 250, v: [30, 34, 36] },
     stepsSeq: 3,
     steps: [
@@ -78,12 +80,12 @@ const harness = `<!doctype html><meta charset="utf-8"><title>page test</title>
       frame.contentWindow.postMessage({
         channel: CHANNEL, v: V, type: 'ready',
         payload: {
-          session: { id: 'ses_page', title: 'page test', busy: false },
+          session: { id: 'ses_page', title: 'page test', busy: false, model: 'opencode-go/deepseek-v4.1-flash' },
           surface: 'status',
           connection: { connected: true, account: null },
           settings: {},
           locale: 'en',
-          theme: { mode: 'dark', tokens: {} },
+          theme: { mode: 'dark', tokens: { success: '#4ade80', primary: '#e07a3f', info: '#3b82f6' } },
           features: {},
         },
       }, '*');
@@ -105,14 +107,15 @@ const harness = `<!doctype html><meta charset="utf-8"><title>page test</title>
     return {
       text,
       dotState: dot ? dot.getAttribute('data-state') : null,
-      cells: [...doc.querySelectorAll('.cell-label')].map((n) => n.textContent),
-      values: [...doc.querySelectorAll('.cell-value')].map((n) => n.textContent.trim()),
+      cells: [...doc.querySelectorAll('.totals-grid .cell-label')].map((n) => n.textContent),
+      values: [...doc.querySelectorAll('.totals-grid .cell-value')].map((n) => n.textContent.trim()),
       tps: (doc.querySelector('.tps-value') || doc.querySelector('.tps') || {}).textContent,
       bars: doc.querySelectorAll('[data-chart="steps"] rect').length,
       stepSvg: (doc.querySelector('[data-chart="steps"]') || {}).innerHTML ?? '',
       subsHidden: doc.querySelector('.subagents') ? doc.querySelector('.subagents').hidden : null,
       legendHidden: doc.querySelector('.legend') ? doc.querySelector('.legend').hidden : null,
       legendText: doc.querySelector('.legend') ? doc.querySelector('.legend').innerText.replace(/\\s+/g, ' ').trim() : null,
+      stepsAvgColor: doc.querySelector('.steps-avg') ? getComputedStyle(doc.querySelector('.steps-avg')).color : null,
       labels: [...doc.querySelectorAll('svg text')].map((n) => n.textContent),
     };
   };
@@ -188,6 +191,16 @@ try {
   check('panel shows the last measured step', /last 33 t\/s/.test(idle.text), idle.text.slice(0, 60));
   check('panel sits on a dim dot when idle', idle.dotState === 'idle', String(idle.dotState));
   check('panel hides the subagent list and legend when there are none', idle.subsHidden === true && idle.legendHidden === true, `${idle.subsHidden}/${idle.legendHidden}`);
+  check('panel shows the per-step average and peak together', /avg 79 t\/s\s+peak 334 t\/s/.test(idle.text), idle.text.slice(0, 120));
+  check('panel colours the per-step average green', idle.stepsAvgColor === 'rgb(74, 222, 128)', String(idle.stepsAvgColor));
+  check(
+    'panel shows total cost, last-turn cost, model and rate',
+    /Total \$0\.31/i.test(idle.text) &&
+      /Last turn \$0\.08/i.test(idle.text) &&
+      /deepseek-v4\.1-flash/.test(idle.text) &&
+      /\$0\.05 \/ 1M/.test(idle.text),
+    idle.text.slice(-160),
+  );
 
   await panel.set(state({ status: 'streaming' }));
   const streaming = await panel.read();

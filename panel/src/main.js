@@ -27,6 +27,7 @@ let lastStepsSeq = -1;
 let targetTps = 0;
 let shownTps = 0;
 let lastRounded = -1;
+let modelLabel = '';
 
 /**
  * Move the headline towards the measured rate instead of snapping to it. The
@@ -97,12 +98,21 @@ function build() {
 
     <section class="block">
       <div class="block-head" title="Every step since the session started, not one turn"><span>Session totals</span><span class="block-meta totals-source"></span></div>
-      <div class="grid"></div>
-      <div class="summary"></div>
+      <div class="grid totals-grid"></div>
+    </section>
+
+    <section class="block cost">
+      <div class="block-head" title="This session and its subagents"><span>Cost</span></div>
+      <div class="grid cost-grid">
+        <div class="cell"><span class="cell-label">Total</span><span class="cell-value cost-total">—</span></div>
+        <div class="cell"><span class="cell-label">Last turn</span><span class="cell-value cost-turn">—</span></div>
+        <div class="cell"><span class="cell-label">Model</span><span class="cell-value cost-model">—</span></div>
+        <div class="cell"><span class="cell-label">Rate</span><span class="cell-value cost-rate">—</span></div>
+      </div>
     </section>
 
     <section class="block steps">
-      <div class="block-head"><span>Per step</span><span class="block-meta steps-meta"></span></div>
+      <div class="block-head"><span>Per step</span><span class="block-meta"><span class="steps-avg"></span> <span class="steps-peak"></span></span></div>
       <div class="chart-wrap"><svg class="chart" data-chart="steps" aria-hidden="true"></svg></div>
       <div class="legend" hidden><span><i class="swatch main"></i>session</span><span><i class="swatch sub"></i>subagent</span></div>
     </section>
@@ -121,14 +131,18 @@ function build() {
     live: app.querySelector('[data-chart="live"]'),
     peak: app.querySelector('.axis-peak'),
     grid: app.querySelector('.grid'),
-    summary: app.querySelector('.summary'),
     source: app.querySelector('.totals-source'),
+    costTotal: app.querySelector('.cost-total'),
+    costTurn: app.querySelector('.cost-turn'),
+    costModel: app.querySelector('.cost-model'),
+    costRate: app.querySelector('.cost-rate'),
     subsBlock: app.querySelector('.subagents'),
     subsMeta: app.querySelector('.subs-meta'),
     subsList: app.querySelector('.subs-list'),
     legend: app.querySelector('.legend'),
     stepsChart: app.querySelector('[data-chart="steps"]'),
-    stepsMeta: app.querySelector('.steps-meta'),
+    stepsAvg: app.querySelector('.steps-avg'),
+    stepsPeak: app.querySelector('.steps-peak'),
     foot: app.querySelector('.foot-text'),
   };
 }
@@ -139,6 +153,38 @@ function niceMax(value) {
   const scaled = value / pow;
   const step = scaled <= 1 ? 1 : scaled <= 2 ? 2 : scaled <= 5 ? 5 : 10;
   return step * pow;
+}
+
+/** Dollars, with enough digits for a single turn's spend. */
+function money(value) {
+  const n = Number(value) || 0;
+  if (!n) return '$0';
+  return n < 0.01 ? `$${n.toFixed(4)}` : `$${n.toFixed(2)}`;
+}
+
+/** A per-million rate, where the interesting digits are small. */
+function rateMoney(value) {
+  const n = Number(value) || 0;
+  if (!n) return '$0';
+  if (n < 0.01) return `$${n.toFixed(4)}`;
+  return `$${n < 1 ? n.toFixed(2) : n.toFixed(1)}`;
+}
+
+/**
+ * What this session and its subagents cost: all of it, the turn that is running
+ * (or the last one), and the model behind it with its effective rate. The rate
+ * is observed, not list price: the extension cannot read a provider's price
+ * table, so it divides this session's cost by every token it processed.
+ */
+function paintCost(data) {
+  const cost = data.cost ?? {};
+  const total = typeof cost.total === 'number' ? cost.total : (data.totals?.cost ?? 0);
+  ui.costTotal.textContent = money(total);
+  ui.costTurn.textContent = typeof cost.lastTurn === 'number' ? money(cost.lastTurn) : '—';
+  ui.costModel.textContent = modelLabel || '—';
+  ui.costModel.title = modelLabel || '';
+  ui.costRate.textContent = typeof cost.perMillion === 'number' ? `${rateMoney(cost.perMillion)} / 1M` : '—';
+  ui.costRate.title = 'effective: this session’s cost divided by every token it processed';
 }
 
 function drawLive(data) {
@@ -238,22 +284,21 @@ function drawSteps(data) {
   const height = Math.max(86, svg.clientHeight || 86);
   const pad = 6;
   svg.setAttribute('viewBox', `0 0 ${width} ${height}`);
-  const steps = (Array.isArray(data.steps) ? data.steps : [])
-    .filter((step) => step.tps && step.tps > 0 && !step.aborted)
-    .slice(-32);
+  const steps = (Array.isArray(data.steps) ? data.steps : []).filter(
+    (step) => step.tps && step.tps > 0 && !step.aborted,
+  );
+  const rates = data.rates ?? { avg: 0, peak: 0 };
   if (steps.length === 0) {
     svg.innerHTML = `<text x="${(width / 2).toFixed(1)}" y="${(height / 2).toFixed(1)}" text-anchor="middle" fill="var(--oc-muted)" font-size="11">no finished steps yet</text>`;
-    ui.stepsMeta.textContent = '';
+    ui.stepsAvg.textContent = '';
+    ui.stepsPeak.textContent = '';
     return;
   }
-  const max = niceMax(Math.max(...steps.map((step) => step.tps)));
-  // Tokens over stream time, not the mean of the bars: the same definition the
-  // last-step readout and the built-in turn rate use.
-  const totalTokens = steps.reduce((sum, step) => sum + step.tokens, 0);
-  const totalMs = steps.reduce((sum, step) => sum + step.ms, 0);
-  const average = totalMs > 0 ? (totalTokens / totalMs) * 1000 : 0;
+  const max = niceMax(Math.max(rates.peak ?? 0, ...steps.map((step) => step.tps)));
   const slot = width / steps.length;
-  const barWidth = Math.max(2, Math.min(14, slot - 2));
+  // With every step on the chart a long session gets one-pixel bars; a gap
+  // under half a pixel would just erase them.
+  const barWidth = Math.max(1, Math.min(14, slot - 1));
   const pieces = [];
   steps.forEach((step, index) => {
     const h = Math.max(1.5, (step.tps / max) * (height - pad * 2));
@@ -264,12 +309,23 @@ function drawSteps(data) {
       `<rect x="${x.toFixed(1)}" y="${y.toFixed(1)}" width="${barWidth.toFixed(1)}" height="${h.toFixed(1)}" rx="1.5" fill="${fill}" opacity="${(0.4 + 0.6 * (index / Math.max(1, steps.length - 1))).toFixed(2)}"><title>${step.sub ? 'subagent · ' : ''}${Math.round(step.tps)} t/s · ${compact(step.tokens)} tokens in ${seconds(step.ms)}</title></rect>`,
     );
   });
-  const avgY = height - pad - (average / max) * (height - pad * 2);
-  pieces.push(
-    `<line x1="0" y1="${avgY.toFixed(1)}" x2="${width}" y2="${avgY.toFixed(1)}" stroke="var(--oc-success)" stroke-width="1" stroke-dasharray="3 3" opacity="0.75" />`,
-  );
+  // The session's own average and best step, over every step it kept: the
+  // same numbers the header shows, in the same colours.
+  if (rates.avg > 0) {
+    const avgY = height - pad - (rates.avg / max) * (height - pad * 2);
+    pieces.push(
+      `<line x1="0" y1="${avgY.toFixed(1)}" x2="${width}" y2="${avgY.toFixed(1)}" stroke="var(--oc-success)" stroke-width="1" stroke-dasharray="3 3" opacity="0.75" />`,
+    );
+  }
+  if (rates.peak > 0) {
+    const peakY = height - pad - (rates.peak / max) * (height - pad * 2);
+    pieces.push(
+      `<line x1="0" y1="${peakY.toFixed(1)}" x2="${width}" y2="${peakY.toFixed(1)}" stroke="var(--oc-muted)" stroke-width="1" stroke-dasharray="2 3" opacity="0.6" />`,
+    );
+  }
   svg.innerHTML = pieces.join('');
-  ui.stepsMeta.textContent = `avg ${Math.round(average)} t/s`;
+  ui.stepsAvg.textContent = rates.avg > 0 ? `avg ${Math.round(rates.avg)} t/s` : '';
+  ui.stepsPeak.textContent = rates.peak > 0 ? `peak ${Math.round(rates.peak)} t/s` : '';
 }
 
 const SUB_STATUS_TEXT = { tool: 'tool', 'waiting-permission': 'permission', 'waiting-question': 'question' };
@@ -397,10 +453,9 @@ function render(data) {
       : 'no finished step yet';
 
   paintCells(rowNodes, data);
+  paintCost(data);
   const totals = data.totals ?? {};
   ui.source.textContent = `${totals.source === 'usage' ? 'live' : 'from history'}${subLabel ? ` · ${subLabel}` : ''}`;
-  ui.summary.textContent = totals.cost > 0 ? `cost $${totals.cost < 0.01 ? totals.cost.toFixed(4) : totals.cost.toFixed(2)}` : '';
-  ui.summary.title = subLabel ? `cost of this session and its ${subLabel}` : 'cost of this session';
   ui.foot.textContent = data.error
     ? `cannot read history: ${data.error}`
     : data.stream?.state === 'open'
@@ -521,7 +576,8 @@ host.onReady((ctx) => {
     requestAnimationFrame(paint);
   }
   const model = ctx.session?.model;
-  ui.eyebrow.textContent = typeof model === 'string' ? model.replace(/^.*\//, '') : typeof model?.name === 'string' ? model.name : '';
+  modelLabel = typeof model === 'string' ? model.replace(/^.*\//, '') : typeof model?.name === 'string' ? model.name : '';
+  ui.eyebrow.textContent = modelLabel;
   const nextSession = ctx.session?.id ?? null;
   if (nextSession === sessionId) return;
   lastRounded = -1;

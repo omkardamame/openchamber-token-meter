@@ -110,6 +110,7 @@ export function createService({ fetchImpl = fetch, log = () => {}, base = BASE, 
       if (idle) dropTree(idle);
     }
     void refreshLineage(collector);
+    void readTurnStart(collector);
     return collector;
   };
 
@@ -248,6 +249,30 @@ export function createService({ fetchImpl = fetch, log = () => {}, base = BASE, 
       log(`token-meter: could not place ${id}: ${error?.message ?? error}`);
     } finally {
       learning.delete(id);
+    }
+  };
+
+  /**
+   * The last user message starts the current (or last) turn. A collector opened
+   * mid-turn never saw `session.execution.started`, so its last-turn cost has no
+   * boundary; the message's own time gives one. A live turn start is later and
+   * is kept. Failure is logged, not fatal: the cost cell shows a dash.
+   */
+  const readTurnStart = async (collector, force = false) => {
+    if (!base || !upstreamIsLoopback || collector.turnStartLoading) return;
+    const now = Date.now();
+    if (!force && collector.turnStartedAt) return;
+    if (now - collector.turnStartTriedAt < LINEAGE_RETRY_MS) return;
+    collector.turnStartLoading = true;
+    collector.turnStartTriedAt = now;
+    try {
+      const answer = await apiGet(`/api/session/${encodeURIComponent(collector.id)}/message?type=user&limit=1&order=desc`);
+      const created = answer?.data?.[0]?.time?.created;
+      if (typeof created === 'number' && created > collector.turnStartedAt) collector.turnStartedAt = created;
+    } catch (error) {
+      log(`token-meter: could not read the turn start of ${collector.id}: ${error?.message ?? error}`);
+    } finally {
+      collector.turnStartLoading = false;
     }
   };
 
@@ -438,6 +463,9 @@ export function createService({ fetchImpl = fetch, log = () => {}, base = BASE, 
       // count a half-finished step and make the totals dip. A failed read waits
       // 15 s, so a broken upstream is not hammered once per poll.
       const stale = now - collector.historyAt > HISTORY_RECONCILE_MS && !collector.turnActive;
+      // A turn start missed while the stream was down is corrected with the
+      // same slow cadence as the history.
+      if (stale) void readTurnStart(collector, true);
       const mayLoad =
         !collector.loading &&
         now - collector.historyTriedAt >= (collector.error ? 15_000 : 0) &&

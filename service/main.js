@@ -87,6 +87,9 @@ function createCollector(id) {
     charsPerToken: DEFAULT_CHARS_PER_TOKEN,
     stream: null,
     turnActive: false,
+    turnStartedAt: 0,
+    turnStartTriedAt: 0,
+    turnStartLoading: false,
     ttftMs: null,
     lastTtftMs: null,
     lastStep: null,
@@ -249,6 +252,7 @@ function stepFromMessage(message) {
     at: typeof streamed === "number" ? streamed : created,
     tokens: output,
     total: (tokens.input ?? 0) + output,
+    cost: typeof message.cost === "number" ? message.cost : 0,
     cacheRead: tokens.cache?.read ?? 0,
     cacheWrite: tokens.cache?.write ?? 0,
     ms,
@@ -365,6 +369,7 @@ function applyEvent(collector, event) {
       collector.turnActive = true;
       collector.status = "streaming";
       collector.error = null;
+      collector.turnStartedAt = typeof data.started === "number" ? data.started : at;
       return;
     case "session.tool.called":
       collector.status = "tool";
@@ -432,6 +437,7 @@ function applyEvent(collector, event) {
           at: endAt,
           tokens: output,
           total: tokens.input + output,
+          cost: typeof data.cost === "number" ? data.cost : 0,
           cacheRead: tokens.cacheRead,
           cacheWrite: tokens.cacheWrite,
           ms,
@@ -530,8 +536,19 @@ function snapshot(collector, now = Date.now(), tree = [collector]) {
     }
   }
   steps.sort((a, b) => a.at - b.at);
+  const rates = ratesOf(steps);
   const prompt = totals.input + totals.cacheRead + totals.cacheWrite;
   const generated = totals.output + totals.reasoning;
+  const consumed = prompt + generated;
+  const totalCost = Math.round(totals.cost * 1e6) / 1e6;
+  let lastTurnCost = 0;
+  if (collector.turnStartedAt) {
+    for (const step of steps) {
+      if (step.at >= collector.turnStartedAt)
+        lastTurnCost += step.cost ?? 0;
+    }
+  }
+  lastTurnCost = Math.round(lastTurnCost * 1e6) / 1e6;
   const live = collector.series[collector.series.length - 1]?.v ?? 0;
   const streamer = members.find((member) => member.status === "streaming" && member.ttftMs != null);
   const lastStepRaw = members.reduce((best, member) => member.lastStep && (!best || member.lastStep.at > best.at) ? member.lastStep : best, null);
@@ -572,13 +589,18 @@ function snapshot(collector, now = Date.now(), tree = [collector]) {
       reasoning: totals.reasoning,
       cacheRead: totals.cacheRead,
       cacheWrite: totals.cacheWrite,
-      cost: Math.round(totals.cost * 1e6) / 1e6,
+      cost: totalCost,
       steps: totals.steps,
       prompt,
       generated,
-      consumed: prompt + generated,
+      consumed,
       cacheHitRate: prompt > 0 ? totals.cacheRead / prompt : 0,
       source: collector.totalsFrom
+    },
+    cost: {
+      total: totalCost,
+      lastTurn: lastTurnCost,
+      perMillion: consumed > 0 ? Math.round(totalCost / consumed * 1e6 * 1e4) / 1e4 : null
     },
     live: {
       tps: live,
@@ -596,17 +618,14 @@ function snapshot(collector, now = Date.now(), tree = [collector]) {
       v: collector.series.slice(-SERIES_POINTS).map((point) => point.v)
     },
     stepsSeq: members.reduce((sum, member) => sum + member.stepsSeq, 0),
-    steps: steps.slice(-40).map((step) => ({
+    steps: steps.slice(-MAX_STEPS).map((step) => ({
       tokens: step.tokens,
       ms: step.ms,
       tps: step.tps,
       aborted: step.aborted,
       ...subSteps.has(step) ? { sub: true } : {}
     })),
-    rates: {
-      avg: Math.round(ratesOf(steps).avg * 10) / 10,
-      peak: Math.round(ratesOf(steps).peak * 10) / 10
-    },
+    rates: { avg: Math.round(rates.avg * 10) / 10, peak: Math.round(rates.peak * 10) / 10 },
     generatedAt: now
   };
 }
@@ -683,6 +702,7 @@ function createService({ fetchImpl = fetch, log = () => {}, base = BASE, token =
         dropTree(idle);
     }
     refreshLineage(collector);
+    readTurnStart(collector);
     return collector;
   };
   const treeOf = (root) => {
@@ -809,6 +829,27 @@ function createService({ fetchImpl = fetch, log = () => {}, base = BASE, token =
       log(`token-meter: could not place ${id}: ${error?.message ?? error}`);
     } finally {
       learning.delete(id);
+    }
+  };
+  const readTurnStart = async (collector, force = false) => {
+    if (!base || !upstreamIsLoopback || collector.turnStartLoading)
+      return;
+    const now = Date.now();
+    if (!force && collector.turnStartedAt)
+      return;
+    if (now - collector.turnStartTriedAt < LINEAGE_RETRY_MS)
+      return;
+    collector.turnStartLoading = true;
+    collector.turnStartTriedAt = now;
+    try {
+      const answer = await apiGet(`/api/session/${encodeURIComponent(collector.id)}/message?type=user&limit=1&order=desc`);
+      const created = answer?.data?.[0]?.time?.created;
+      if (typeof created === "number" && created > collector.turnStartedAt)
+        collector.turnStartedAt = created;
+    } catch (error) {
+      log(`token-meter: could not read the turn start of ${collector.id}: ${error?.message ?? error}`);
+    } finally {
+      collector.turnStartLoading = false;
     }
   };
   const dispatch = (event) => {
@@ -989,6 +1030,8 @@ function createService({ fetchImpl = fetch, log = () => {}, base = BASE, token =
       }
       const now = Date.now();
       const stale = now - collector.historyAt > HISTORY_RECONCILE_MS && !collector.turnActive;
+      if (stale)
+        readTurnStart(collector, true);
       const mayLoad = !collector.loading && now - collector.historyTriedAt >= (collector.error ? 15000 : 0) && (first || stale);
       if (mayLoad) {
         const run = loadHistory(collector, apiGet, first ? now + FIRST_LOAD_BUDGET_MS : 0);

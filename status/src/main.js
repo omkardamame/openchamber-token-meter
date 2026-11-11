@@ -86,7 +86,7 @@ function build() {
       </div>
       <svg class="spark" data-chart="spark" height="30" aria-hidden="true"></svg>
     </div>
-    <div class="grid"></div>
+    <div class="grid totals-grid"></div>
     <div class="foot"></div>
   `;
   root.append(app);

@@ -31,7 +31,10 @@ https://github.com/omkardamame/openchamber-token-meter.git
 - **Subagents** — each subagent still working, its own live rate, and how many
   of the tree are running.
 - **Totals** — In, Out, Think, Total out, Cache, Cache hit, TTFT, Consumed.
-- **Per step** — orange bars are the session's steps, blue are its subagents'.
+- **Cost** — the session's total, the last turn, the model, and its effective
+  cost per million tokens.
+- **Per step** — every step the meter keeps (up to 400), orange for the session
+  and blue for a subagent, with the green average and the best step marked.
 - **Work Status** — the same numbers as a compact strip in the chat panel, so
   the speed sits next to the conversation.
 
@@ -49,6 +52,11 @@ cannot count the same step twice.
 The headline is a sum, not a pick: every member that is streaming contributes
 its own estimated rate, with its own learned ratio. The rail panel lists each
 running subagent separately, so the combined number can be read apart.
+
+The last-turn cost starts at the last user message, or at the turn-start event
+when the meter is already watching. The model's rate is **effective**: this
+session's cost divided by every token it processed. A provider's list price is
+not part of the extension's read access, so it cannot be shown.
 
 Totals, per-step speed and TTFT are measured. The live `N t/s` is an estimate:
 streamed characters × a ratio learned from finished steps, kept per session so
