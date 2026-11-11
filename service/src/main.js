@@ -7,6 +7,7 @@ import { timingSafeEqual } from 'node:crypto';
 import {
   LIVE_TYPES,
   applyEvent,
+  applyRecord,
   createCollector,
   loadHistory,
   snapshot,
@@ -29,7 +30,15 @@ const HISTORY_RECONCILE_MS = 300_000;
 const FIRST_LOAD_BUDGET_MS = 6_000;
 const HOT_MS = 30_000;
 const COLLECTOR_TTL_MS = 10 * 60_000;
+// Watched sessions; each carries its own subagent tree.
 const MAX_COLLECTORS = 6;
+// `?parentID=` answers the children of one session in a few KB, so the tree can
+// be kept fresh without scanning every session on the machine.
+const LINEAGE_MS = 30_000;
+const LINEAGE_RETRY_MS = 60_000;
+const LINEAGE_DEPTH = 4;
+const MAX_SUBAGENTS = 40;
+const SUBAGENT_HISTORY_RETRY_MS = 15_000;
 const TICK_MS = 250;
 
 if (!PORT || !TOKEN) {
@@ -80,20 +89,172 @@ export function createService({ fetchImpl = fetch, log = () => {}, base = BASE, 
     if (!collector) {
       collector = createCollector(id);
       collectors.set(id, collector);
-      if (collectors.size > MAX_COLLECTORS) {
-        // Never drop a session that is streaming: it is the one being watched.
-        const idle = [...collectors.entries()]
-          .filter(([, item]) => !item.turnActive)
-          .sort((a, b) => a[1].touchedAt - b[1].touchedAt)[0];
-        if (idle) collectors.delete(idle[0]);
+    }
+    collector.touchedAt = Date.now();
+    collector.watched = true;
+    collector.watchedAt = collector.touchedAt;
+    // Only watched sessions count against the limit; a subagent exists because
+    // its parent is watched and leaves with it.
+    const watched = [...collectors.values()].filter((item) => item.watched);
+    if (watched.length > MAX_COLLECTORS) {
+      // Never drop a session that is streaming: it is the one being watched.
+      const idle = watched
+        .filter((item) => item !== collector && !item.turnActive)
+        .sort((a, b) => a.watchedAt - b.watchedAt)[0];
+      if (idle) dropTree(idle);
+    }
+    void refreshLineage(collector);
+    return collector;
+  };
+
+  /**
+   * The watched session followed by every collector below it. A subagent's own
+   * session names its parent, so the tree is walked from the parent ids the
+   * service already holds; no extra read happens per poll.
+   */
+  const treeOf = (root) => {
+    const tree = [root];
+    const seen = new Set([root.id]);
+    let grew = true;
+    while (grew) {
+      grew = false;
+      for (const collector of collectors.values()) {
+        if (!collector.parentId || seen.has(collector.id) || !seen.has(collector.parentId)) continue;
+        seen.add(collector.id);
+        tree.push(collector);
+        grew = true;
       }
     }
+    return tree;
+  };
+
+  /** Drop a watched session and the subagents that only existed for it. */
+  const dropTree = (root) => {
+    for (const member of treeOf(root)) {
+      // A subagent the user also has open keeps its own collector; it simply
+      // becomes a root of its own.
+      if (member !== root && member.watched) {
+        member.parentId = null;
+        continue;
+      }
+      collectors.delete(member.id);
+    }
+  };
+
+  const watchedRoots = () => [...collectors.values()].filter((collector) => collector.watched);
+
+  const ensureSubagent = (id, record, parentId) => {
+    let collector = collectors.get(id);
+    if (!collector) {
+      collector = createCollector(id);
+      collector.parentId = parentId ?? record?.parentID ?? null;
+      collectors.set(id, collector);
+    } else if (!collector.parentId) {
+      collector.parentId = parentId ?? record?.parentID ?? null;
+    }
+    if (record) applyRecord(collector, record);
     collector.touchedAt = Date.now();
     return collector;
   };
 
+  /**
+   * Ask OpenCode for the children of a session, then of each child: subagents
+   * can spawn subagents. A read costs a few KB and is throttled, so the tree is
+   * correct for sessions that finished before the meter was opened too.
+   */
+  const refreshLineage = async (root) => {
+    if (!base || !upstreamIsLoopback || root.lineageLoading) return;
+    const now = Date.now();
+    if (root.lineageAt && now - root.lineageAt < LINEAGE_MS) return;
+    if (!root.lineageAt && root.lineageTriedAt && now - root.lineageTriedAt < LINEAGE_RETRY_MS) return;
+    root.lineageLoading = true;
+    root.lineageTriedAt = now;
+    try {
+      const queue = [{ id: root.id, depth: 0 }];
+      const seen = new Set();
+      let found = 0;
+      while (queue.length && found < MAX_SUBAGENTS) {
+        const { id, depth } = queue.shift();
+        if (depth > LINEAGE_DEPTH) continue;
+        const answer = await apiGet(`/api/session?parentID=${encodeURIComponent(id)}&limit=200`);
+        // The panel may have moved on and dropped this tree while the read was
+        // in flight; its subagents must not outlive it.
+        if (!collectors.has(root.id)) return;
+        for (const record of Array.isArray(answer?.data) ? answer.data : []) {
+          if (!record?.id || record.id === root.id || seen.has(record.id)) continue;
+          seen.add(record.id);
+          found += 1;
+          ensureSubagent(record.id, record, id);
+          queue.push({ id: record.id, depth: depth + 1 });
+          if (found >= MAX_SUBAGENTS) break;
+        }
+      }
+      root.lineageAt = Date.now();
+      root.lineageTriedAt = 0;
+    } catch (error) {
+      log(`token-meter: could not read the subagents of ${root.id}: ${error?.message ?? error}`);
+    } finally {
+      root.lineageLoading = false;
+    }
+  };
+
+  /**
+   * A session that is not in any watched tree yet sent an event. Place it by
+   * its parent chain, so a subagent created after the last lineage read shows
+   * up on its own instead of waiting for the next one. Unknown sessions that
+   * belong to nobody watched are remembered and not read again for a minute.
+   */
+  const learning = new Set();
+  const missedAt = new Map();
+  const learnSession = async (id) => {
+    if (!base || !upstreamIsLoopback || learning.has(id) || watchedRoots().length === 0) return;
+    const now = Date.now();
+    if (missedAt.has(id) && now - missedAt.get(id) < LINEAGE_RETRY_MS) return;
+    learning.add(id);
+    try {
+      const chain = [];
+      let cursor = id;
+      let attached = false;
+      for (let depth = 0; depth <= LINEAGE_DEPTH; depth += 1) {
+        const record = (await apiGet(`/api/session/${encodeURIComponent(cursor)}`))?.data;
+        if (!record?.id) break;
+        chain.push(record);
+        const parentId = record.parentID;
+        if (!parentId) break;
+        if (collectors.has(parentId)) {
+          attached = true;
+          break;
+        }
+        cursor = parentId;
+      }
+      if (!attached) {
+        if (missedAt.size > 500) missedAt.clear();
+        missedAt.set(id, Date.now());
+        return;
+      }
+      for (let index = chain.length - 1; index >= 0; index -= 1) {
+        ensureSubagent(chain[index].id, chain[index], chain[index].parentID);
+      }
+      missedAt.delete(id);
+    } catch (error) {
+      if (missedAt.size > 500) missedAt.clear();
+      missedAt.set(id, Date.now());
+      log(`token-meter: could not place ${id}: ${error?.message ?? error}`);
+    } finally {
+      learning.delete(id);
+    }
+  };
+
   const dispatch = (event) => {
     if (!wantsEvent(event?.type)) return;
+    const sessionId = event?.data?.sessionID;
+    if (sessionId) {
+      const collector = collectors.get(sessionId);
+      if (collector) applyEvent(collector, event);
+      else void learnSession(sessionId);
+      return;
+    }
+    // A form may name its session only inside the form itself.
     for (const collector of collectors.values()) applyEvent(collector, event);
   };
 
@@ -181,12 +342,31 @@ export function createService({ fetchImpl = fetch, log = () => {}, base = BASE, 
 
   const ticker = setInterval(() => {
     const now = Date.now();
-    for (const [id, collector] of collectors) {
-      if (now - collector.touchedAt > COLLECTOR_TTL_MS) {
-        collectors.delete(id);
+    for (const collector of watchedRoots()) {
+      if (now - collector.watchedAt > COLLECTOR_TTL_MS) {
+        dropTree(collector);
         continue;
       }
-      if (now - collector.touchedAt <= HOT_MS || collector.status === 'streaming') tick(collector, now);
+      const tree = treeOf(collector);
+      // Keep sampling while the panel asks for answers, and while any subagent
+      // is still streaming: the curve must not freeze the moment the parent
+      // goes quiet and hands its turn to a child.
+      if (now - collector.watchedAt > HOT_MS && !tree.some((member) => member.status === 'streaming')) continue;
+      tick(collector, now, tree);
+      void refreshLineage(collector);
+      for (const member of tree) {
+        // A subagent's history is read for the step chart; its totals come from
+        // OpenCode's usage record, which is exact and cheaper. Never load a
+        // half-finished step: wait for the child to go quiet.
+        const mayLoad =
+          member !== collector &&
+          member.historyAt === 0 &&
+          !member.loading &&
+          !member.turnActive &&
+          member.status !== 'streaming' &&
+          now - member.historyTriedAt >= SUBAGENT_HISTORY_RETRY_MS;
+        if (mayLoad) void loadHistory(member, apiGet, 0, { stepsOnly: true });
+      }
     }
   }, TICK_MS);
   ticker.unref?.();
@@ -262,8 +442,9 @@ export function createService({ fetchImpl = fetch, log = () => {}, base = BASE, 
       } else if (first && collector.loading) {
         await collector.loading;
       }
-      tick(collector);
-      const answer = snapshot(collector);
+      const tree = treeOf(collector);
+      tick(collector, now, tree);
+      const answer = snapshot(collector, now, tree);
       // The step list changes once per step; a client that already has this
       // sequence keeps its copy instead of receiving the same rows again.
       if (url.searchParams.get('steps') === String(answer.stepsSeq)) delete answer.steps;

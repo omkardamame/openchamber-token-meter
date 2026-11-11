@@ -155,6 +155,7 @@ function render(data) {
   clearNotice();
   paintCells(cellNodes, data);
   const streaming = data.status === 'streaming';
+  const subagents = data.subagents ?? { count: 0, streaming: 0, tool: 0 };
   ui.dot.dataset.state = dotState(data.status);
   const quiet = (data.live?.charsPerSecond ?? 0) < 5;
   targetTps = streaming ? (data.live?.tps ?? 0) : 0;
@@ -165,22 +166,24 @@ function render(data) {
   }
   ui.tps.classList.toggle('quiet', streaming && quiet);
   const lastStep = data.live?.lastStep;
+  const lastSub = lastStep?.sub ? ' · sub' : '';
   ui.last.textContent =
     data.status === 'tool'
-      ? 'running a tool'
+      ? data.live?.subagent
+        ? 'subagent tool'
+        : 'running a tool'
       : lastStep?.tps
-        ? `last ${Math.round(lastStep.tps)} t/s`
+        ? `last ${Math.round(lastStep.tps)} t/s${lastSub}`
         : lastStep
-          ? `last step ${seconds(lastStep.ms)} · too short to rate`
+          ? `last step ${seconds(lastStep.ms)} · too short to rate${lastSub}`
           : 'no finished step yet';
 
   drawSpark(data);
 
-  ui.foot.textContent = data.error
-    ? 'cannot read history'
-    : streaming && data.live?.ttftMs >= 100
-      ? `first token ${(data.live.ttftMs / 1000).toFixed(1)} s`
-      : '';
+  const foot = [];
+  if (subagents.count > 0) foot.push(`${subagents.count} subagent${subagents.count === 1 ? '' : 's'}`);
+  if (streaming && data.live?.ttftMs >= 100) foot.push(`first token ${(data.live.ttftMs / 1000).toFixed(1)} s`);
+  ui.foot.textContent = data.error ? 'cannot read history' : foot.join(' · ');
   fitHeight();
 }
 

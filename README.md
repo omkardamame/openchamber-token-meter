@@ -2,7 +2,8 @@
 
 Live tokens per second for the open OpenChamber session, and what that session
 has spent: input, output, thinking, cache hits, time to first token, and the
-total consumed.
+total consumed. A session's subagents are part of it: while one of them streams,
+the headline moves, and their tokens count in the totals.
 
 ![The Token meter section in the Work Status panel](docs/status.png)
 
@@ -34,8 +35,15 @@ https://github.com/omkardamame/openchamber-token-meter.git
 OpenCode's own records: per-step token counts, part timings, and its event
 stream. That is provider- and agent-agnostic — any model, any agent.
 
+A task tool runs its subagent in a session of its own. The meter follows those
+child sessions (`parentID`), adds their rates to the parent's headline, and
+counts their tokens and cost in its totals; the per-step chart marks their
+steps. OpenCode keeps each session's own record separate, so summing a tree
+cannot count the same step twice.
+
 Totals, per-step speed and TTFT are measured. The live `N t/s` is an estimate:
-streamed characters × a ratio learned from finished steps.
+streamed characters × a ratio learned from finished steps, kept per session so
+two models in one tree do not share a ratio.
 
 ## Limits
 

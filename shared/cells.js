@@ -4,17 +4,17 @@ import { el } from './dom.js';
 import { compact, percent, seconds } from './summary.js';
 
 export const CELLS = [
-  { key: 'input', label: 'In', share: 'prompt', hint: 'prompt tokens OpenCode had to send fresh, and their share of the prompt' },
-  { key: 'output', label: 'Out', share: 'generated', hint: 'tokens written in the answer, and their share of the generated tokens' },
+  { key: 'input', label: 'In', share: 'prompt', hint: 'prompt tokens OpenCode had to send fresh, subagents included, and their share of the prompt' },
+  { key: 'output', label: 'Out', share: 'generated', hint: 'tokens written in the answers, subagents included, and their share of the generated tokens' },
   { key: 'reasoning', label: 'Think', share: 'generated', hint: 'reasoning tokens, billed as output' },
-  { key: 'generated', label: 'Total out', hint: 'output + thinking: every token the model generated' },
+  { key: 'generated', label: 'Total out', hint: 'output + thinking: every token the models generated, subagents included' },
   { key: 'cacheRead', label: 'Cache', hint: 'prompt tokens served from the cache instead of being sent again' },
   { key: 'cacheHitRate', label: 'Cache hit', hint: 'share of the prompt that came from the cache' },
-  { key: 'ttft', label: 'TTFT', hint: 'time from the step starting to its first streamed token', top: true },
+  { key: 'ttft', label: 'TTFT', hint: 'time from a step starting to its first streamed token', top: true },
   {
     key: 'consumed',
     label: 'Consumed',
-    hint: 'every token the model processed in this session: prompt (fresh + cached) plus generated',
+    hint: 'every token the models processed in this session and its subagents: prompt (fresh + cached) plus generated',
     top: true,
     emphasis: true,
   },

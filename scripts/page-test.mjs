@@ -109,6 +109,7 @@ const harness = `<!doctype html><meta charset="utf-8"><title>page test</title>
       values: [...doc.querySelectorAll('.cell-value')].map((n) => n.textContent.trim()),
       tps: (doc.querySelector('.tps-value') || doc.querySelector('.tps') || {}).textContent,
       bars: doc.querySelectorAll('[data-chart="steps"] rect').length,
+      stepSvg: (doc.querySelector('[data-chart="steps"]') || {}).innerHTML ?? '',
       labels: [...doc.querySelectorAll('svg text')].map((n) => n.textContent),
     };
   };
@@ -201,6 +202,29 @@ try {
   check('panel says a tool is running', /a tool is running/.test(tool.text), tool.text.slice(0, 60));
   check('panel glows orange for a tool', tool.dotState === 'tool', String(tool.dotState));
 
+  // a parent whose subagent is generating: the headline is the tree's
+  const subState = (over = {}) => {
+    const base = state();
+    return {
+      ...base,
+      status: 'streaming',
+      live: { ...base.live, tps: 41, subagent: true, lastStep: { ...base.live.lastStep, sub: true } },
+      subagents: { count: 2, streaming: 1, tool: 0 },
+      steps: [{ tokens: 500, ms: 2000, tps: 250, aborted: false, sub: true }],
+      ...over,
+    };
+  };
+  await panel.set(subState());
+  const subagent = await panel.read();
+  check('panel names the subagent behind the rate', /a subagent generating/.test(subagent.text), subagent.text.slice(0, 90));
+  check('panel says how many subagents are in the totals', /2 subagents/.test(subagent.text), subagent.text.slice(0, 90));
+  check('panel marks the last step as a subagent’s', /last 33 t\/s .*subagent/.test(subagent.text), subagent.text.slice(-90));
+  check('panel draws a subagent step differently', /subagent ·/.test(subagent.stepSvg) && subagent.bars === 1, `${subagent.bars} bars`);
+  check('panel breathes the dot while a subagent generates', subagent.dotState === 'streaming', String(subagent.dotState));
+  await panel.set(subState({ status: 'tool' }));
+  const subTool = await panel.read();
+  check('panel says the subagent is running a tool', /a subagent is running a tool/.test(subTool.text), subTool.text.slice(0, 90));
+
   await panel.set({ ok: false, error: 'OpenCode access is not available.', totals: null });
   const broken = await panel.read();
   check('panel explains a refused answer', /cannot read this session/.test(broken.text), broken.text.slice(0, 70));
@@ -217,6 +241,18 @@ try {
   const sStreaming = await status.read();
   check('status draws the live rate while generating', sStreaming.tps === '36', String(sStreaming.tps));
   check('status breathes the dot while generating', sStreaming.dotState === 'streaming', String(sStreaming.dotState));
+
+  const statusBase = state();
+  await status.set({
+    ...statusBase,
+    status: 'streaming',
+    live: { ...statusBase.live, tps: 41, subagent: true, lastStep: { ...statusBase.live.lastStep, sub: true } },
+    subagents: { count: 2, streaming: 1, tool: 0 },
+  });
+  const sSub = await status.read();
+  check('status says how many subagents are included', /2 subagents/.test(sSub.text), sSub.text.slice(0, 80));
+  check('status marks a subagent step', /last 33 t\/s · sub/.test(sSub.text), sSub.text.slice(0, 80));
+  check('status keeps the first-token wait beside the subagents', /2 subagents · first token 6\.5 s/.test(sSub.text), sSub.text.slice(0, 80));
   check('status runs without an exception', (await status.errors()).length === 0, (await status.errors()).join(' | '));
 } finally {
   server.close();

@@ -5,7 +5,7 @@ import { execFileSync } from 'node:child_process';
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { createCollector, loadHistory, applyEvent, tick, snapshot } from '../service/src/collector.js';
+import { createCollector, applyRecord, loadHistory, applyEvent, tick, snapshot } from '../service/src/collector.js';
 import { compress, easeToward, ratesOf } from '../shared/chart.js';
 import { dotState } from '../shared/cells.js';
 
@@ -147,6 +147,120 @@ const afterUsage = snapshot(live, at + 2700);
 check('usage event overrides totals', afterUsage.totals.output === 400 && afterUsage.totals.source === 'usage', `${afterUsage.totals.output}`);
 emit('session.execution.succeeded', {}, 3000);
 check('turn end clears the live rate', snapshot(live, at + 3200).status === 'idle');
+
+// ---------------------------------------------------------------- subagents
+// A watched session's numbers are its own plus its subagents'. OpenCode keeps
+// each session's record to its own messages, so summing a tree cannot count a
+// step twice — and a child that finished before the meter opened still counts
+// from its record.
+const treeParent = createCollector('ses_tree_parent');
+const treeChild = createCollector('ses_tree_child');
+applyRecord(treeParent, {
+  id: 'ses_tree_parent',
+  cost: 0.01,
+  tokens: { input: 100, output: 20, reasoning: 5, cache: { read: 300, write: 0 } },
+  time: {},
+});
+applyRecord(treeChild, {
+  id: 'ses_tree_child',
+  parentID: 'ses_tree_parent',
+  cost: 0.02,
+  tokens: { input: 50, output: 10, reasoning: 2, cache: { read: 70, write: 0 } },
+  time: { busy: 100, idle: 90 },
+});
+const treeSnap = snapshot(treeParent, Date.now(), [treeParent, treeChild]);
+check(
+  'a parent totals its subagents',
+  treeSnap.totals.input === 150 && treeSnap.totals.output === 30 && treeSnap.totals.reasoning === 7,
+  JSON.stringify({ in: treeSnap.totals.input, out: treeSnap.totals.output, think: treeSnap.totals.reasoning }),
+);
+check('a parent totals its subagents cost', Math.abs(treeSnap.totals.cost - 0.03) < 1e-9, `$${treeSnap.totals.cost}`);
+check(
+  'a parent names how many subagents it has',
+  treeSnap.subagents.count === 1 && treeSnap.subagents.streaming === 1,
+  JSON.stringify(treeSnap.subagents),
+);
+check(
+  'a streaming subagent keeps the parent generating',
+  treeSnap.status === 'streaming' && treeSnap.live.subagent === true,
+  `${treeSnap.status} (${treeSnap.live.subagent})`,
+);
+
+const treeAt = Date.now();
+const emitTree = (collector, id, type, data, offset = 0) =>
+  applyEvent(collector, { type, created: treeAt + offset, data: { sessionID: id, ...data } });
+for (const [collector, id] of [
+  [treeParent, treeParent.id],
+  [treeChild, treeChild.id],
+]) {
+  emitTree(collector, id, 'session.execution.started', {});
+  emitTree(collector, id, 'session.step.started', { assistantMessageID: `msg_${id}`, started: treeAt });
+  emitTree(collector, id, 'session.text.started', { assistantMessageID: `msg_${id}`, ordinal: 0 }, 120);
+  for (let i = 0; i < 10; i += 1) {
+    emitTree(collector, id, 'session.text.delta', { assistantMessageID: `msg_${id}`, ordinal: 0, delta: 'q'.repeat(40) }, 200 + i * 100);
+  }
+}
+const ownRate = tick(treeParent, treeAt + 2200, [treeParent]);
+const childRate = tick(treeChild, treeAt + 2200, [treeChild]);
+const bothRate = tick(treeParent, treeAt + 2200, [treeParent, treeChild]);
+check(
+  'a parent headline adds its subagents live rate',
+  Math.abs(bothRate - (ownRate + childRate)) < 0.5 && bothRate > ownRate,
+  `${ownRate.toFixed(1)} + ${childRate.toFixed(1)} = ${bothRate.toFixed(1)} t/s`,
+);
+
+emitTree(treeChild, treeChild.id, 'session.step.streamed', { assistantMessageID: `msg_${treeChild.id}` }, 2300);
+emitTree(
+  treeChild,
+  treeChild.id,
+  'session.step.ended',
+  {
+    assistantMessageID: `msg_${treeChild.id}`,
+    finish: 'stop',
+    cost: 0,
+    tokens: { input: 1, output: 40, reasoning: 0, cache: { read: 0, write: 0 } },
+  },
+  2400,
+);
+const afterChildStep = snapshot(treeParent, treeAt + 2600, [treeParent, treeChild]);
+check(
+  'a subagent step reaches the parent chart, marked as one',
+  afterChildStep.steps.some((step) => step.sub === true && step.tps > 0) && afterChildStep.live.lastStep?.sub === true,
+  JSON.stringify(afterChildStep.steps.at(-1)),
+);
+check(
+  'the step sequence sums the tree so the client refetches the list',
+  afterChildStep.stepsSeq === treeParent.stepsSeq + treeChild.stepsSeq,
+  `${afterChildStep.stepsSeq} = ${treeParent.stepsSeq} + ${treeChild.stepsSeq}`,
+);
+check(
+  'a step does not double count on top of a cumulative usage record',
+  afterChildStep.totals.output === 30,
+  `${afterChildStep.totals.output} tokens out`,
+);
+applyEvent(treeChild, {
+  type: 'session.usage.updated',
+  created: treeAt + 2700,
+  data: {
+    sessionID: treeChild.id,
+    cost: 0.02,
+    tokens: { input: 50, output: 50, reasoning: 2, cache: { read: 70, write: 0 } },
+  },
+});
+const afterUsageTree = snapshot(treeParent, treeAt + 2800, [treeParent, treeChild]);
+check(
+  'a usage event raises a subagent total once',
+  afterUsageTree.totals.output === 70,
+  `${afterUsageTree.totals.output} tokens out`,
+);
+applyEvent(treeChild, { type: 'permission.asked', created: treeAt + 2900, data: { sessionID: treeChild.id } });
+emitTree(treeParent, treeParent.id, 'session.execution.succeeded', {}, 2850);
+const waitingTree = snapshot(treeParent, treeAt + 3000, [treeParent, treeChild]);
+check(
+  'a subagent waiting on the user keeps the parent waiting',
+  waitingTree.status === 'waiting-permission' && waitingTree.live.subagent === true,
+  waitingTree.status,
+);
 
 // OpenCode's own two readings differ by a rounding step; a running meter keeps the larger
 emit('session.usage.updated', { cost: 0.01, tokens: { input: 900, output: 399, reasoning: 100, cache: { read: 12_000, write: 40 } } }, 3300);
@@ -527,6 +641,160 @@ const guarded = await fetch(`http://127.0.0.1:${offLoopbackPort}/state?session=$
 const guardedBody = await guarded.json();
 check('a non-loopback upstream is refused', guardedBody.ok === false && /loopback/.test(guardedBody.error), guardedBody.error);
 offLoopback.stop();
+
+// ---------------------------------------------------------------- subagents over HTTP
+// A watched parent must show what its subagents do, including children that
+// finished before the meter was opened. The tree above is served by a stub, so
+// the check does not depend on this machine's sessions.
+const treePort = port + 3;
+const treeStream = { controller: null };
+const records = {
+  ses_st_child: {
+    id: 'ses_st_child',
+    parentID: 'ses_st_parent',
+    cost: 0.02,
+    tokens: { input: 50, output: 10, reasoning: 2, cache: { read: 70, write: 0 } },
+    time: { busy: 1, idle: 0 },
+  },
+  ses_st_grand: {
+    id: 'ses_st_grand',
+    parentID: 'ses_st_child',
+    cost: 0.003,
+    tokens: { input: 7, output: 3, reasoning: 1, cache: { read: 9, write: 0 } },
+    time: {},
+  },
+};
+const answerJson = (data) =>
+  new Response(JSON.stringify({ data, cursor: { next: null } }), {
+    status: 200,
+    headers: { 'content-type': 'application/json' },
+  });
+const treeService = (await import('../service/src/main.js')).createService({
+  base: 'http://127.0.0.1:9',
+  token,
+  port: treePort,
+  fetchImpl: async (url) => {
+    const target = new URL(url);
+    if (target.pathname === '/api/event') {
+      return new Response(
+        new ReadableStream({
+          start(controller) {
+            treeStream.controller = controller;
+          },
+        }),
+        { status: 200, headers: { 'content-type': 'text/event-stream' } },
+      );
+    }
+    if (target.pathname === '/api/session') {
+      const parentID = target.searchParams.get('parentID');
+      return answerJson(Object.values(records).filter((record) => record.parentID === parentID));
+    }
+    const message = target.pathname.match(/^\/api\/session\/([^/]+)\/message$/);
+    if (message) return answerJson([]);
+    const one = target.pathname.match(/^\/api\/session\/([^/]+)$/);
+    if (one) {
+      const id = decodeURIComponent(one[1]);
+      return answerJson(records[id] ?? { id, parentID: null });
+    }
+    return answerJson({});
+  },
+});
+treeService.start();
+await new Promise((resolve) => setTimeout(resolve, 200));
+const treeGet = async () => {
+  const answer = await fetch(`http://127.0.0.1:${treePort}/state?session=ses_st_parent`, {
+    headers: { authorization: `Bearer ${token}` },
+  });
+  return answer.json();
+};
+const pushTree = (event) =>
+  treeStream.controller.enqueue(new TextEncoder().encode(`data: ${JSON.stringify(event)}\n\n`));
+await treeGet();
+await new Promise((resolve) => setTimeout(resolve, 600));
+const seeded = await treeGet();
+check('a watched parent finds its subagents', seeded.subagents?.count === 2, JSON.stringify(seeded.subagents));
+check(
+  'a subagent that finished before the meter opened still counts',
+  seeded.totals.input === 57 && seeded.totals.output === 13 && seeded.totals.reasoning === 3,
+  `${seeded.totals.input} in, ${seeded.totals.output} out, ${seeded.totals.reasoning} think`,
+);
+check('a subagent cache read and cost are in the parent', seeded.totals.cacheRead === 79 && Math.abs(seeded.totals.cost - 0.023) < 1e-9, `${seeded.totals.cacheRead} cached, $${seeded.totals.cost}`);
+
+const stAt = Date.now();
+pushTree({
+  id: 'st_1',
+  created: stAt,
+  type: 'session.step.started',
+  data: { sessionID: 'ses_st_child', assistantMessageID: 'msg_st', started: stAt },
+});
+for (let i = 0; i < 12; i += 1) {
+  pushTree({
+    id: `st_d${i}`,
+    created: stAt + 100 + i * 80,
+    type: 'session.text.delta',
+    data: { sessionID: 'ses_st_child', assistantMessageID: 'msg_st', ordinal: 0, delta: 'w'.repeat(60) },
+  });
+}
+await new Promise((resolve) => setTimeout(resolve, 700));
+const liveChild = await treeGet();
+check(
+  'a subagent makes the parent generate instead of reading zero',
+  liveChild.status === 'streaming' && liveChild.live.subagent === true && liveChild.series.v.some((value) => value > 0),
+  `${liveChild.status}, subagent ${liveChild.live.subagent}, peak ${Math.max(...liveChild.series.v)} t/s`,
+);
+pushTree({
+  id: 'st_end',
+  created: stAt + 1500,
+  type: 'session.step.ended',
+  data: {
+    sessionID: 'ses_st_child',
+    assistantMessageID: 'msg_st',
+    finish: 'stop',
+    cost: 0,
+    tokens: { input: 5, output: 40, reasoning: 0, cache: { read: 0, write: 0 } },
+  },
+});
+await new Promise((resolve) => setTimeout(resolve, 400));
+const childStep = await treeGet();
+check('a subagent step is not counted twice on a cumulative record', childStep.totals.output === 13, `${childStep.totals.output} out`);
+check(
+  'a subagent step is drawn as one',
+  Array.isArray(childStep.steps) && childStep.steps.some((step) => step.sub === true),
+  JSON.stringify(childStep.steps?.at(-1)),
+);
+pushTree({
+  id: 'st_usage',
+  created: stAt + 1600,
+  type: 'session.usage.updated',
+  data: {
+    sessionID: 'ses_st_child',
+    cost: 0.02,
+    tokens: { input: 55, output: 50, reasoning: 2, cache: { read: 70, write: 0 } },
+  },
+});
+await new Promise((resolve) => setTimeout(resolve, 400));
+const childUsage = await treeGet();
+check('a subagent usage event moves the parent total once', childUsage.totals.output === 53, `${childUsage.totals.output} out`);
+
+// A child created after the last lineage read places itself from its parent
+// chain on its first event.
+records.ses_st_late = {
+  id: 'ses_st_late',
+  parentID: 'ses_st_child',
+  cost: 0.001,
+  tokens: { input: 1, output: 1, reasoning: 0, cache: { read: 0, write: 0 } },
+  time: {},
+};
+pushTree({
+  id: 'st_late',
+  created: stAt + 2000,
+  type: 'session.step.started',
+  data: { sessionID: 'ses_st_late', assistantMessageID: 'msg_late', started: stAt + 2000 },
+});
+await new Promise((resolve) => setTimeout(resolve, 500));
+const late = await treeGet();
+check('a subagent created between scans places itself', late.subagents?.count === 3, JSON.stringify(late.subagents));
+treeService.stop();
 
 service.stop();
 const passed = results.filter((result) => result.ok).length;

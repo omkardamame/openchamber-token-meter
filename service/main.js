@@ -68,6 +68,12 @@ var emptyTotals = () => ({
 function createCollector(id) {
   return {
     id,
+    parentId: null,
+    watched: false,
+    watchedAt: 0,
+    lineageAt: 0,
+    lineageTriedAt: 0,
+    lineageLoading: false,
     status: "idle",
     error: null,
     totals: emptyTotals(),
@@ -165,6 +171,29 @@ function calibrate(collector, chars, tokens) {
   const clamped = Math.min(6, Math.max(0.02, ratio));
   collector.charsPerToken = collector.charsPerToken * 0.7 + clamped * 0.3;
 }
+function applyRecord(collector, record) {
+  if (!record)
+    return;
+  const busy = record.time?.busy;
+  const idle = record.time?.idle;
+  if (busy && (!idle || busy > idle) && collector.status === "idle")
+    collector.status = "streaming";
+  const tokens = record.tokens;
+  if (!tokens)
+    return;
+  const shape = sameShape(tokens);
+  const totals = collector.totals;
+  collector.totals = {
+    input: Math.max(totals.input, shape.input),
+    output: Math.max(totals.output, shape.output),
+    reasoning: Math.max(totals.reasoning, shape.reasoning),
+    cacheRead: Math.max(totals.cacheRead, shape.cacheRead),
+    cacheWrite: Math.max(totals.cacheWrite, shape.cacheWrite),
+    cost: Math.max(totals.cost, typeof record.cost === "number" ? record.cost : totals.cost),
+    steps: totals.steps
+  };
+  collector.totalsFrom = "usage";
+}
 function pushStep(collector, step) {
   if (!step.tokens)
     return;
@@ -211,7 +240,7 @@ function stepFromMessage(message) {
     measured: true
   };
 }
-async function loadHistory(collector, apiGet, deadline = 0) {
+async function loadHistory(collector, apiGet, deadline = 0, { stepsOnly = false } = {}) {
   if (collector.loading)
     return collector.loading;
   collector.historyTriedAt = Date.now();
@@ -258,8 +287,28 @@ async function loadHistory(collector, apiGet, deadline = 0) {
       chars += textChars(message);
       tokens += shape.output + shape.reasoning;
     }
-    collector.totals = { ...collector.totals, ...totals };
-    collector.totalsFrom = "history";
+    if (!stepsOnly) {
+      const current = collector.totals;
+      const cumulative = collector.totalsFrom === "usage";
+      collector.totals = {
+        input: Math.max(current.input, totals.input),
+        output: Math.max(current.output, totals.output),
+        reasoning: Math.max(current.reasoning, totals.reasoning),
+        cacheRead: Math.max(current.cacheRead, totals.cacheRead),
+        cacheWrite: Math.max(current.cacheWrite, totals.cacheWrite),
+        cost: Math.max(current.cost, totals.cost),
+        steps: Math.max(current.steps, totals.steps)
+      };
+      if (!cumulative)
+        collector.totalsFrom = "history";
+    } else {
+      const seen = new Set(steps.map((step) => step.id));
+      for (const step of collector.steps) {
+        if (step.id && !seen.has(step.id))
+          steps.push(step);
+      }
+      steps.sort((a, b) => a.at - b.at);
+    }
     collector.steps = steps.slice(-MAX_STEPS);
     collector.stepsSeq += 1;
     collector.lastStep = [...collector.steps].reverse().find((step) => step.tps) ?? null;
@@ -385,16 +434,20 @@ function applyEvent(collector, event) {
         const known = step.id && collector.steps.some((item) => item.id === step.id);
         if (!known) {
           pushStep(collector, step);
-          collector.totals = {
-            input: collector.totals.input + tokens.input,
-            output: collector.totals.output + tokens.output,
-            reasoning: collector.totals.reasoning + tokens.reasoning,
-            cacheRead: collector.totals.cacheRead + tokens.cacheRead,
-            cacheWrite: collector.totals.cacheWrite + tokens.cacheWrite,
-            cost: collector.totals.cost + (typeof data.cost === "number" ? data.cost : 0),
-            steps: collector.totals.steps + 1
-          };
-          collector.totalsFrom = "events";
+          if (collector.totalsFrom !== "usage") {
+            collector.totals = {
+              input: collector.totals.input + tokens.input,
+              output: collector.totals.output + tokens.output,
+              reasoning: collector.totals.reasoning + tokens.reasoning,
+              cacheRead: collector.totals.cacheRead + tokens.cacheRead,
+              cacheWrite: collector.totals.cacheWrite + tokens.cacheWrite,
+              cost: collector.totals.cost + (typeof data.cost === "number" ? data.cost : 0),
+              steps: collector.totals.steps + 1
+            };
+            collector.totalsFrom = "events";
+          } else {
+            collector.totals = { ...collector.totals, steps: collector.totals.steps + 1 };
+          }
         }
         if (stream?.chars)
           calibrate(collector, stream.chars, output);
@@ -429,10 +482,14 @@ function applyEvent(collector, event) {
       addChars(collector, type, data, at);
   }
 }
-function tick(collector, now = Date.now()) {
-  const streaming = collector.status === "streaming";
-  const charsPerSecond = charsInWindow(collector, now) / (LIVE_WINDOW_MS / 1000);
-  const rate = streaming ? charsPerSecond * collector.charsPerToken : 0;
+function memberRate(collector, now) {
+  if (collector.status !== "streaming")
+    return 0;
+  return charsInWindow(collector, now) / (LIVE_WINDOW_MS / 1000) * collector.charsPerToken;
+}
+function tick(collector, now = Date.now(), tree = [collector]) {
+  const streaming = tree.some((member) => member.status === "streaming");
+  const rate = streaming ? tree.reduce((sum, member) => sum + memberRate(member, now), 0) : 0;
   const last = collector.series[collector.series.length - 1];
   if (!last || now - last.t >= SERIES_INTERVAL_MS) {
     collector.series.push({ t: now, v: Math.round(rate * 10) / 10 });
@@ -441,15 +498,54 @@ function tick(collector, now = Date.now()) {
   }
   return rate;
 }
-function snapshot(collector, now = Date.now()) {
-  const totals = collector.totals;
+function treeStatus(collector, tree) {
+  const streaming = tree.some((member) => member.status === "streaming");
+  if (streaming && collector.status !== "streaming")
+    return { status: "streaming", subagent: true };
+  if (collector.status !== "idle")
+    return { status: collector.status, subagent: false };
+  const waiting = tree.find((member) => member.status === "waiting-permission" || member.status === "waiting-question");
+  if (waiting)
+    return { status: waiting.status, subagent: true };
+  if (tree.some((member) => member.status === "tool"))
+    return { status: "tool", subagent: true };
+  return { status: collector.status, subagent: false };
+}
+function snapshot(collector, now = Date.now(), tree = [collector]) {
+  const members = tree.length ? tree : [collector];
+  const totals = emptyTotals();
+  const steps = [];
+  const subSteps = new Set;
+  for (const member of members) {
+    totals.input += member.totals.input;
+    totals.output += member.totals.output;
+    totals.reasoning += member.totals.reasoning;
+    totals.cacheRead += member.totals.cacheRead;
+    totals.cacheWrite += member.totals.cacheWrite;
+    totals.cost += member.totals.cost;
+    totals.steps += member.totals.steps;
+    for (const step of member.steps) {
+      steps.push(step);
+      if (member !== collector)
+        subSteps.add(step);
+    }
+  }
+  steps.sort((a, b) => a.at - b.at);
   const prompt = totals.input + totals.cacheRead + totals.cacheWrite;
   const generated = totals.output + totals.reasoning;
   const live = collector.series[collector.series.length - 1]?.v ?? 0;
+  const streamer = members.find((member) => member.status === "streaming" && member.ttftMs != null);
+  const lastStepRaw = members.reduce((best, member) => member.lastStep && (!best || member.lastStep.at > best.at) ? member.lastStep : best, null);
+  const status = treeStatus(collector, members);
+  const subagents = {
+    count: members.length - 1,
+    streaming: members.filter((member) => member !== collector && member.status === "streaming").length,
+    tool: members.filter((member) => member !== collector && member.status === "tool").length
+  };
   return {
     ok: true,
     session: collector.id,
-    status: collector.status,
+    status: status.status,
     error: collector.error,
     totals: {
       input: totals.input,
@@ -467,27 +563,30 @@ function snapshot(collector, now = Date.now()) {
     },
     live: {
       tps: live,
-      charsPerSecond: Math.round(charsInWindow(collector, now) / (LIVE_WINDOW_MS / 1000)),
+      charsPerSecond: Math.round(members.reduce((sum, member) => sum + charsInWindow(member, now), 0) / (LIVE_WINDOW_MS / 1000)),
       charsPerToken: Math.round(collector.charsPerToken * 1000) / 1000,
-      ttftMs: collector.ttftMs ?? collector.lastTtftMs ?? null,
-      lastStep: collector.lastStep,
+      ttftMs: collector.ttftMs ?? streamer?.ttftMs ?? collector.lastTtftMs ?? lastStepRaw?.ttftMs ?? null,
+      lastStep: lastStepRaw ? { ...lastStepRaw, sub: subSteps.has(lastStepRaw) || undefined } : null,
+      subagent: status.subagent,
       estimated: true
     },
+    subagents,
     series: {
       t0: collector.series.length ? collector.series[0].t : now,
       step: SERIES_INTERVAL_MS,
       v: collector.series.slice(-SERIES_POINTS).map((point) => point.v)
     },
-    stepsSeq: collector.stepsSeq,
-    steps: collector.steps.slice(-40).map((step) => ({
+    stepsSeq: members.reduce((sum, member) => sum + member.stepsSeq, 0),
+    steps: steps.slice(-40).map((step) => ({
       tokens: step.tokens,
       ms: step.ms,
       tps: step.tps,
-      aborted: step.aborted
+      aborted: step.aborted,
+      ...subSteps.has(step) ? { sub: true } : {}
     })),
     rates: {
-      avg: Math.round(ratesOf(collector.steps).avg * 10) / 10,
-      peak: Math.round(ratesOf(collector.steps).peak * 10) / 10
+      avg: Math.round(ratesOf(steps).avg * 10) / 10,
+      peak: Math.round(ratesOf(steps).peak * 10) / 10
     },
     generatedAt: now
   };
@@ -506,6 +605,11 @@ var FIRST_LOAD_BUDGET_MS = 6000;
 var HOT_MS = 30000;
 var COLLECTOR_TTL_MS = 10 * 60000;
 var MAX_COLLECTORS = 6;
+var LINEAGE_MS = 30000;
+var LINEAGE_RETRY_MS = 60000;
+var LINEAGE_DEPTH = 4;
+var MAX_SUBAGENTS = 40;
+var SUBAGENT_HISTORY_RETRY_MS = 15000;
 var TICK_MS = 250;
 if (!PORT || !TOKEN) {
   console.error("token-meter: OPENCHAMBER_SERVICE_PORT and OPENCHAMBER_SERVICE_TOKEN are required");
@@ -549,18 +653,157 @@ function createService({ fetchImpl = fetch, log = () => {}, base = BASE, token =
     if (!collector) {
       collector = createCollector(id);
       collectors.set(id, collector);
-      if (collectors.size > MAX_COLLECTORS) {
-        const idle = [...collectors.entries()].filter(([, item]) => !item.turnActive).sort((a, b) => a[1].touchedAt - b[1].touchedAt)[0];
-        if (idle)
-          collectors.delete(idle[0]);
-      }
     }
     collector.touchedAt = Date.now();
+    collector.watched = true;
+    collector.watchedAt = collector.touchedAt;
+    const watched = [...collectors.values()].filter((item) => item.watched);
+    if (watched.length > MAX_COLLECTORS) {
+      const idle = watched.filter((item) => item !== collector && !item.turnActive).sort((a, b) => a.watchedAt - b.watchedAt)[0];
+      if (idle)
+        dropTree(idle);
+    }
+    refreshLineage(collector);
     return collector;
+  };
+  const treeOf = (root) => {
+    const tree = [root];
+    const seen = new Set([root.id]);
+    let grew = true;
+    while (grew) {
+      grew = false;
+      for (const collector of collectors.values()) {
+        if (!collector.parentId || seen.has(collector.id) || !seen.has(collector.parentId))
+          continue;
+        seen.add(collector.id);
+        tree.push(collector);
+        grew = true;
+      }
+    }
+    return tree;
+  };
+  const dropTree = (root) => {
+    for (const member of treeOf(root)) {
+      if (member !== root && member.watched) {
+        member.parentId = null;
+        continue;
+      }
+      collectors.delete(member.id);
+    }
+  };
+  const watchedRoots = () => [...collectors.values()].filter((collector) => collector.watched);
+  const ensureSubagent = (id, record, parentId) => {
+    let collector = collectors.get(id);
+    if (!collector) {
+      collector = createCollector(id);
+      collector.parentId = parentId ?? record?.parentID ?? null;
+      collectors.set(id, collector);
+    } else if (!collector.parentId) {
+      collector.parentId = parentId ?? record?.parentID ?? null;
+    }
+    if (record)
+      applyRecord(collector, record);
+    collector.touchedAt = Date.now();
+    return collector;
+  };
+  const refreshLineage = async (root) => {
+    if (!base || !upstreamIsLoopback || root.lineageLoading)
+      return;
+    const now = Date.now();
+    if (root.lineageAt && now - root.lineageAt < LINEAGE_MS)
+      return;
+    if (!root.lineageAt && root.lineageTriedAt && now - root.lineageTriedAt < LINEAGE_RETRY_MS)
+      return;
+    root.lineageLoading = true;
+    root.lineageTriedAt = now;
+    try {
+      const queue = [{ id: root.id, depth: 0 }];
+      const seen = new Set;
+      let found = 0;
+      while (queue.length && found < MAX_SUBAGENTS) {
+        const { id, depth } = queue.shift();
+        if (depth > LINEAGE_DEPTH)
+          continue;
+        const answer = await apiGet(`/api/session?parentID=${encodeURIComponent(id)}&limit=200`);
+        if (!collectors.has(root.id))
+          return;
+        for (const record of Array.isArray(answer?.data) ? answer.data : []) {
+          if (!record?.id || record.id === root.id || seen.has(record.id))
+            continue;
+          seen.add(record.id);
+          found += 1;
+          ensureSubagent(record.id, record, id);
+          queue.push({ id: record.id, depth: depth + 1 });
+          if (found >= MAX_SUBAGENTS)
+            break;
+        }
+      }
+      root.lineageAt = Date.now();
+      root.lineageTriedAt = 0;
+    } catch (error) {
+      log(`token-meter: could not read the subagents of ${root.id}: ${error?.message ?? error}`);
+    } finally {
+      root.lineageLoading = false;
+    }
+  };
+  const learning = new Set;
+  const missedAt = new Map;
+  const learnSession = async (id) => {
+    if (!base || !upstreamIsLoopback || learning.has(id) || watchedRoots().length === 0)
+      return;
+    const now = Date.now();
+    if (missedAt.has(id) && now - missedAt.get(id) < LINEAGE_RETRY_MS)
+      return;
+    learning.add(id);
+    try {
+      const chain = [];
+      let cursor = id;
+      let attached = false;
+      for (let depth = 0;depth <= LINEAGE_DEPTH; depth += 1) {
+        const record = (await apiGet(`/api/session/${encodeURIComponent(cursor)}`))?.data;
+        if (!record?.id)
+          break;
+        chain.push(record);
+        const parentId = record.parentID;
+        if (!parentId)
+          break;
+        if (collectors.has(parentId)) {
+          attached = true;
+          break;
+        }
+        cursor = parentId;
+      }
+      if (!attached) {
+        if (missedAt.size > 500)
+          missedAt.clear();
+        missedAt.set(id, Date.now());
+        return;
+      }
+      for (let index = chain.length - 1;index >= 0; index -= 1) {
+        ensureSubagent(chain[index].id, chain[index], chain[index].parentID);
+      }
+      missedAt.delete(id);
+    } catch (error) {
+      if (missedAt.size > 500)
+        missedAt.clear();
+      missedAt.set(id, Date.now());
+      log(`token-meter: could not place ${id}: ${error?.message ?? error}`);
+    } finally {
+      learning.delete(id);
+    }
   };
   const dispatch = (event) => {
     if (!wantsEvent(event?.type))
       return;
+    const sessionId = event?.data?.sessionID;
+    if (sessionId) {
+      const collector = collectors.get(sessionId);
+      if (collector)
+        applyEvent(collector, event);
+      else
+        learnSession(sessionId);
+      return;
+    }
     for (const collector of collectors.values())
       applyEvent(collector, event);
   };
@@ -655,13 +898,21 @@ function createService({ fetchImpl = fetch, log = () => {}, base = BASE, token =
   }
   const ticker = setInterval(() => {
     const now = Date.now();
-    for (const [id, collector] of collectors) {
-      if (now - collector.touchedAt > COLLECTOR_TTL_MS) {
-        collectors.delete(id);
+    for (const collector of watchedRoots()) {
+      if (now - collector.watchedAt > COLLECTOR_TTL_MS) {
+        dropTree(collector);
         continue;
       }
-      if (now - collector.touchedAt <= HOT_MS || collector.status === "streaming")
-        tick(collector, now);
+      const tree = treeOf(collector);
+      if (now - collector.watchedAt > HOT_MS && !tree.some((member) => member.status === "streaming"))
+        continue;
+      tick(collector, now, tree);
+      refreshLineage(collector);
+      for (const member of tree) {
+        const mayLoad = member !== collector && member.historyAt === 0 && !member.loading && !member.turnActive && member.status !== "streaming" && now - member.historyTriedAt >= SUBAGENT_HISTORY_RETRY_MS;
+        if (mayLoad)
+          loadHistory(member, apiGet, 0, { stepsOnly: true });
+      }
     }
   }, TICK_MS);
   ticker.unref?.();
@@ -727,8 +978,9 @@ function createService({ fetchImpl = fetch, log = () => {}, base = BASE, token =
       } else if (first && collector.loading) {
         await collector.loading;
       }
-      tick(collector);
-      const answer = snapshot(collector);
+      const tree = treeOf(collector);
+      tick(collector, now, tree);
+      const answer = snapshot(collector, now, tree);
       if (url.searchParams.get("steps") === String(answer.stepsSeq))
         delete answer.steps;
       json(res, 200, {

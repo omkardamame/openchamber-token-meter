@@ -249,8 +249,9 @@ function drawSteps(data) {
     const h = Math.max(1.5, (step.tps / max) * (height - pad * 2));
     const x = index * slot + (slot - barWidth) / 2;
     const y = height - pad - h;
+    const fill = step.sub ? 'var(--oc-info)' : 'var(--oc-primary)';
     pieces.push(
-      `<rect x="${x.toFixed(1)}" y="${y.toFixed(1)}" width="${barWidth.toFixed(1)}" height="${h.toFixed(1)}" rx="1.5" fill="var(--oc-primary)" opacity="${(0.4 + 0.6 * (index / Math.max(1, steps.length - 1))).toFixed(2)}"><title>${Math.round(step.tps)} t/s · ${compact(step.tokens)} tokens in ${seconds(step.ms)}</title></rect>`,
+      `<rect x="${x.toFixed(1)}" y="${y.toFixed(1)}" width="${barWidth.toFixed(1)}" height="${h.toFixed(1)}" rx="1.5" fill="${fill}" opacity="${(0.4 + 0.6 * (index / Math.max(1, steps.length - 1))).toFixed(2)}"><title>${step.sub ? 'subagent · ' : ''}${Math.round(step.tps)} t/s · ${compact(step.tokens)} tokens in ${seconds(step.ms)}</title></rect>`,
     );
   });
   const avgY = height - pad - (average / max) * (height - pad * 2);
@@ -281,6 +282,8 @@ function render(data) {
   clearNotice();
 
   const quiet = (data.live?.charsPerSecond ?? 0) < 5;
+  const subagents = data.subagents ?? { count: 0, streaming: 0, tool: 0 };
+  const subLabel = subagents.count > 0 ? `${subagents.count} subagent${subagents.count === 1 ? '' : 's'}` : '';
   ui.dot.dataset.state = dotState(data.status);
   ui.statusLabel.textContent = STATUS[data.status] ?? STATUS.idle;
   // The number is eased in animateSpeed; render only says where it should go.
@@ -294,10 +297,16 @@ function render(data) {
   ui.tpsSub.textContent =
     data.status === 'streaming'
       ? quiet
-        ? 'thinking · nothing streamed in the last 5 s'
-        : `last 5 s · ~${compact(data.live?.charsPerSecond ?? 0)} chars/s`
+        ? data.live?.subagent
+          ? 'a subagent is thinking · nothing streamed in the last 5 s'
+          : 'thinking · nothing streamed in the last 5 s'
+        : data.live?.subagent
+          ? `${subagents.streaming > 1 ? `${subagents.streaming} subagents` : 'a subagent'} generating · ~${compact(data.live?.charsPerSecond ?? 0)} chars/s`
+          : `last 5 s · ~${compact(data.live?.charsPerSecond ?? 0)} chars/s`
       : data.status === 'tool'
-        ? 'a tool is running · the model is not streaming'
+        ? data.live?.subagent
+          ? 'a subagent is running a tool · the model is not streaming'
+          : 'a tool is running · the model is not streaming'
         : data.status === 'waiting-permission'
           ? 'paused on a permission request'
           : data.status === 'waiting-question'
@@ -312,16 +321,18 @@ function render(data) {
   drawSteps(data);
 
   const lastStep = data.live?.lastStep;
+  const lastSub = lastStep?.sub ? ' · subagent' : '';
   ui.lastLine.textContent = lastStep?.tps
-    ? `last ${Math.round(lastStep.tps)} t/s · ${seconds(lastStep.ms)} · ${compact(lastStep.tokens)} tok`
+    ? `last ${Math.round(lastStep.tps)} t/s · ${seconds(lastStep.ms)} · ${compact(lastStep.tokens)} tok${lastSub}`
     : lastStep
-      ? `last step ${seconds(lastStep.ms)} · ${compact(lastStep.tokens)} tok · too short to rate`
+      ? `last step ${seconds(lastStep.ms)} · ${compact(lastStep.tokens)} tok · too short to rate${lastSub}`
       : 'no finished step yet';
 
   paintCells(rowNodes, data);
   const totals = data.totals ?? {};
-  ui.source.textContent = totals.source === 'usage' ? 'live' : 'from history';
+  ui.source.textContent = `${totals.source === 'usage' ? 'live' : 'from history'}${subLabel ? ` · ${subLabel}` : ''}`;
   ui.summary.textContent = totals.cost > 0 ? `cost $${totals.cost < 0.01 ? totals.cost.toFixed(4) : totals.cost.toFixed(2)}` : '';
+  ui.summary.title = subLabel ? `cost of this session and its ${subLabel}` : 'cost of this session';
   ui.foot.textContent = data.error
     ? `cannot read history: ${data.error}`
     : data.stream?.state === 'open'
