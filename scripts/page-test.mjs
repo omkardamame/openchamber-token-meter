@@ -191,7 +191,7 @@ try {
   check('panel shows the last measured step', /last 33 t\/s/.test(idle.text), idle.text.slice(0, 60));
   check('panel sits on a dim dot when idle', idle.dotState === 'idle', String(idle.dotState));
   check('panel hides the subagent list and legend when there are none', idle.subsHidden === true && idle.legendHidden === true, `${idle.subsHidden}/${idle.legendHidden}`);
-  check('panel shows the per-step average and peak together', /avg 79 t\/s\s+peak 334 t\/s/.test(idle.text), idle.text.slice(0, 120));
+  check('panel shows the per-step average and peak together', /avg 156 t\/s\s+peak 180 t\/s/.test(idle.text), idle.text.slice(0, 120));
   check('panel colours the per-step average green', idle.stepsAvgColor === 'rgb(74, 222, 128)', String(idle.stepsAvgColor));
   check(
     'panel shows total cost, last-turn cost, model and rate',

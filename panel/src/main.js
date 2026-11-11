@@ -287,14 +287,19 @@ function drawSteps(data) {
   const steps = (Array.isArray(data.steps) ? data.steps : []).filter(
     (step) => step.tps && step.tps > 0 && !step.aborted,
   );
-  const rates = data.rates ?? { avg: 0, peak: 0 };
   if (steps.length === 0) {
     svg.innerHTML = `<text x="${(width / 2).toFixed(1)}" y="${(height / 2).toFixed(1)}" text-anchor="middle" fill="var(--oc-muted)" font-size="11">no finished steps yet</text>`;
     ui.stepsAvg.textContent = '';
     ui.stepsPeak.textContent = '';
     return;
   }
-  const max = niceMax(Math.max(rates.peak ?? 0, ...steps.map((step) => step.tps)));
+  // Tokens over stream time across the bars on screen: the green line and the
+  // label describe the same steps the chart draws.
+  const totalTokens = steps.reduce((sum, step) => sum + step.tokens, 0);
+  const totalMs = steps.reduce((sum, step) => sum + step.ms, 0);
+  const average = totalMs > 0 ? (totalTokens / totalMs) * 1000 : 0;
+  const peak = steps.reduce((best, step) => Math.max(best, step.tps), 0);
+  const max = niceMax(peak);
   const slot = width / steps.length;
   // With every step on the chart a long session gets one-pixel bars; a gap
   // under half a pixel would just erase them.
@@ -309,23 +314,23 @@ function drawSteps(data) {
       `<rect x="${x.toFixed(1)}" y="${y.toFixed(1)}" width="${barWidth.toFixed(1)}" height="${h.toFixed(1)}" rx="1.5" fill="${fill}" opacity="${(0.4 + 0.6 * (index / Math.max(1, steps.length - 1))).toFixed(2)}"><title>${step.sub ? 'subagent · ' : ''}${Math.round(step.tps)} t/s · ${compact(step.tokens)} tokens in ${seconds(step.ms)}</title></rect>`,
     );
   });
-  // The session's own average and best step, over every step it kept: the
-  // same numbers the header shows, in the same colours.
-  if (rates.avg > 0) {
-    const avgY = height - pad - (rates.avg / max) * (height - pad * 2);
+  // The session's own average and best step, over the bars drawn: the same
+  // numbers the header shows, in the same colours.
+  if (average > 0) {
+    const avgY = height - pad - (average / max) * (height - pad * 2);
     pieces.push(
       `<line x1="0" y1="${avgY.toFixed(1)}" x2="${width}" y2="${avgY.toFixed(1)}" stroke="var(--oc-success)" stroke-width="1" stroke-dasharray="3 3" opacity="0.75" />`,
     );
   }
-  if (rates.peak > 0) {
-    const peakY = height - pad - (rates.peak / max) * (height - pad * 2);
+  if (peak > 0) {
+    const peakY = height - pad - (peak / max) * (height - pad * 2);
     pieces.push(
       `<line x1="0" y1="${peakY.toFixed(1)}" x2="${width}" y2="${peakY.toFixed(1)}" stroke="var(--oc-muted)" stroke-width="1" stroke-dasharray="2 3" opacity="0.6" />`,
     );
   }
   svg.innerHTML = pieces.join('');
-  ui.stepsAvg.textContent = rates.avg > 0 ? `avg ${Math.round(rates.avg)} t/s` : '';
-  ui.stepsPeak.textContent = rates.peak > 0 ? `peak ${Math.round(rates.peak)} t/s` : '';
+  ui.stepsAvg.textContent = average > 0 ? `avg ${Math.round(average)} t/s` : '';
+  ui.stepsPeak.textContent = peak > 0 ? `peak ${Math.round(peak)} t/s` : '';
 }
 
 const SUB_STATUS_TEXT = { tool: 'tool', 'waiting-permission': 'permission', 'waiting-question': 'question' };
