@@ -167,6 +167,7 @@ function render(data) {
   ui.tps.classList.toggle('quiet', streaming && quiet);
   const lastStep = data.live?.lastStep;
   const lastSub = lastStep?.sub ? ' · sub' : '';
+  const lastRate = data.status !== 'tool' && Boolean(lastStep?.tps);
   ui.last.textContent =
     data.status === 'tool'
       ? data.live?.subagent
@@ -177,6 +178,7 @@ function render(data) {
         : lastStep
           ? `last step ${seconds(lastStep.ms)} · too short to rate${lastSub}`
           : 'no finished step yet';
+  ui.last.classList.toggle('rate', lastRate);
 
   drawSpark(data);
 

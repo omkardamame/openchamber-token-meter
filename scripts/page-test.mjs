@@ -93,7 +93,7 @@ const harness = `<!doctype html><meta charset="utf-8"><title>page test</title>
           connection: { connected: true, account: null },
           settings: {},
           locale: 'en',
-          theme: { mode: 'dark', tokens: { success: '#4ade80', primary: '#e07a3f', info: '#3b82f6', error: '#ef4444' } },
+          theme: { mode: 'dark', tokens: { success: '#4ade80', warning: '#f59e0b', primary: '#e07a3f', info: '#3b82f6', error: '#ef4444' } },
           features: {},
         },
       }, '*');
@@ -139,6 +139,8 @@ const harness = `<!doctype html><meta charset="utf-8"><title>page test</title>
         return cell ? getComputedStyle(cell.querySelector('.cell-value')).fontSize : null;
       })(),
       stepsPeakColor: doc.querySelector('.steps-peak') ? getComputedStyle(doc.querySelector('.steps-peak')).color : null,
+      lastRateColor: doc.querySelector('.last-rate') ? getComputedStyle(doc.querySelector('.last-rate')).color : null,
+      statusLastColor: doc.querySelector('.last') ? getComputedStyle(doc.querySelector('.last')).color : null,
       stepsAvgSep: doc.querySelector('.steps-avg') ? getComputedStyle(doc.querySelector('.steps-avg'), '::before').content : null,
       stepsPeakSep: doc.querySelector('.steps-peak') ? getComputedStyle(doc.querySelector('.steps-peak'), '::before').content : null,
       stepsAxisText: doc.querySelector('.steps-axis') ? doc.querySelector('.steps-axis').innerText.replace(/\\s+/g, ' ').trim() : null,
@@ -228,6 +230,7 @@ try {
   check('panel draws the measured ttft', idle.values.some((v) => v.includes('6.5 s')), idle.values.join(' | '));
   check('panel labels the average and the peak', idle.labels.some((l) => l.startsWith('avg 79')) && idle.labels.some((l) => l.startsWith('peak 334')), idle.labels.join(' | '));
   check('panel shows the last measured step', /last 33 t\/s/.test(idle.text), idle.text.slice(0, 60));
+  check('panel colours the last rate yellow', idle.lastRateColor === 'rgb(245, 158, 11)', String(idle.lastRateColor));
   check('panel sits on a dim dot when idle', idle.dotState === 'idle', String(idle.dotState));
   check('panel hides the subagent list and legend when there are none', idle.subsHidden === true && idle.legendHidden === true, `${idle.subsHidden}/${idle.legendHidden}`);
   check('panel shows the per-step average and peak together', /avg 156 t\/s.*peak 180 t\/s/.test(idle.text), idle.text.slice(0, 120));
@@ -349,6 +352,7 @@ try {
   check('status draws all eight cells', sIdle.cells.join(',') === 'In,Out,Think,Total out,Cache,Cache hit,TTFT,Consumed', sIdle.cells.join(','));
   check('status draws the consumed total', sIdle.values.some((v) => v.startsWith('49.2M')), sIdle.values.join(' | '));
   check('status shows the last measured step', /last 33 t\/s/.test(sIdle.text), sIdle.text.slice(0, 60));
+  check('status colours the last rate yellow', sIdle.statusLastColor === 'rgb(245, 158, 11)', String(sIdle.statusLastColor));
   check('status sets Consumed to the same size as the other stats', sIdle.consumedFont === sIdle.inFont, `${sIdle.consumedFont}/${sIdle.inFont}`);
 
   await status.set(state({ status: 'streaming' }));

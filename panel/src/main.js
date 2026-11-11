@@ -518,11 +518,14 @@ function render(data) {
 
   const lastStep = data.live?.lastStep;
   const lastSub = lastStep?.sub ? ' · subagent' : '';
-  ui.lastLine.textContent = lastStep?.tps
-    ? `last ${Math.round(lastStep.tps)} t/s · ${seconds(lastStep.ms)} · ${compact(lastStep.tokens)} tok${lastSub}`
-    : lastStep
+  if (lastStep?.tps) {
+    const rate = el('span', 'last-rate', `last ${Math.round(lastStep.tps)} t/s`);
+    ui.lastLine.replaceChildren(rate, ` · ${seconds(lastStep.ms)} · ${compact(lastStep.tokens)} tok${lastSub}`);
+  } else {
+    ui.lastLine.textContent = lastStep
       ? `last step ${seconds(lastStep.ms)} · ${compact(lastStep.tokens)} tok · too short to rate${lastSub}`
       : 'no finished step yet';
+  }
 
   paintCells(rowNodes, data);
   paintCost(data);
