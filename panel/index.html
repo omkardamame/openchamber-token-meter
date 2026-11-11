@@ -338,6 +338,12 @@
       .steps-peak {
         color: var(--oc-error);
       }
+      .steps-avg:not(:empty)::before,
+      .steps-peak:not(:empty)::before {
+        content: "·";
+        margin: 0 6px;
+        color: var(--oc-muted);
+      }
       .steps-axis {
         display: flex;
         justify-content: space-between;

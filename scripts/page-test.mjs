@@ -138,6 +138,8 @@ const harness = `<!doctype html><meta charset="utf-8"><title>page test</title>
         return cell ? getComputedStyle(cell.querySelector('.cell-value')).fontSize : null;
       })(),
       stepsPeakColor: doc.querySelector('.steps-peak') ? getComputedStyle(doc.querySelector('.steps-peak')).color : null,
+      stepsAvgSep: doc.querySelector('.steps-avg') ? getComputedStyle(doc.querySelector('.steps-avg'), '::before').content : null,
+      stepsPeakSep: doc.querySelector('.steps-peak') ? getComputedStyle(doc.querySelector('.steps-peak'), '::before').content : null,
       stepsAxisText: doc.querySelector('.steps-axis') ? doc.querySelector('.steps-axis').innerText.replace(/\\s+/g, ' ').trim() : null,
       labels: [...doc.querySelectorAll('svg text')].map((n) => n.textContent),
     };
@@ -214,7 +216,8 @@ try {
   check('panel shows the last measured step', /last 33 t\/s/.test(idle.text), idle.text.slice(0, 60));
   check('panel sits on a dim dot when idle', idle.dotState === 'idle', String(idle.dotState));
   check('panel hides the subagent list and legend when there are none', idle.subsHidden === true && idle.legendHidden === true, `${idle.subsHidden}/${idle.legendHidden}`);
-  check('panel shows the per-step average and peak together', /avg 156 t\/s\s+peak 180 t\/s/.test(idle.text), idle.text.slice(0, 120));
+  check('panel shows the per-step average and peak together', /avg 156 t\/s.*peak 180 t\/s/.test(idle.text), idle.text.slice(0, 120));
+  check('panel dots the step header', String(idle.stepsAvgSep).includes('·') && String(idle.stepsPeakSep).includes('·'), `${idle.stepsAvgSep} ${idle.stepsPeakSep}`);
   check('panel counts every step it keeps', /2 steps/.test(idle.text), idle.text.slice(0, 120));
   check('panel colours the per-step average green', idle.stepsAvgColor === 'rgb(74, 222, 128)', String(idle.stepsAvgColor));
   check('panel colours the peak red', idle.stepsPeakColor === 'rgb(239, 68, 68)', String(idle.stepsPeakColor));
