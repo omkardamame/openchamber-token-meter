@@ -87,7 +87,7 @@ const harness = `<!doctype html><meta charset="utf-8"><title>page test</title>
       frame.contentWindow.postMessage({
         channel: CHANNEL, v: V, type: 'ready',
         payload: {
-          session: { id: 'ses_page', title: 'page test', busy: false, model: 'opencode-go/deepseek-v4.1-flash' },
+          session: { id: 'ses_page', title: 'page test', busy: false__MODEL__ },
           surface: 'status',
           connection: { connected: true, account: null },
           settings: {},
@@ -146,15 +146,18 @@ const harness = `<!doctype html><meta charset="utf-8"><title>page test</title>
   };
 </script>`;
 
-const scenario = (page, answer) =>
-  harness.replace('/__page', `/package/${page}`).replace('__STATE__', JSON.stringify(answer));
+const scenario = (page, answer, model = ", model: 'opencode-go/deepseek-v4.1-flash'") =>
+  harness
+    .replace('/__page', `/package/${page}`)
+    .replace('__STATE__', JSON.stringify(answer))
+    .replace('__MODEL__', model);
 
 const server = createServer((req, res) => {
   const url = new URL(req.url ?? '/', 'http://127.0.0.1');
-  if (url.pathname === '/panel' || url.pathname === '/status') {
-    const page = url.pathname === '/panel' ? 'panel/index.html' : 'status/index.html';
+  if (url.pathname === '/panel' || url.pathname === '/status' || url.pathname === '/panel-nomodel') {
+    const page = url.pathname === '/status' ? 'status/index.html' : 'panel/index.html';
     res.writeHead(200, { 'content-type': 'text/html' });
-    res.end(scenario(page, state()));
+    res.end(scenario(page, state(), url.pathname === '/panel-nomodel' ? '' : undefined));
     return;
   }
   const file = path.join(ROOT, decodeURIComponent(url.pathname.replace(/^\/package\//, '')));
@@ -205,6 +208,16 @@ const run = async (page) => {
   };
 };
 
+/** The headline is eased; a busy browser can paint fewer frames than 1.6 s allows. */
+const settle = async (handle, field, want) => {
+  let value = await handle.read();
+  for (let i = 0; i < 25 && value[field] !== want; i += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    value = await handle.read();
+  }
+  return value;
+};
+
 try {
   // --- the panel -----------------------------------------------------------
   const panel = await run('panel');
@@ -251,7 +264,7 @@ try {
   check('panel counts steps older than the drawn list', /5 steps/.test(totalCount.text), totalCount.text.slice(0, 120));
 
   await panel.set(state({ status: 'streaming' }));
-  const streaming = await panel.read();
+  const streaming = await settle(panel, 'tps', '36');
   check('panel draws the live rate while generating', streaming.tps === '36', String(streaming.tps));
   check('panel breathes the dot while generating', streaming.dotState === 'streaming', String(streaming.dotState));
 
@@ -308,6 +321,14 @@ try {
   check('panel explains a refused answer', /cannot read this session/.test(broken.text), broken.text.slice(0, 70));
   check('panel runs without an exception', (await panel.errors()).length === 0, (await panel.errors()).join(' | '));
 
+  const noModel = await run('panel-nomodel');
+  const nm = await noModel.read();
+  check(
+    'panel names the model from its rates when the host omits it',
+    /deepseek-v4\.1-flash/.test(nm.text) && !/Model\s+—/i.test(nm.text),
+    nm.text.slice(0, 100),
+  );
+
   // --- the Work Status section --------------------------------------------
   const status = await run('status');
   const sIdle = await status.read();
@@ -317,7 +338,7 @@ try {
   check('status sets Consumed to the same size as the other stats', sIdle.consumedFont === sIdle.inFont, `${sIdle.consumedFont}/${sIdle.inFont}`);
 
   await status.set(state({ status: 'streaming' }));
-  const sStreaming = await status.read();
+  const sStreaming = await settle(status, 'tps', '36');
   check('status draws the live rate while generating', sStreaming.tps === '36', String(sStreaming.tps));
   check('status breathes the dot while generating', sStreaming.dotState === 'streaming', String(sStreaming.dotState));
 

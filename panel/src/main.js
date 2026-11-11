@@ -207,8 +207,8 @@ function paintCost(data) {
   const total = typeof cost.total === 'number' ? cost.total : (totals.cost ?? 0);
   ui.costTotal.textContent = money4(total);
   ui.costTurn.textContent = typeof cost.lastTurn === 'number' ? money4(cost.lastTurn) : '—';
-  ui.costModel.textContent = modelLabel || '—';
-  ui.costModel.title = modelLabel || '';
+  ui.costModel.textContent = modelLabel || cost.rates?.model || '—';
+  ui.costModel.title = modelLabel || cost.rates?.model || '';
   ui.costRate.textContent = typeof cost.perMillion === 'number' ? `${rateMoney(cost.perMillion)} / 1M` : '—';
   ui.costRate.title = 'effective: this session’s cost divided by every token it processed';
   // The model's own list rates, recovered from OpenCode's step costs. They are
@@ -454,6 +454,13 @@ function render(data) {
     return;
   }
   clearNotice();
+
+  // A subagent's chat can reach the host without a model in its context; the
+  // recovered rates still know it, so name it instead of leaving a dash.
+  if (!modelLabel && data.cost?.rates?.model) {
+    modelLabel = data.cost.rates.model;
+    ui.eyebrow.textContent = modelLabel;
+  }
 
   const quiet = (data.live?.charsPerSecond ?? 0) < 5;
   const subagents = data.subagents ?? { count: 0, running: 0, streaming: 0, tool: 0, active: [] };
