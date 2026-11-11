@@ -177,6 +177,14 @@ export function createService({ fetchImpl = fetch, log = () => {}, base = BASE, 
     root.lineageLoading = true;
     root.lineageTriedAt = now;
     try {
+      // The root's own record is the only status source after a missed event:
+      // the event stream is cut every 55 s and a child's record is re-read every
+      // 30 s, but the root's was not. Read it alongside the children so a slow
+      // record cannot delay the subagent scan.
+      const own = apiGet(`/api/session/${encodeURIComponent(root.id)}`).catch((error) => {
+        log(`token-meter: could not read ${root.id}: ${error?.message ?? error}`);
+        return null;
+      });
       const queue = [{ id: root.id, depth: 0 }];
       const seen = new Set();
       let found = 0;
@@ -196,6 +204,8 @@ export function createService({ fetchImpl = fetch, log = () => {}, base = BASE, 
           if (found >= MAX_SUBAGENTS) break;
         }
       }
+      const ownAnswer = await own;
+      if (ownAnswer?.data) applyRecord(root, ownAnswer.data, { totals: false });
       root.lineageAt = Date.now();
       root.lineageTriedAt = 0;
     } catch (error) {

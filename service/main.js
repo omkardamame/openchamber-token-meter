@@ -202,7 +202,7 @@ function raisedTotals(current, shape, cost = null, steps = null) {
     steps: typeof steps === "number" ? Math.max(current.steps, steps) : current.steps
   };
 }
-function applyRecord(collector, record) {
+function applyRecord(collector, record, { totals = true } = {}) {
   if (!record)
     return;
   if (typeof record.title === "string" && record.title)
@@ -211,10 +211,21 @@ function applyRecord(collector, record) {
     collector.model = record.model.id;
   const busy = record.time?.busy;
   const idle = record.time?.idle;
-  if (busy && (!idle || busy > idle) && collector.status === "idle")
-    collector.status = "streaming";
+  const working = Boolean(busy && (!idle || busy > idle));
+  if (working) {
+    if (collector.status === "idle")
+      collector.status = "streaming";
+    collector.turnActive = true;
+  } else if (collector.status !== "failed") {
+    const staleStream = Boolean(collector.stream && idle && collector.stream.startedAt && idle > collector.stream.startedAt);
+    if (!collector.stream || staleStream) {
+      collector.status = "idle";
+      collector.turnActive = false;
+      collector.stream = null;
+    }
+  }
   const tokens = record.tokens;
-  if (!tokens)
+  if (!totals || !tokens)
     return;
   collector.totals = raisedTotals(collector.totals, sameShape(tokens), record.cost);
   collector.totalsFrom = "usage";
@@ -840,6 +851,10 @@ function createService({ fetchImpl = fetch, log = () => {}, base = BASE, token =
     root.lineageLoading = true;
     root.lineageTriedAt = now;
     try {
+      const own = apiGet(`/api/session/${encodeURIComponent(root.id)}`).catch((error) => {
+        log(`token-meter: could not read ${root.id}: ${error?.message ?? error}`);
+        return null;
+      });
       const queue = [{ id: root.id, depth: 0 }];
       const seen = new Set;
       let found = 0;
@@ -861,6 +876,9 @@ function createService({ fetchImpl = fetch, log = () => {}, base = BASE, token =
             break;
         }
       }
+      const ownAnswer = await own;
+      if (ownAnswer?.data)
+        applyRecord(root, ownAnswer.data, { totals: false });
       root.lineageAt = Date.now();
       root.lineageTriedAt = 0;
     } catch (error) {

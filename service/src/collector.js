@@ -227,19 +227,38 @@ function raisedTotals(current, shape, cost = null, steps = null) {
  * that session's own work only. A child's record therefore carries everything
  * a subagent did before the meter was pointed at its parent, and summing the
  * records of a tree does not count a step twice.
+ *
+ * `totals: false` takes only the live status, title and model: a watched
+ * session's own history and usage events already own its totals, and its
+ * record can be a rounding step ahead of them.
  */
-export function applyRecord(collector, record) {
+export function applyRecord(collector, record, { totals = true } = {}) {
   if (!record) return;
   if (typeof record.title === 'string' && record.title) collector.title = record.title;
   if (typeof record.model?.id === 'string') collector.model = record.model.id;
   const busy = record.time?.busy;
   const idle = record.time?.idle;
-  // A session is working when it went busy after it last went idle. It may be
-  // streaming or running a tool; the next event says which, and until then a
-  // live rate of zero with a breathing dot is the honest reading.
-  if (busy && (!idle || busy > idle) && collector.status === 'idle') collector.status = 'streaming';
+  const working = Boolean(busy && (!idle || busy > idle));
+  if (working) {
+    // A session is working when it went busy after it last went idle. It may be
+    // streaming or running a tool; the next event says which, and until then a
+    // live rate of zero with a breathing dot is the honest reading.
+    if (collector.status === 'idle') collector.status = 'streaming';
+    collector.turnActive = true;
+  } else if (collector.status !== 'failed') {
+    // The record says the session is not running. A missed event (a reconnect
+    // or the 55 s stream cut) must not leave the dot breathing or a tool glow
+    // forever. An in-flight step is left alone unless the record went idle
+    // after that step started, which makes the step stale too.
+    const staleStream = Boolean(collector.stream && idle && collector.stream.startedAt && idle > collector.stream.startedAt);
+    if (!collector.stream || staleStream) {
+      collector.status = 'idle';
+      collector.turnActive = false;
+      collector.stream = null;
+    }
+  }
   const tokens = record.tokens;
-  if (!tokens) return;
+  if (!totals || !tokens) return;
   collector.totals = raisedTotals(collector.totals, sameShape(tokens), record.cost);
   collector.totalsFrom = 'usage';
 }

@@ -211,6 +211,32 @@ check(
     treeSnap.subagents.active[0].status === 'streaming',
   JSON.stringify(treeSnap.subagents.active[0]),
 );
+// regression: a missed turn-end event is corrected by the session record
+const stale = createCollector('ses_stale');
+stale.status = 'streaming';
+stale.turnActive = true;
+applyRecord(stale, { time: { busy: 10, idle: 20 } });
+check('an idle record clears a stuck generating state', stale.status === 'idle' && stale.turnActive === false, stale.status);
+check('a busy record marks the session active', treeChild.turnActive === true, String(treeChild.turnActive));
+const liveStream = createCollector('ses_live_stream');
+liveStream.status = 'streaming';
+liveStream.stream = {};
+applyRecord(liveStream, { time: { busy: 10, idle: 20 } });
+check('an idle record never interrupts an in-flight step', liveStream.status === 'streaming', liveStream.status);
+const staleStream = createCollector('ses_stale_stream');
+staleStream.status = 'streaming';
+staleStream.turnActive = true;
+staleStream.stream = { startedAt: 5 };
+applyRecord(staleStream, { time: { busy: 10, idle: 20 } });
+check(
+  'an idle record drops a step missed at the stream cut',
+  staleStream.status === 'idle' && staleStream.stream === null,
+  staleStream.status,
+);
+const failedTurn = createCollector('ses_failed_turn');
+failedTurn.status = 'failed';
+applyRecord(failedTurn, { time: { busy: 10, idle: 20 } });
+check('an idle record does not erase a failed turn', failedTurn.status === 'failed', failedTurn.status);
 
 const treeAt = Date.now();
 const emitTree = (collector, id, type, data, offset = 0) =>
