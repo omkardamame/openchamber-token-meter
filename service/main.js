@@ -97,26 +97,39 @@ function createCollector(id) {
 function wantsEvent(type) {
   return LIVE_TYPES.has(type);
 }
+function partKey(type, data) {
+  const kind = type.includes("reasoning") ? "reasoning" : type.includes("tool.input") ? "tool" : "text";
+  return `${kind}:${data.assistantMessageID ?? ""}:${data.ordinal ?? data.id ?? ""}`;
+}
 function addChars(collector, type, data, at) {
-  let n = 0;
-  if (type === "session.text.delta" || type === "session.reasoning.delta" || type === "session.tool.input.delta") {
-    n = typeof data.delta === "string" ? data.delta.length : 0;
-  } else if (type === "session.text.ended" || type === "session.reasoning.ended" || type === "session.tool.input.ended") {
-    n = typeof data.text === "string" ? data.text.length : 0;
-  }
+  const delta = type.endsWith(".delta");
+  const n = delta ? typeof data.delta === "string" ? data.delta.length : 0 : typeof data.text === "string" ? data.text.length : 0;
   if (!n)
     return;
+  if (collector.stream) {
+    collector.stream.deltaParts ??= new Set;
+    const key = partKey(type, data);
+    if (!delta && collector.stream.deltaParts.has(key))
+      return;
+    if (delta)
+      collector.stream.deltaParts.add(key);
+  }
   const isTool = type === "session.tool.input.delta" || type === "session.tool.input.ended";
   if (isTool) {
     if (!collector.stream)
       return;
     const key = typeof data.id === "string" ? data.id : "tool";
     const used = collector.stream.toolChars.get(key) ?? 0;
-    n = Math.min(n, Math.max(0, TOOL_CHARS_MAX - used));
-    if (!n)
+    const capped = Math.min(n, Math.max(0, TOOL_CHARS_MAX - used));
+    if (!capped)
       return;
-    collector.stream.toolChars.set(key, used + n);
+    collector.stream.toolChars.set(key, used + capped);
+    addWindowChars(collector, data, capped, at);
+    return;
   }
+  addWindowChars(collector, data, n, at);
+}
+function addWindowChars(collector, data, n, at) {
   if (collector.stream && typeof data.assistantMessageID === "string") {
     if (!collector.stream.messageID)
       collector.stream.messageID = data.assistantMessageID;
@@ -171,6 +184,17 @@ function calibrate(collector, chars, tokens) {
   const clamped = Math.min(6, Math.max(0.02, ratio));
   collector.charsPerToken = collector.charsPerToken * 0.7 + clamped * 0.3;
 }
+function raisedTotals(current, shape, cost = null, steps = null) {
+  return {
+    input: Math.max(current.input, shape.input),
+    output: Math.max(current.output, shape.output),
+    reasoning: Math.max(current.reasoning, shape.reasoning),
+    cacheRead: Math.max(current.cacheRead, shape.cacheRead),
+    cacheWrite: Math.max(current.cacheWrite, shape.cacheWrite),
+    cost: Math.max(current.cost, typeof cost === "number" ? cost : current.cost),
+    steps: typeof steps === "number" ? Math.max(current.steps, steps) : current.steps
+  };
+}
 function applyRecord(collector, record) {
   if (!record)
     return;
@@ -181,17 +205,7 @@ function applyRecord(collector, record) {
   const tokens = record.tokens;
   if (!tokens)
     return;
-  const shape = sameShape(tokens);
-  const totals = collector.totals;
-  collector.totals = {
-    input: Math.max(totals.input, shape.input),
-    output: Math.max(totals.output, shape.output),
-    reasoning: Math.max(totals.reasoning, shape.reasoning),
-    cacheRead: Math.max(totals.cacheRead, shape.cacheRead),
-    cacheWrite: Math.max(totals.cacheWrite, shape.cacheWrite),
-    cost: Math.max(totals.cost, typeof record.cost === "number" ? record.cost : totals.cost),
-    steps: totals.steps
-  };
+  collector.totals = raisedTotals(collector.totals, sameShape(tokens), record.cost);
   collector.totalsFrom = "usage";
 }
 function pushStep(collector, step) {
@@ -288,17 +302,8 @@ async function loadHistory(collector, apiGet, deadline = 0, { stepsOnly = false 
       tokens += shape.output + shape.reasoning;
     }
     if (!stepsOnly) {
-      const current = collector.totals;
       const cumulative = collector.totalsFrom === "usage";
-      collector.totals = {
-        input: Math.max(current.input, totals.input),
-        output: Math.max(current.output, totals.output),
-        reasoning: Math.max(current.reasoning, totals.reasoning),
-        cacheRead: Math.max(current.cacheRead, totals.cacheRead),
-        cacheWrite: Math.max(current.cacheWrite, totals.cacheWrite),
-        cost: Math.max(current.cost, totals.cost),
-        steps: Math.max(current.steps, totals.steps)
-      };
+      collector.totals = raisedTotals(collector.totals, totals, totals.cost, totals.steps);
       if (!cumulative)
         collector.totalsFrom = "history";
     } else {
@@ -463,17 +468,7 @@ function applyEvent(collector, event) {
     case "session.usage.recorded": {
       if (!data.tokens)
         return;
-      const shape = sameShape(data.tokens);
-      const totals = collector.totals;
-      collector.totals = {
-        input: Math.max(totals.input, shape.input),
-        output: Math.max(totals.output, shape.output),
-        reasoning: Math.max(totals.reasoning, shape.reasoning),
-        cacheRead: Math.max(totals.cacheRead, shape.cacheRead),
-        cacheWrite: Math.max(totals.cacheWrite, shape.cacheWrite),
-        cost: Math.max(totals.cost, typeof data.cost === "number" ? data.cost : totals.cost),
-        steps: Math.max(totals.steps, collector.steps.length)
-      };
+      collector.totals = raisedTotals(collector.totals, sameShape(data.tokens), data.cost, collector.steps.length);
       collector.totalsFrom = "usage";
       return;
     }
@@ -563,9 +558,9 @@ function snapshot(collector, now = Date.now(), tree = [collector]) {
     },
     live: {
       tps: live,
-      charsPerSecond: Math.round(members.reduce((sum, member) => sum + charsInWindow(member, now), 0) / (LIVE_WINDOW_MS / 1000)),
+      charsPerSecond: Math.round(members.reduce((sum, member) => sum + (member.status === "streaming" ? charsInWindow(member, now) : 0), 0) / (LIVE_WINDOW_MS / 1000)),
       charsPerToken: Math.round(collector.charsPerToken * 1000) / 1000,
-      ttftMs: collector.ttftMs ?? streamer?.ttftMs ?? collector.lastTtftMs ?? lastStepRaw?.ttftMs ?? null,
+      ttftMs: streamer?.ttftMs ?? collector.ttftMs ?? collector.lastTtftMs ?? lastStepRaw?.ttftMs ?? null,
       lastStep: lastStepRaw ? { ...lastStepRaw, sub: subSteps.has(lastStepRaw) || undefined } : null,
       subagent: status.subagent,
       estimated: true
@@ -659,7 +654,7 @@ function createService({ fetchImpl = fetch, log = () => {}, base = BASE, token =
     collector.watchedAt = collector.touchedAt;
     const watched = [...collectors.values()].filter((item) => item.watched);
     if (watched.length > MAX_COLLECTORS) {
-      const idle = watched.filter((item) => item !== collector && !item.turnActive).sort((a, b) => a.watchedAt - b.watchedAt)[0];
+      const idle = watched.filter((item) => item !== collector && !item.turnActive && !treeOf(item).some((member) => member.status === "streaming")).sort((a, b) => a.watchedAt - b.watchedAt)[0];
       if (idle)
         dropTree(idle);
     }
@@ -712,7 +707,7 @@ function createService({ fetchImpl = fetch, log = () => {}, base = BASE, token =
     const now = Date.now();
     if (root.lineageAt && now - root.lineageAt < LINEAGE_MS)
       return;
-    if (!root.lineageAt && root.lineageTriedAt && now - root.lineageTriedAt < LINEAGE_RETRY_MS)
+    if (root.lineageTriedAt && now - root.lineageTriedAt < LINEAGE_RETRY_MS)
       return;
     root.lineageLoading = true;
     root.lineageTriedAt = now;

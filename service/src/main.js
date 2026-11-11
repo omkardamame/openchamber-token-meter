@@ -97,9 +97,15 @@ export function createService({ fetchImpl = fetch, log = () => {}, base = BASE, 
     // its parent is watched and leaves with it.
     const watched = [...collectors.values()].filter((item) => item.watched);
     if (watched.length > MAX_COLLECTORS) {
-      // Never drop a session that is streaming: it is the one being watched.
+      // Never drop a session that is streaming, or one whose subagent is: it is
+      // the tree the user is watching.
       const idle = watched
-        .filter((item) => item !== collector && !item.turnActive)
+        .filter(
+          (item) =>
+            item !== collector &&
+            !item.turnActive &&
+            !treeOf(item).some((member) => member.status === 'streaming'),
+        )
         .sort((a, b) => a.watchedAt - b.watchedAt)[0];
       if (idle) dropTree(idle);
     }
@@ -166,7 +172,7 @@ export function createService({ fetchImpl = fetch, log = () => {}, base = BASE, 
     if (!base || !upstreamIsLoopback || root.lineageLoading) return;
     const now = Date.now();
     if (root.lineageAt && now - root.lineageAt < LINEAGE_MS) return;
-    if (!root.lineageAt && root.lineageTriedAt && now - root.lineageTriedAt < LINEAGE_RETRY_MS) return;
+    if (root.lineageTriedAt && now - root.lineageTriedAt < LINEAGE_RETRY_MS) return;
     root.lineageLoading = true;
     root.lineageTriedAt = now;
     try {

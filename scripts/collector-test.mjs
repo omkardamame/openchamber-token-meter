@@ -262,6 +262,40 @@ check(
   waitingTree.status,
 );
 
+// regression: a part that streamed its deltas is not counted again when its
+// full text arrives, while a part sent only at its end still counts
+const endedRun = createCollector('ses_ended_test');
+const endedAt = Date.now();
+const emitEnded = (type, data, offset = 0) =>
+  applyEvent(endedRun, { type, created: endedAt + offset, data: { sessionID: 'ses_ended_test', ...data } });
+emitEnded('session.execution.started', {});
+emitEnded('session.step.started', { assistantMessageID: 'msg_ended', started: endedAt });
+emitEnded('session.text.started', { assistantMessageID: 'msg_ended', ordinal: 0 }, 50);
+for (let i = 0; i < 4; i += 1) {
+  emitEnded('session.text.delta', { assistantMessageID: 'msg_ended', ordinal: 0, delta: 'x'.repeat(50) }, 100 + i * 50);
+}
+emitEnded('session.text.ended', { assistantMessageID: 'msg_ended', ordinal: 0, text: 'x'.repeat(200) }, 400);
+const streamedChars = endedRun.chars.reduce((sum, bucket) => sum + bucket.n, 0);
+check('a streamed part is counted once, not again at its end', streamedChars === 200, `${streamedChars} chars`);
+emitEnded('session.text.started', { assistantMessageID: 'msg_whole', ordinal: 1 }, 500);
+emitEnded('session.text.ended', { assistantMessageID: 'msg_whole', ordinal: 1, text: 'y'.repeat(120) }, 600);
+const wholeChars = endedRun.chars.reduce((sum, bucket) => sum + bucket.n, 0);
+check('a part sent whole at its end still counts', wholeChars === 320, `${wholeChars} chars`);
+
+// regression: a streaming subagent supplies the first-token wait, not the
+// parent's older step
+const ttftParent = createCollector('ses_ttft_parent');
+const ttftChild = createCollector('ses_ttft_child');
+ttftParent.lastTtftMs = 9_000;
+ttftChild.status = 'streaming';
+ttftChild.ttftMs = 250;
+check(
+  'a streaming subagent supplies the first-token wait',
+  snapshot(ttftParent, Date.now(), [ttftParent, ttftChild]).live.ttftMs === 250,
+  `${snapshot(ttftParent, Date.now(), [ttftParent, ttftChild]).live.ttftMs}`,
+);
+check('an idle parent keeps its own last first-token wait', snapshot(ttftParent).live.ttftMs === 9_000, `${snapshot(ttftParent).live.ttftMs}`);
+
 // OpenCode's own two readings differ by a rounding step; a running meter keeps the larger
 emit('session.usage.updated', { cost: 0.01, tokens: { input: 900, output: 399, reasoning: 100, cache: { read: 12_000, write: 40 } } }, 3300);
 const merged = snapshot(live, at + 3400);
@@ -794,6 +828,33 @@ pushTree({
 await new Promise((resolve) => setTimeout(resolve, 500));
 const late = await treeGet();
 check('a subagent created between scans places itself', late.subagents?.count === 3, JSON.stringify(late.subagents));
+// A watched tree whose subagent is streaming must survive collector eviction.
+pushTree({
+  id: 'st_again',
+  created: stAt + 3000,
+  type: 'session.step.started',
+  data: { sessionID: 'ses_st_child', assistantMessageID: 'msg_again', started: stAt + 3000 },
+});
+for (let i = 0; i < 4; i += 1) {
+  pushTree({
+    id: `st_again_${i}`,
+    created: stAt + 3100 + i * 80,
+    type: 'session.text.delta',
+    data: { sessionID: 'ses_st_child', assistantMessageID: 'msg_again', ordinal: 0, delta: 'v'.repeat(40) },
+  });
+}
+await new Promise((resolve) => setTimeout(resolve, 500));
+for (let i = 1; i <= 6; i += 1) {
+  await fetch(`http://127.0.0.1:${treePort}/state?session=ses_fill_${i}`, {
+    headers: { authorization: `Bearer ${token}` },
+  });
+}
+const survived = await treeGet();
+check(
+  'a tree with a streaming subagent is not evicted',
+  survived.subagents?.count === 3 && survived.status === 'streaming',
+  `${survived.subagents?.count} subagents, ${survived.status}`,
+);
 treeService.stop();
 
 service.stop();

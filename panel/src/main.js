@@ -301,7 +301,7 @@ function render(data) {
           ? 'a subagent is thinking · nothing streamed in the last 5 s'
           : 'thinking · nothing streamed in the last 5 s'
         : data.live?.subagent
-          ? `${subagents.streaming > 1 ? `${subagents.streaming} subagents` : 'a subagent'} generating · ~${compact(data.live?.charsPerSecond ?? 0)} chars/s`
+          ? `${subagents.streaming > 1 ? `${subagents.streaming} subagents are` : 'a subagent is'} generating · ~${compact(data.live?.charsPerSecond ?? 0)} chars/s`
           : `last 5 s · ~${compact(data.live?.charsPerSecond ?? 0)} chars/s`
       : data.status === 'tool'
         ? data.live?.subagent

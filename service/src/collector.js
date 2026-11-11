@@ -89,23 +89,46 @@ export function wantsEvent(type) {
   return LIVE_TYPES.has(type);
 }
 
+/** The part a text, reasoning or tool-input event belongs to. */
+function partKey(type, data) {
+  const kind = type.includes('reasoning') ? 'reasoning' : type.includes('tool.input') ? 'tool' : 'text';
+  return `${kind}:${data.assistantMessageID ?? ''}:${data.ordinal ?? data.id ?? ''}`;
+}
+
 function addChars(collector, type, data, at) {
-  let n = 0;
-  if (type === 'session.text.delta' || type === 'session.reasoning.delta' || type === 'session.tool.input.delta') {
-    n = typeof data.delta === 'string' ? data.delta.length : 0;
-  } else if (type === 'session.text.ended' || type === 'session.reasoning.ended' || type === 'session.tool.input.ended') {
-    n = typeof data.text === 'string' ? data.text.length : 0;
-  }
+  const delta = type.endsWith('.delta');
+  const n = delta
+    ? typeof data.delta === 'string'
+      ? data.delta.length
+      : 0
+    : typeof data.text === 'string'
+      ? data.text.length
+      : 0;
   if (!n) return;
+  // A part that streamed its deltas already counted them; its ended event then
+  // repeats the whole text (measured: 215 delta chars, 215 ended chars). Add
+  // only parts that arrive whole, as some providers send them.
+  if (collector.stream) {
+    collector.stream.deltaParts ??= new Set();
+    const key = partKey(type, data);
+    if (!delta && collector.stream.deltaParts.has(key)) return;
+    if (delta) collector.stream.deltaParts.add(key);
+  }
   const isTool = type === 'session.tool.input.delta' || type === 'session.tool.input.ended';
   if (isTool) {
     if (!collector.stream) return;
     const key = typeof data.id === 'string' ? data.id : 'tool';
     const used = collector.stream.toolChars.get(key) ?? 0;
-    n = Math.min(n, Math.max(0, TOOL_CHARS_MAX - used));
-    if (!n) return;
-    collector.stream.toolChars.set(key, used + n);
+    const capped = Math.min(n, Math.max(0, TOOL_CHARS_MAX - used));
+    if (!capped) return;
+    collector.stream.toolChars.set(key, used + capped);
+    addWindowChars(collector, data, capped, at);
+    return;
   }
+  addWindowChars(collector, data, n, at);
+}
+
+function addWindowChars(collector, data, n, at) {
   if (collector.stream && typeof data.assistantMessageID === 'string') {
     if (!collector.stream.messageID) collector.stream.messageID = data.assistantMessageID;
     if (collector.stream.messageID === data.assistantMessageID) {
@@ -169,6 +192,23 @@ function calibrate(collector, chars, tokens) {
 }
 
 /**
+ * A cumulative reading raises a counter and never lowers it: OpenCode's usage
+ * record and the live event stream differ by a rounding step, and a running
+ * meter may not fall back on that. `cost` and `steps` join when given.
+ */
+function raisedTotals(current, shape, cost = null, steps = null) {
+  return {
+    input: Math.max(current.input, shape.input),
+    output: Math.max(current.output, shape.output),
+    reasoning: Math.max(current.reasoning, shape.reasoning),
+    cacheRead: Math.max(current.cacheRead, shape.cacheRead),
+    cacheWrite: Math.max(current.cacheWrite, shape.cacheWrite),
+    cost: Math.max(current.cost, typeof cost === 'number' ? cost : current.cost),
+    steps: typeof steps === 'number' ? Math.max(current.steps, steps) : current.steps,
+  };
+}
+
+/**
  * Seed a session from OpenCode's own record (the shape `/api/session` and
  * `/api/session/{id}` answer): its `tokens` and `cost` are cumulative and hold
  * that session's own work only. A child's record therefore carries everything
@@ -185,19 +225,7 @@ export function applyRecord(collector, record) {
   if (busy && (!idle || busy > idle) && collector.status === 'idle') collector.status = 'streaming';
   const tokens = record.tokens;
   if (!tokens) return;
-  const shape = sameShape(tokens);
-  const totals = collector.totals;
-  // The same rule as usage events: a cumulative reading raises a counter and
-  // never lowers it, so a record read after a live event cannot pull it back.
-  collector.totals = {
-    input: Math.max(totals.input, shape.input),
-    output: Math.max(totals.output, shape.output),
-    reasoning: Math.max(totals.reasoning, shape.reasoning),
-    cacheRead: Math.max(totals.cacheRead, shape.cacheRead),
-    cacheWrite: Math.max(totals.cacheWrite, shape.cacheWrite),
-    cost: Math.max(totals.cost, typeof record.cost === 'number' ? record.cost : totals.cost),
-    steps: totals.steps,
-  };
+  collector.totals = raisedTotals(collector.totals, sameShape(tokens), record.cost);
   collector.totalsFrom = 'usage';
 }
 
@@ -311,19 +339,9 @@ export async function loadHistory(collector, apiGet, deadline = 0, { stepsOnly =
     }
     if (!stepsOnly) {
       // History fills what the live events missed. It covers at most 800 steps,
-      // so it must not pull a counter back from a record or an event: the same
-      // rule that keeps a lower usage reading from shrinking a total.
-      const current = collector.totals;
+      // so it must not pull a counter back from a record or an event.
       const cumulative = collector.totalsFrom === 'usage';
-      collector.totals = {
-        input: Math.max(current.input, totals.input),
-        output: Math.max(current.output, totals.output),
-        reasoning: Math.max(current.reasoning, totals.reasoning),
-        cacheRead: Math.max(current.cacheRead, totals.cacheRead),
-        cacheWrite: Math.max(current.cacheWrite, totals.cacheWrite),
-        cost: Math.max(current.cost, totals.cost),
-        steps: Math.max(current.steps, totals.steps),
-      };
+      collector.totals = raisedTotals(collector.totals, totals, totals.cost, totals.steps);
       // A cumulative reading stays cumulative: the next step may not be added on
       // top of it, or it would be counted twice.
       if (!cumulative) collector.totalsFrom = 'history';
@@ -487,21 +505,11 @@ export function applyEvent(collector, event) {
     case 'session.usage.updated':
     case 'session.usage.recorded': {
       if (!data.tokens) return;
-      const shape = sameShape(data.tokens);
-      const totals = collector.totals;
       // OpenCode's per-session usage and the sum of its own per-message tokens
       // differ by a rounding step (measured: 0.02% of input, 0.5% of cost). A
       // running meter may not fall back on a rounding difference, so each
       // counter keeps the larger of the two readings.
-      collector.totals = {
-        input: Math.max(totals.input, shape.input),
-        output: Math.max(totals.output, shape.output),
-        reasoning: Math.max(totals.reasoning, shape.reasoning),
-        cacheRead: Math.max(totals.cacheRead, shape.cacheRead),
-        cacheWrite: Math.max(totals.cacheWrite, shape.cacheWrite),
-        cost: Math.max(totals.cost, typeof data.cost === 'number' ? data.cost : totals.cost),
-        steps: Math.max(totals.steps, collector.steps.length),
-      };
+      collector.totals = raisedTotals(collector.totals, sameShape(data.tokens), data.cost, collector.steps.length);
       collector.totalsFrom = 'usage';
       return;
     }
@@ -609,11 +617,20 @@ export function snapshot(collector, now = Date.now(), tree = [collector]) {
     },
     live: {
       tps: live,
-      charsPerSecond: Math.round(members.reduce((sum, member) => sum + charsInWindow(member, now), 0) / (LIVE_WINDOW_MS / 1000)),
+      // What each member that is still generating streamed in the last three
+      // seconds: an idle parent's final burst must not colour its subagent's
+      // rate.
+      charsPerSecond: Math.round(
+        members.reduce(
+          (sum, member) => sum + (member.status === 'streaming' ? charsInWindow(member, now) : 0),
+          0,
+        ) / (LIVE_WINDOW_MS / 1000),
+      ),
       charsPerToken: Math.round(collector.charsPerToken * 1000) / 1000,
-      // Between steps the cell holds the last measured first-token wait instead
-      // of blinking to a dash; a new step reports its own as soon as it starts.
-      ttftMs: collector.ttftMs ?? streamer?.ttftMs ?? collector.lastTtftMs ?? lastStepRaw?.ttftMs ?? null,
+      // A streaming member's own wait wins, wherever in the tree it streams;
+      // between steps the cell holds the last measured first-token wait instead
+      // of blinking to a dash.
+      ttftMs: streamer?.ttftMs ?? collector.ttftMs ?? collector.lastTtftMs ?? lastStepRaw?.ttftMs ?? null,
       lastStep: lastStepRaw ? { ...lastStepRaw, sub: subSteps.has(lastStepRaw) || undefined } : null,
       subagent: status.subagent,
       estimated: true,

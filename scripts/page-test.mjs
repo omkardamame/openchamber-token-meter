@@ -216,7 +216,7 @@ try {
   };
   await panel.set(subState());
   const subagent = await panel.read();
-  check('panel names the subagent behind the rate', /a subagent generating/.test(subagent.text), subagent.text.slice(0, 90));
+  check('panel names the subagent behind the rate', /a subagent is generating/.test(subagent.text), subagent.text.slice(0, 90));
   check('panel says how many subagents are in the totals', /2 subagents/.test(subagent.text), subagent.text.slice(0, 90));
   check('panel marks the last step as a subagent’s', /last 33 t\/s .*subagent/.test(subagent.text), subagent.text.slice(-90));
   check('panel draws a subagent step differently', /subagent ·/.test(subagent.stepSvg) && subagent.bars === 1, `${subagent.bars} bars`);
