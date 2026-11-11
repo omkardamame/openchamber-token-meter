@@ -243,15 +243,22 @@ function partSpan(message) {
   const parts = Array.isArray(message?.content) ? message.content : [];
   let start = 0;
   let end = 0;
+  let tool = false;
   for (const part of parts) {
-    if (part?.type !== "text" && part?.type !== "reasoning")
-      continue;
-    const time = part.time ?? {};
-    if (typeof time.created === "number" && (!start || time.created < start))
-      start = time.created;
-    if (typeof time.completed === "number" && time.completed > end)
-      end = time.completed;
+    const time = part?.time ?? {};
+    if (part?.type === "text" || part?.type === "reasoning") {
+      if (typeof time.created === "number" && (!start || time.created < start))
+        start = time.created;
+      if (typeof time.completed === "number" && time.completed > end)
+        end = time.completed;
+    } else if (part?.type === "tool") {
+      tool = true;
+      if (typeof time.created === "number" && (!start || time.created < start))
+        start = time.created;
+    }
   }
+  if (tool && !end && typeof message?.time?.streamed === "number")
+    end = message.time.streamed;
   return start && end && end > start ? { start, end } : null;
 }
 function stepFromMessage(message) {
@@ -334,14 +341,13 @@ async function loadHistory(collector, apiGet, deadline = 0, { stepsOnly = false 
       collector.totals = raisedTotals(collector.totals, totals, totals.cost, totals.steps);
       if (!cumulative)
         collector.totalsFrom = "history";
-    } else {
-      const seen = new Set(steps.map((step) => step.id));
-      for (const step of collector.steps) {
-        if (step.id && !seen.has(step.id))
-          steps.push(step);
-      }
-      steps.sort((a, b) => a.at - b.at);
     }
+    const seen = new Set(steps.map((step) => step.id));
+    for (const step of collector.steps) {
+      if (step.id && !seen.has(step.id))
+        steps.push(step);
+    }
+    steps.sort((a, b) => a.at - b.at);
     collector.steps = steps.slice(-MAX_STEPS);
     collector.model = steps.at(-1)?.model ?? collector.model;
     collector.stepsSeq += 1;

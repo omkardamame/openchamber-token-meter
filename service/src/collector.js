@@ -280,12 +280,22 @@ function partSpan(message) {
   const parts = Array.isArray(message?.content) ? message.content : [];
   let start = 0;
   let end = 0;
+  let tool = false;
   for (const part of parts) {
-    if (part?.type !== 'text' && part?.type !== 'reasoning') continue;
-    const time = part.time ?? {};
-    if (typeof time.created === 'number' && (!start || time.created < start)) start = time.created;
-    if (typeof time.completed === 'number' && time.completed > end) end = time.completed;
+    const time = part?.time ?? {};
+    if (part?.type === 'text' || part?.type === 'reasoning') {
+      if (typeof time.created === 'number' && (!start || time.created < start)) start = time.created;
+      if (typeof time.completed === 'number' && time.completed > end) end = time.completed;
+    } else if (part?.type === 'tool') {
+      // A tool call is generated before it runs. Its input stream is the step's
+      // output, but `ran` and `completed` are the tool's own run; using them
+      // counted the run against the model. Measure to the end of the model's
+      // stream instead, as the live path does.
+      tool = true;
+      if (typeof time.created === 'number' && (!start || time.created < start)) start = time.created;
+    }
   }
+  if (tool && !end && typeof message?.time?.streamed === 'number') end = message.time.streamed;
   return start && end && end > start ? { start, end } : null;
 }
 
@@ -383,16 +393,16 @@ export async function loadHistory(collector, apiGet, deadline = 0, { stepsOnly =
       // A cumulative reading stays cumulative: the next step may not be added on
       // top of it, or it would be counted twice.
       if (!cumulative) collector.totalsFrom = 'history';
-    } else {
-      // A step that ended a moment ago may not be in the history yet. Keep the
-      // live steps the collector already has, matched by message id, so a read
-      // done between two tool calls cannot erase the bar it just drew.
-      const seen = new Set(steps.map((step) => step.id));
-      for (const step of collector.steps) {
-        if (step.id && !seen.has(step.id)) steps.push(step);
-      }
-      steps.sort((a, b) => a.at - b.at);
     }
+    // A step that ended a moment ago may not be in the history yet. Keep the
+    // live steps the collector already has, matched by message id, for a
+    // satellite and for the watched session alike: a first read during a turn
+    // must not erase the bar it just drew.
+    const seen = new Set(steps.map((step) => step.id));
+    for (const step of collector.steps) {
+      if (step.id && !seen.has(step.id)) steps.push(step);
+    }
+    steps.sort((a, b) => a.at - b.at);
     collector.steps = steps.slice(-MAX_STEPS);
     collector.model = steps.at(-1)?.model ?? collector.model;
     collector.stepsSeq += 1;

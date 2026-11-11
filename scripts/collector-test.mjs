@@ -516,6 +516,29 @@ check(
   `${capped.historyPartial}/${capped.knownSteps}`,
 );
 
+// regression: a first history read during a turn keeps the live step it lacks
+const mergeRun = createCollector('ses_merge_history');
+mergeRun.steps = [
+  { id: 'msg_live_merge', at: 2, model: null, tokens: 1, total: 1, cost: 0, cacheRead: 0, cacheWrite: 0, ms: 1, tps: 1, aborted: false },
+];
+await loadHistory(mergeRun, async () => ({
+  data: [
+    {
+      id: 'msg_hist_merge',
+      type: 'assistant',
+      time: { created: 1, streamed: 2 },
+      tokens: { input: 1, output: 1, reasoning: 0, cache: { read: 0, write: 0 } },
+      content: [],
+    },
+  ],
+  cursor: { next: null },
+}));
+check(
+  'a history load keeps a live step it does not carry',
+  mergeRun.steps.length === 2 && mergeRun.steps.some((step) => step.id === 'msg_live_merge'),
+  `${mergeRun.steps.length} steps`,
+);
+
 // regression: a provider can spend many tokens for each visible character
 const hotTokens = createCollector('ses_hot_test');
 const hotAt = Date.now();
@@ -588,6 +611,33 @@ check(
   snapshot(spanRun).live.ttftMs === 16_983,
   `${snapshot(spanRun).live.ttftMs}`,
 );
+
+// A tool-only step is generated before the tool runs: the run must not be
+// counted as generation time.
+const toolSpanRun = createCollector('ses_tool_span');
+const toolSpanAt = 1_794_000_000_000;
+await loadHistory(toolSpanRun, async () => ({
+  data: [
+    {
+      id: 'msg_tool_span',
+      type: 'assistant',
+      time: { created: toolSpanAt, streamed: toolSpanAt + 2_000 },
+      tokens: { input: 10, output: 100, reasoning: 0, cache: { read: 0, write: 0 } },
+      cost: 0,
+      content: [
+        { type: 'tool', time: { created: toolSpanAt + 1_000, ran: toolSpanAt + 3_000, completed: toolSpanAt + 5_000 } },
+      ],
+    },
+  ],
+  cursor: { next: null },
+}));
+const toolSpanStep = toolSpanRun.steps[0];
+check(
+  'a tool-only step is measured over its input stream, not the tool run',
+  toolSpanStep.ms === 1_000 && toolSpanStep.tps === 100,
+  `${toolSpanStep.tps} tok/s over ${toolSpanStep.ms} ms`,
+);
+check('a tool-only step reports its first output wait', toolSpanStep.ttftMs === 1_000, `${toolSpanStep.ttftMs} ms`);
 
 // the live path measures the same span
 const liveSpan = createCollector('ses_live_span');
