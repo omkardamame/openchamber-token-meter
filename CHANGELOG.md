@@ -3,6 +3,12 @@
 Every release of Token Meter, newest first. A release is a tag; nothing here is
 dated by guesswork — each entry is what shipped in that tag.
 
+## [1.6.0] - 2026-11-12
+
+### Changed
+
+- The last measured step's rate is yellow in both frames, apart from the green average and the red peak.
+
 ## [1.5.0] - 2026-11-12
 
 ### Added
