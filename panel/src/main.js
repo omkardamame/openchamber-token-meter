@@ -82,12 +82,17 @@ function build() {
     <section class="live">
       <div class="speed">
         <span class="stat-label">live <em>est</em></span>
-        <span class="speed-value"><b class="tps-value">0</b><i>t/s</i></span>
+        <span class="speed-value" title="the session and every streaming subagent, added together"><b class="tps-value">0</b><i>t/s</i></span>
         <span class="speed-note tps-sub">no generation right now</span>
         <span class="speed-last last-line">no finished step yet</span>
       </div>
       <div class="chart-wrap"><svg class="chart" data-chart="live" aria-hidden="true"></svg></div>
       <div class="axis"><span>60 s ago</span><span class="axis-peak"></span><span>now</span></div>
+    </section>
+
+    <section class="block subagents" hidden>
+      <div class="block-head" title="Each subagent still working, with its own rate; the headline adds them up"><span>Subagents</span><span class="block-meta subs-meta"></span></div>
+      <div class="subs-list"></div>
     </section>
 
     <section class="block">
@@ -99,6 +104,7 @@ function build() {
     <section class="block steps">
       <div class="block-head"><span>Per step</span><span class="block-meta steps-meta"></span></div>
       <div class="chart-wrap"><svg class="chart" data-chart="steps" aria-hidden="true"></svg></div>
+      <div class="legend" hidden><span><i class="swatch main"></i>session</span><span><i class="swatch sub"></i>subagent</span></div>
     </section>
 
     <div class="foot"><span class="foot-text">reading OpenCode usage</span></div>
@@ -117,6 +123,10 @@ function build() {
     grid: app.querySelector('.grid'),
     summary: app.querySelector('.summary'),
     source: app.querySelector('.totals-source'),
+    subsBlock: app.querySelector('.subagents'),
+    subsMeta: app.querySelector('.subs-meta'),
+    subsList: app.querySelector('.subs-list'),
+    legend: app.querySelector('.legend'),
     stepsChart: app.querySelector('[data-chart="steps"]'),
     stepsMeta: app.querySelector('.steps-meta'),
     foot: app.querySelector('.foot-text'),
@@ -194,8 +204,8 @@ function drawLive(data) {
     const near = Math.abs(y - lineY(rates.avg)) < 13;
     const labelY = near || y < pad + 10 ? y + 11 : y - 4;
     pieces.push(
-      `<line x1="0" y1="${y.toFixed(1)}" x2="${width}" y2="${y.toFixed(1)}" stroke="var(--oc-info)" stroke-width="1" stroke-dasharray="6 3 2 3" opacity="0.75" />`,
-      `<text x="${width - 2}" y="${labelY.toFixed(1)}" text-anchor="end" fill="var(--oc-info)" font-size="9.5" opacity="0.9">peak ${Math.round(rates.peak)} t/s</text>`,
+      `<line x1="0" y1="${y.toFixed(1)}" x2="${width}" y2="${y.toFixed(1)}" stroke="var(--oc-muted)" stroke-width="1" stroke-dasharray="6 3 2 3" opacity="0.55" />`,
+      `<text x="${width - 2}" y="${labelY.toFixed(1)}" text-anchor="end" fill="var(--oc-muted)" font-size="9.5" opacity="0.9">peak ${Math.round(rates.peak)} t/s</text>`,
     );
   }
 
@@ -262,6 +272,61 @@ function drawSteps(data) {
   ui.stepsMeta.textContent = `avg ${Math.round(average)} t/s`;
 }
 
+const SUB_STATUS_TEXT = { tool: 'tool', 'waiting-permission': 'permission', 'waiting-question': 'question' };
+
+function subRateText(item) {
+  if (item.status === 'streaming') return item.tps >= 1 ? `${Math.round(item.tps)} t/s` : 'thinking';
+  return SUB_STATUS_TEXT[item.status] ?? '';
+}
+
+/**
+ * The rail panel's list of subagents that are still working. The headline above
+ * is their sum plus the session's own rate, so each row says what it adds. Six
+ * rows fit; the rest are counted.
+ */
+let subRowNodes = new Map();
+let subSignature = '';
+
+function paintSubagents(active, running, total) {
+  ui.legend.hidden = total === 0;
+  if (active.length === 0) {
+    ui.subsBlock.hidden = true;
+    if (subSignature) {
+      ui.subsList.textContent = '';
+      subRowNodes = new Map();
+      subSignature = '';
+    }
+    return;
+  }
+  ui.subsBlock.hidden = false;
+  ui.subsMeta.textContent = running < total ? `${running} running · ${total} total` : `${running} running`;
+  const shown = active.slice(0, 6);
+  // Rebuild only when who is working changes; a rate ticks every poll and only
+  // its text is replaced, so a row can be read or hovered without flicker.
+  const signature = `${running}:${total}:${shown.map((item) => `${item.id}:${item.status}:${item.title ?? ''}`).join('|')}`;
+  if (signature !== subSignature) {
+    subSignature = signature;
+    subRowNodes = new Map();
+    ui.subsList.textContent = '';
+    for (const item of shown) {
+      const row = el('div', 'sub-row');
+      const dot = el('i', 'dot');
+      dot.dataset.state = dotState(item.status);
+      const title = el('span', 'sub-title', item.title || 'subagent');
+      title.title = item.title || item.id || '';
+      const rate = el('span', 'sub-rate', subRateText(item));
+      row.append(dot, title, rate);
+      subRowNodes.set(item.id, rate);
+      ui.subsList.append(row);
+    }
+    if (running > shown.length) ui.subsList.append(el('div', 'sub-more', `+${running - shown.length} more`));
+  }
+  for (const item of shown) {
+    const rate = subRowNodes.get(item.id);
+    if (rate) rate.textContent = subRateText(item);
+  }
+}
+
 function clearNotice() {
   noticeView?.dispose();
   noticeView = null;
@@ -282,7 +347,9 @@ function render(data) {
   clearNotice();
 
   const quiet = (data.live?.charsPerSecond ?? 0) < 5;
-  const subagents = data.subagents ?? { count: 0, streaming: 0, tool: 0 };
+  const subagents = data.subagents ?? { count: 0, running: 0, streaming: 0, tool: 0, active: [] };
+  const activeSubs = Array.isArray(subagents.active) ? subagents.active : [];
+  const runningSubs = subagents.running ?? activeSubs.length;
   const subLabel = subagents.count > 0 ? `${subagents.count} subagent${subagents.count === 1 ? '' : 's'}` : '';
   ui.dot.dataset.state = dotState(data.status);
   ui.statusLabel.textContent = STATUS[data.status] ?? STATUS.idle;
@@ -319,6 +386,7 @@ function render(data) {
 
   drawLive(data);
   drawSteps(data);
+  paintSubagents(activeSubs, runningSubs, subagents.count ?? 0);
 
   const lastStep = data.live?.lastStep;
   const lastSub = lastStep?.sub ? ' · subagent' : '';

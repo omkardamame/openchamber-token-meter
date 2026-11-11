@@ -110,6 +110,9 @@ const harness = `<!doctype html><meta charset="utf-8"><title>page test</title>
       tps: (doc.querySelector('.tps-value') || doc.querySelector('.tps') || {}).textContent,
       bars: doc.querySelectorAll('[data-chart="steps"] rect').length,
       stepSvg: (doc.querySelector('[data-chart="steps"]') || {}).innerHTML ?? '',
+      subsHidden: doc.querySelector('.subagents') ? doc.querySelector('.subagents').hidden : null,
+      legendHidden: doc.querySelector('.legend') ? doc.querySelector('.legend').hidden : null,
+      legendText: doc.querySelector('.legend') ? doc.querySelector('.legend').innerText.replace(/\\s+/g, ' ').trim() : null,
       labels: [...doc.querySelectorAll('svg text')].map((n) => n.textContent),
     };
   };
@@ -184,6 +187,7 @@ try {
   check('panel labels the average and the peak', idle.labels.some((l) => l.startsWith('avg 79')) && idle.labels.some((l) => l.startsWith('peak 334')), idle.labels.join(' | '));
   check('panel shows the last measured step', /last 33 t\/s/.test(idle.text), idle.text.slice(0, 60));
   check('panel sits on a dim dot when idle', idle.dotState === 'idle', String(idle.dotState));
+  check('panel hides the subagent list and legend when there are none', idle.subsHidden === true && idle.legendHidden === true, `${idle.subsHidden}/${idle.legendHidden}`);
 
   await panel.set(state({ status: 'streaming' }));
   const streaming = await panel.read();
@@ -209,7 +213,13 @@ try {
       ...base,
       status: 'streaming',
       live: { ...base.live, tps: 41, subagent: true, lastStep: { ...base.live.lastStep, sub: true } },
-      subagents: { count: 2, streaming: 1, tool: 0 },
+      subagents: {
+        count: 2,
+        running: 1,
+        streaming: 1,
+        tool: 0,
+        active: [{ id: 'ses_page_child', title: 'SA-2 store+route coupon validation', status: 'streaming', tps: 37 }],
+      },
       steps: [{ tokens: 500, ms: 2000, tps: 250, aborted: false, sub: true }],
       ...over,
     };
@@ -221,6 +231,8 @@ try {
   check('panel marks the last step as a subagent’s', /last 33 t\/s .*subagent/.test(subagent.text), subagent.text.slice(-90));
   check('panel draws a subagent step differently', /subagent ·/.test(subagent.stepSvg) && subagent.bars === 1, `${subagent.bars} bars`);
   check('panel breathes the dot while a subagent generates', subagent.dotState === 'streaming', String(subagent.dotState));
+  check('panel lists the running subagent with its own rate', subagent.subsHidden === false && /1 running · 2 total/.test(subagent.text) && /SA-2 store\+route coupon validation/.test(subagent.text) && /37 t\/s/.test(subagent.text), subagent.text.slice(0, 120));
+  check('panel labels the bars: session and subagent', subagent.legendHidden === false && subagent.legendText === 'session subagent', String(subagent.legendText));
   await panel.set(subState({ status: 'tool' }));
   const subTool = await panel.read();
   check('panel says the subagent is running a tool', /a subagent is running a tool/.test(subTool.text), subTool.text.slice(0, 90));
@@ -247,12 +259,12 @@ try {
     ...statusBase,
     status: 'streaming',
     live: { ...statusBase.live, tps: 41, subagent: true, lastStep: { ...statusBase.live.lastStep, sub: true } },
-    subagents: { count: 2, streaming: 1, tool: 0 },
+    subagents: { count: 2, running: 1, streaming: 1, tool: 0 },
   });
   const sSub = await status.read();
-  check('status says how many subagents are included', /2 subagents/.test(sSub.text), sSub.text.slice(0, 80));
+  check('status says how many subagents are included', /1 of 2 subagents/.test(sSub.text), sSub.text.slice(0, 80));
   check('status marks a subagent step', /last 33 t\/s · sub/.test(sSub.text), sSub.text.slice(0, 80));
-  check('status keeps the first-token wait beside the subagents', /2 subagents · first token 6\.5 s/.test(sSub.text), sSub.text.slice(0, 80));
+  check('status keeps the first-token wait beside the subagents', /1 of 2 subagents · first token 6\.5 s/.test(sSub.text), sSub.text.slice(0, 80));
   check('status runs without an exception', (await status.errors()).length === 0, (await status.errors()).join(' | '));
 } finally {
   server.close();

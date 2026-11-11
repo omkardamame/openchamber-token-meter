@@ -37,17 +37,25 @@ const realFetch = (url, init = {}) => fetch(url, { ...init, headers: { ...(init.
 async function pickSession() {
   const answer = await (await realFetch(`${base}/api/session`)).json();
   const sessions = Array.isArray(answer?.data) ? answer.data : [];
-  let best = null;
+  const candidates = [];
   for (const session of sessions.slice(0, 40)) {
     const messages = await (
       await realFetch(`${base}/api/session/${session.id}/message?type=assistant&limit=40`)
     ).json();
     const rows = (messages?.data ?? []).filter((message) => message.tokens);
-    if (!rows.length) continue;
-    if (!best || rows.length > best.rows.length) best = { session, rows };
+    if (rows.length) candidates.push({ session, rows });
   }
-  if (!best) throw new Error('no session with assistant token usage found');
-  return best;
+  candidates.sort((a, b) => b.rows.length - a.rows.length);
+  // A parent's totals are its tree's; keep this check to one session so it can
+  // compare against that session's own messages. Trees have their own test.
+  for (const candidate of candidates.slice(0, 12)) {
+    const children = await (
+      await realFetch(`${base}/api/session?parentID=${encodeURIComponent(candidate.session.id)}&limit=1`)
+    ).json();
+    if (!Array.isArray(children?.data) || children.data.length === 0) return candidate;
+  }
+  if (!candidates.length) throw new Error('no session with assistant token usage found');
+  return candidates[0];
 }
 
 async function independentTotals(sessionId) {
@@ -164,6 +172,7 @@ applyRecord(treeParent, {
 applyRecord(treeChild, {
   id: 'ses_tree_child',
   parentID: 'ses_tree_parent',
+  title: 'SA-2 store+route',
   cost: 0.02,
   tokens: { input: 50, output: 10, reasoning: 2, cache: { read: 70, write: 0 } },
   time: { busy: 100, idle: 90 },
@@ -184,6 +193,14 @@ check(
   'a streaming subagent keeps the parent generating',
   treeSnap.status === 'streaming' && treeSnap.live.subagent === true,
   `${treeSnap.status} (${treeSnap.live.subagent})`,
+);
+check(
+  'a running subagent is listed with its title',
+  treeSnap.subagents.running === 1 &&
+    treeSnap.subagents.active.length === 1 &&
+    treeSnap.subagents.active[0].title === 'SA-2 store+route' &&
+    treeSnap.subagents.active[0].status === 'streaming',
+  JSON.stringify(treeSnap.subagents.active[0]),
 );
 
 const treeAt = Date.now();
@@ -207,6 +224,12 @@ check(
   'a parent headline adds its subagents live rate',
   Math.abs(bothRate - (ownRate + childRate)) < 0.5 && bothRate > ownRate,
   `${ownRate.toFixed(1)} + ${childRate.toFixed(1)} = ${bothRate.toFixed(1)} t/s`,
+);
+const liveTreeSnap = snapshot(treeParent, treeAt + 2200, [treeParent, treeChild]);
+check(
+  'a subagent row carries its own live rate',
+  Math.round(liveTreeSnap.subagents.active[0]?.tps) === Math.round(childRate),
+  `${liveTreeSnap.subagents.active[0]?.tps} vs ${childRate.toFixed(1)}`,
 );
 
 emitTree(treeChild, treeChild.id, 'session.step.streamed', { assistantMessageID: `msg_${treeChild.id}` }, 2300);
@@ -686,6 +709,7 @@ const records = {
   ses_st_child: {
     id: 'ses_st_child',
     parentID: 'ses_st_parent',
+    title: 'SA child',
     cost: 0.02,
     tokens: { input: 50, output: 10, reasoning: 2, cache: { read: 70, write: 0 } },
     time: { busy: 1, idle: 0 },
@@ -748,6 +772,11 @@ await new Promise((resolve) => setTimeout(resolve, 600));
 const seeded = await treeGet();
 check('a watched parent finds its subagents', seeded.subagents?.count === 2, JSON.stringify(seeded.subagents));
 check(
+  'a watched parent lists its running subagent by title',
+  seeded.subagents?.running === 1 && seeded.subagents?.active?.[0]?.title === 'SA child',
+  JSON.stringify(seeded.subagents?.active?.[0]),
+);
+check(
   'a subagent that finished before the meter opened still counts',
   seeded.totals.input === 57 && seeded.totals.output === 13 && seeded.totals.reasoning === 3,
   `${seeded.totals.input} in, ${seeded.totals.output} out, ${seeded.totals.reasoning} think`,
@@ -773,8 +802,11 @@ await new Promise((resolve) => setTimeout(resolve, 700));
 const liveChild = await treeGet();
 check(
   'a subagent makes the parent generate instead of reading zero',
-  liveChild.status === 'streaming' && liveChild.live.subagent === true && liveChild.series.v.some((value) => value > 0),
-  `${liveChild.status}, subagent ${liveChild.live.subagent}, peak ${Math.max(...liveChild.series.v)} t/s`,
+  liveChild.status === 'streaming' &&
+    liveChild.live.subagent === true &&
+    liveChild.subagents.active?.[0]?.tps > 0 &&
+    liveChild.series.v.some((value) => value > 0),
+  `${liveChild.status}, subagent ${liveChild.live.subagent}, row ${liveChild.subagents.active?.[0]?.tps} t/s, peak ${Math.max(...liveChild.series.v)} t/s`,
 );
 pushTree({
   id: 'st_end',

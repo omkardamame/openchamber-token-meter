@@ -12,6 +12,8 @@ const DEFAULT_CHARS_PER_TOKEN = 0.28;
 // A tool's argument JSON follows a schema, not a thought: past this many
 // characters per call it stops saying anything about generation speed.
 const TOOL_CHARS_MAX = 200;
+// Which subagent states still count as working, best first for the list.
+const SUBAGENT_RANK = { streaming: 0, tool: 1, 'waiting-permission': 2, 'waiting-question': 2 };
 
 export const LIVE_TYPES = new Set([
   'session.execution.started',
@@ -59,6 +61,8 @@ export function createCollector(id) {
     // A subagent's session names its parent; the service fills this in when it
     // learns the lineage. A watched parent's numbers are the sum of its tree.
     parentId: null,
+    // The session's own title, for the rail panel's subagent list.
+    title: null,
     watched: false,
     watchedAt: 0,
     lineageAt: 0,
@@ -217,6 +221,7 @@ function raisedTotals(current, shape, cost = null, steps = null) {
  */
 export function applyRecord(collector, record) {
   if (!record) return;
+  if (typeof record.title === 'string' && record.title) collector.title = record.title;
   const busy = record.time?.busy;
   const idle = record.time?.idle;
   // A session is working when it went busy after it last went idle. It may be
@@ -591,10 +596,31 @@ export function snapshot(collector, now = Date.now(), tree = [collector]) {
     null,
   );
   const status = treeStatus(collector, members);
+  // Every subagent still working, with its own rate: the headline adds them up,
+  // the list says what makes it. Eight is enough to draw; `running` keeps the
+  // true count for the "+N more" row.
+  const active = [];
+  for (const member of members) {
+    if (member === collector) continue;
+    const rank = SUBAGENT_RANK[member.status];
+    if (rank === undefined) continue;
+    active.push({
+      rank,
+      item: {
+        id: member.id,
+        title: member.title ?? null,
+        status: member.status,
+        tps: Math.round(memberRate(member, now) * 10) / 10,
+      },
+    });
+  }
+  active.sort((a, b) => a.rank - b.rank || b.item.tps - a.item.tps);
   const subagents = {
     count: members.length - 1,
+    running: active.length,
     streaming: members.filter((member) => member !== collector && member.status === 'streaming').length,
     tool: members.filter((member) => member !== collector && member.status === 'tool').length,
+    active: active.slice(0, 8).map((entry) => entry.item),
   };
   return {
     ok: true,

@@ -27,6 +27,7 @@ var SERIES_INTERVAL_MS = 250;
 var LIVE_WINDOW_MS = 3000;
 var DEFAULT_CHARS_PER_TOKEN = 0.28;
 var TOOL_CHARS_MAX = 200;
+var SUBAGENT_RANK = { streaming: 0, tool: 1, "waiting-permission": 2, "waiting-question": 2 };
 var LIVE_TYPES = new Set([
   "session.execution.started",
   "session.execution.succeeded",
@@ -69,6 +70,7 @@ function createCollector(id) {
   return {
     id,
     parentId: null,
+    title: null,
     watched: false,
     watchedAt: 0,
     lineageAt: 0,
@@ -198,6 +200,8 @@ function raisedTotals(current, shape, cost = null, steps = null) {
 function applyRecord(collector, record) {
   if (!record)
     return;
+  if (typeof record.title === "string" && record.title)
+    collector.title = record.title;
   const busy = record.time?.busy;
   const idle = record.time?.idle;
   if (busy && (!idle || busy > idle) && collector.status === "idle")
@@ -532,10 +536,30 @@ function snapshot(collector, now = Date.now(), tree = [collector]) {
   const streamer = members.find((member) => member.status === "streaming" && member.ttftMs != null);
   const lastStepRaw = members.reduce((best, member) => member.lastStep && (!best || member.lastStep.at > best.at) ? member.lastStep : best, null);
   const status = treeStatus(collector, members);
+  const active = [];
+  for (const member of members) {
+    if (member === collector)
+      continue;
+    const rank = SUBAGENT_RANK[member.status];
+    if (rank === undefined)
+      continue;
+    active.push({
+      rank,
+      item: {
+        id: member.id,
+        title: member.title ?? null,
+        status: member.status,
+        tps: Math.round(memberRate(member, now) * 10) / 10
+      }
+    });
+  }
+  active.sort((a, b) => a.rank - b.rank || b.item.tps - a.item.tps);
   const subagents = {
     count: members.length - 1,
+    running: active.length,
     streaming: members.filter((member) => member !== collector && member.status === "streaming").length,
-    tool: members.filter((member) => member !== collector && member.status === "tool").length
+    tool: members.filter((member) => member !== collector && member.status === "tool").length,
+    active: active.slice(0, 8).map((entry) => entry.item)
   };
   return {
     ok: true,
