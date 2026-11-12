@@ -3,6 +3,19 @@
 Every release of Token Meter, newest first. A release is a tag; nothing here is
 dated by guesswork — each entry is what shipped in that tag.
 
+## [1.7.1] - 2026-11-13
+
+### Fixed
+
+- The dot's glow is round now. It was a `box-shadow` cast by a 7px circle, which is a blurred rounded square and read square at that size; it is a radial halo, centre to rim, in both frames. The Work Status frame also keeps the 7px the halo reaches, so the host's clipped box no longer cuts it flat on the left.
+- Switching chats kept the previous session's totals, cost, step bars, live curve and subagent list under the new session's name, and an answer already in flight for the old chat painted it back over the reset headline. Both frames clear those surfaces the moment the session switches and drop an answer whose session changed underneath it.
+- The Work Status section drew a blank box under its title when no chat was open; it now says "Open a chat to read its usage."
+- A count between 999,500 and 999,999 printed as `1000k` instead of `1.0M`.
+
+### Changed
+
+- The dot's halo breathes with the core on the same clock — 2.4 s while tokens arrive, 1.1 s uneven for a tool — and fades out over 220 ms when the state drops the animation.
+
 ## [1.7.0] - 2026-11-12
 
 ### Added
