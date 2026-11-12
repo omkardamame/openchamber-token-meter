@@ -3,6 +3,27 @@
 Every release of Token Meter, newest first. A release is a tag; nothing here is
 dated by guesswork — each entry is what shipped in that tag.
 
+## [1.7.0] - 2026-11-12
+
+### Added
+
+- The live `t/s` colour follows its speed tier in both frames: matte red under 20, green 20–50, sky blue 50–90, golden 90–150, violet above 150, with a soft glow on the top two.
+- The last measured step's rate uses the same tiers from its own step, with its duration and token tail kept muted.
+- Page tests cover every tier, the exact glow, the rounded boundaries, quiet and tool states, and a session switch.
+
+### Changed
+
+- The rail panel's live curve scales to its smoothed peak and the per-step bars scale to the best step, so both plots use their full height instead of reserving headroom.
+- The steady green is `#76AC4F`, the blazing tier golden `#D4AF37`, and the slow tier matte red `#C96A6A`.
+- The average and peak reference labels no longer collide when their lines are close.
+
+### Fixed
+
+- Switching chats kept the previous session's headline digits, tier, last-step line and chart scale.
+- A last step printed as "20 t/s" could be coloured as a slow rate; the tier now follows the rounded number shown.
+- A single live sample was drawn as a zero baseline.
+- A rate under 8 t/s left empty space above the live curve.
+
 ## [1.6.0] - 2026-11-12
 
 ### Changed

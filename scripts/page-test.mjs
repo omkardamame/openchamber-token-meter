@@ -278,7 +278,7 @@ try {
   // The last line follows the finished step's own rate, not the live headline.
   const hotBase = state();
   await panel.set({ ...hotBase, live: { ...hotBase.live, lastStep: { ...hotBase.live.lastStep, tps: 120 } } });
-  const hotLast = await panel.read();
+  const hotLast = await settle(panel, 'lastRateColor', 'rgb(212, 175, 55)');
   check(
     'panel glows a fast last step golden',
     hotLast.lastRateTier === 'blazing' &&
@@ -517,7 +517,7 @@ try {
   );
   const statusHotBase = state();
   await status.set({ ...statusHotBase, live: { ...statusHotBase.live, lastStep: { ...statusHotBase.live.lastStep, tps: 120 } } });
-  const sHotLast = await status.read();
+  const sHotLast = await settle(status, 'lastRateColor', 'rgb(212, 175, 55)');
   check(
     'status glows a fast last step golden',
     sHotLast.lastRateTier === 'blazing' &&
