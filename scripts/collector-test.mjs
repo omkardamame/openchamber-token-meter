@@ -749,12 +749,16 @@ check(
 const tierAt = [
   [0, 'slow'],
   [19, 'slow'],
+  [19.9, 'slow'],
   [20, 'steady'],
   [49, 'steady'],
+  [49.9, 'steady'],
   [50, 'fast'],
   [89, 'fast'],
+  [89.9, 'fast'],
   [90, 'blazing'],
   [150, 'blazing'],
+  [150.1, 'ultra'],
   [151, 'ultra'],
   [1200, 'ultra'],
 ];

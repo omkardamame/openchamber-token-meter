@@ -272,7 +272,9 @@ function drawLive(data) {
     smooth.push(value);
   }
   const liveTop = smooth.reduce((best, value) => Math.max(best, value), 0);
-  liveScale = nextScale(liveScale, [liveTop, 8]);
+  // Follow the peak, however low: a 3 t/s stream should fill the plot too. Only
+  // an empty window keeps the 8 t/s floor, where the value is 0 anyway.
+  liveScale = nextScale(liveScale, [liveTop > 0 ? liveTop : 8]);
   const max = Math.max(1, liveScale);
   // References above the visible peak sit on the top edge rather than leaving
   // the plot; the drawn curve itself can never exceed `max`.
@@ -304,10 +306,14 @@ function drawLive(data) {
   }
   if (rates.peak > 0) {
     const y = lineY(rates.peak);
-    // Keep the labels apart even when both reference lines sit on the top edge
-    // because the visible peak is below them.
+    // Keep the labels apart when the lines are close. Above the average label
+    // when there is room, so the peak label stays beside its own (higher) line;
+    // on the top edge, stack it below instead of clipping it.
     let labelY = y < pad + 10 ? y + 11 : y - 4;
-    if (avgLabelY !== null && Math.abs(labelY - avgLabelY) < 12) labelY = avgLabelY + 13;
+    if (avgLabelY !== null && Math.abs(labelY - avgLabelY) < 12) {
+      const above = avgLabelY - 13;
+      labelY = above > pad ? above : avgLabelY + 13;
+    }
     if (labelY > height - 2) labelY = (avgLabelY ?? labelY) - 13;
     pieces.push(
       `<line x1="0" y1="${y.toFixed(1)}" x2="${width}" y2="${y.toFixed(1)}" stroke="var(--oc-error)" stroke-width="1" stroke-dasharray="6 3 2 3" opacity="0.65" />`,
@@ -329,6 +335,10 @@ function drawLive(data) {
     );
     const [cx, cy] = coords[coords.length - 1].split(',');
     pieces.push(`<circle cx="${cx}" cy="${cy}" r="2.6" fill="var(--oc-primary)" />`);
+  } else if (smooth.length === 1) {
+    // One sample is not a baseline: draw the point where it actually sits.
+    const x = ((visible[0].t - from) / 60_000) * width;
+    pieces.push(`<circle cx="${x.toFixed(1)}" cy="${lineY(smooth[0]).toFixed(1)}" r="2.6" fill="var(--oc-primary)" />`);
   } else {
     pieces.push(
       `<line x1="0" y1="${height - pad}" x2="${width}" y2="${height - pad}" stroke="var(--oc-primary)" stroke-width="1.6" opacity="0.45" />`,
@@ -544,7 +554,9 @@ function render(data) {
   const lastSub = lastStep?.sub ? ' · subagent' : '';
   if (lastStep?.tps) {
     ui.lastRate.textContent = `last ${Math.round(lastStep.tps)} t/s`;
-    ui.lastRate.dataset.tier = speedTier(lastStep.tps);
+    // Classify the digits on screen, exactly like the headline, so a 19.6 t/s
+    // step printed as "20" is not coloured as a slow rate.
+    ui.lastRate.dataset.tier = speedTier(Math.round(lastStep.tps));
     ui.lastRest.textContent = ` · ${seconds(lastStep.ms)} · ${compact(lastStep.tokens)} tok${lastSub}`;
   } else {
     ui.lastRate.textContent = '';
@@ -688,10 +700,20 @@ host.onReady((ctx) => {
   ui.eyebrow.textContent = modelLabel;
   const nextSession = ctx.session?.id ?? null;
   if (nextSession === sessionId) return;
-  lastRounded = -1;
+  // A new session starts from zero: the frame keeps painting before the first
+  // answer arrives, so the previous session's digits, tier, chart scale and
+  // last-step line must not survive the switch.
+  targetTps = 0;
+  shownTps = 0;
+  lastRounded = 0;
   streamingNow = false;
   lastTier = '';
+  liveScale = 1;
+  ui.tpsValue.textContent = '0';
   delete ui.tpsValue.dataset.tier;
+  ui.lastRate.textContent = '';
+  ui.lastRest.textContent = 'no finished step yet';
+  delete ui.lastRate.dataset.tier;
   lastSteps = [];
   lastStepsSeq = -1;
   sessionId = nextSession;

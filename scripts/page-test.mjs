@@ -79,24 +79,26 @@ const harness = `<!doctype html><meta charset="utf-8"><title>page test</title>
   const frame = document.getElementById('f');
   const posts = [];
   window.__posts = posts;
+  const ready = (session) => ({
+    channel: CHANNEL, v: V, type: 'ready',
+    payload: {
+      session,
+      surface: 'status',
+      connection: { connected: true, account: null },
+      settings: {},
+      locale: 'en',
+      theme: { mode: 'dark', tokens: { success: '#4ade80', warning: '#f59e0b', primary: '#e07a3f', info: '#3b82f6', error: '#ef4444' } },
+      features: {},
+    },
+  });
+  const pageSession = { id: 'ses_page', title: 'page test', busy: false__MODEL__ };
   window.addEventListener('message', (event) => {
     const message = event.data;
     if (!message || message.channel !== CHANNEL) return;
     posts.push(message.type);
     const reply = (payload) => frame.contentWindow.postMessage({ channel: CHANNEL, v: V, type: 'result', id: message.id, ok: true, payload }, '*');
     if (message.type === 'hello') {
-      frame.contentWindow.postMessage({
-        channel: CHANNEL, v: V, type: 'ready',
-        payload: {
-          session: { id: 'ses_page', title: 'page test', busy: false__MODEL__ },
-          surface: 'status',
-          connection: { connected: true, account: null },
-          settings: {},
-          locale: 'en',
-          theme: { mode: 'dark', tokens: { success: '#4ade80', warning: '#f59e0b', primary: '#e07a3f', info: '#3b82f6', error: '#ef4444' } },
-          features: {},
-        },
-      }, '*');
+      frame.contentWindow.postMessage(ready(pageSession), '*');
       return;
     }
     if (message.type === 'service-request') {
@@ -107,6 +109,11 @@ const harness = `<!doctype html><meta charset="utf-8"><title>page test</title>
     if (message.type === 'set-height') return;
   });
   window.__setState = (next) => { window.__state = next; };
+  // A second ready is how the host switches sessions; the SDK re-fires onReady.
+  window.__switchSession = (next, id) => {
+    window.__state = next;
+    frame.contentWindow.postMessage(ready({ ...pageSession, id }), '*');
+  };
   window.__state = __STATE__;
   window.__read = () => {
     const doc = frame.contentDocument;
@@ -152,6 +159,7 @@ const harness = `<!doctype html><meta charset="utf-8"><title>page test</title>
       lastRateTier: last ? last.getAttribute('data-tier') : null,
       lastRateColor: lastStyle ? lastStyle.color : null,
       lastRateShadow: lastStyle ? lastStyle.textShadow : null,
+      lastRateText: last ? last.textContent : null,
       stepsAvgSep: doc.querySelector('.steps-avg') ? getComputedStyle(doc.querySelector('.steps-avg'), '::before').content : null,
       stepsPeakSep: doc.querySelector('.steps-peak') ? getComputedStyle(doc.querySelector('.steps-peak'), '::before').content : null,
       stepsAxisText: doc.querySelector('.steps-axis') ? doc.querySelector('.steps-axis').innerText.replace(/\\s+/g, ' ').trim() : null,
@@ -160,6 +168,8 @@ const harness = `<!doctype html><meta charset="utf-8"><title>page test</title>
         if (!line) return null;
         return Math.min(...line.getAttribute('points').trim().split(/\\s+/).map((pair) => Number(pair.split(',')[1])));
       })(),
+      livePolyline: Boolean(doc.querySelector('[data-chart="live"] polyline')),
+      liveDots: doc.querySelectorAll('[data-chart="live"] circle').length,
       stepsPeakTop: (() => {
         const rects = [...doc.querySelectorAll('[data-chart="steps"] rect')];
         return rects.length ? Math.min(...rects.map((rect) => Number(rect.getAttribute('y')))) : null;
@@ -177,10 +187,14 @@ const scenario = (page, answer, model = ", model: 'opencode-go/deepseek-v4.1-fla
 
 const server = createServer((req, res) => {
   const url = new URL(req.url ?? '/', 'http://127.0.0.1');
-  if (url.pathname === '/panel' || url.pathname === '/status' || url.pathname === '/panel-nomodel') {
+  if (url.pathname === '/panel' || url.pathname === '/status' || url.pathname === '/panel-nomodel' || url.pathname === '/panel-low') {
     const page = url.pathname === '/status' ? 'status/index.html' : 'panel/index.html';
+    const answer =
+      url.pathname === '/panel-low'
+        ? state({ status: 'streaming', live: { ...state().live, tps: 4 }, series: { t0: Date.now() - 2000, step: 250, v: [2, 3, 4] } })
+        : state();
     res.writeHead(200, { 'content-type': 'text/html' });
-    res.end(scenario(page, state(), url.pathname === '/panel-nomodel' ? '' : undefined));
+    res.end(scenario(page, answer, url.pathname === '/panel-nomodel' ? '' : undefined));
     return;
   }
   const file = path.join(ROOT, decodeURIComponent(url.pathname.replace(/^\/package\//, '')));
@@ -228,6 +242,10 @@ const run = async (page) => {
       await browser(['eval', `window.__setState(${JSON.stringify(next)})`]);
       await new Promise((resolve) => setTimeout(resolve, 1600));
     },
+    switchSession: async (next, id = 'ses_next') => {
+      await browser(['eval', `window.__switchSession(${JSON.stringify(next)}, ${JSON.stringify(id)})`]);
+      await new Promise((resolve) => setTimeout(resolve, 500));
+    },
   };
 };
 
@@ -267,6 +285,24 @@ try {
       hotLast.lastRateColor === 'rgb(212, 175, 55)' &&
       /^rgba\(212, 175, 55, 0\.45\) 0px 0px 8px$/.test(String(hotLast.lastRateShadow)),
     `${hotLast.lastRateTier} ${hotLast.lastRateColor} ${hotLast.lastRateShadow}`,
+  );
+
+  const oneBase = state();
+  await panel.set({ ...oneBase, series: { t0: Date.now() - 1000, step: 250, v: [120] } });
+  const onePoint = await panel.read();
+  check(
+    'panel draws a single live sample at its value, not as a baseline',
+    onePoint.liveDots === 1 && onePoint.livePolyline === false,
+    `${onePoint.liveDots} dots, line ${onePoint.livePolyline}`,
+  );
+
+  const boundaryBase = state();
+  await panel.set({ ...boundaryBase, live: { ...boundaryBase.live, lastStep: { ...boundaryBase.live.lastStep, tps: 19.6 } } });
+  const boundaryLast = await panel.read();
+  check(
+    'panel colours the last step by the digits it prints',
+    boundaryLast.lastRateTier === 'steady' && /last 20 t\/s/.test(boundaryLast.text),
+    `${boundaryLast.lastRateTier} ${boundaryLast.text.slice(0, 40)}`,
   );
   check('panel sits on a dim dot when idle', idle.dotState === 'idle', String(idle.dotState));
   check('panel hides the subagent list and legend when there are none', idle.subsHidden === true && idle.legendHidden === true, `${idle.subsHidden}/${idle.legendHidden}`);
@@ -383,6 +419,24 @@ try {
   const settledIdle = await settle(panel, 'tps', '0');
   check('panel lets a resting rate keep the neutral colour', settledIdle.tpsTier === null, `${settledIdle.tpsTier} ${settledIdle.tpsColor}`);
 
+  // The host sends a second ready when the open session changes; nothing from
+  // the old session may survive it.
+  const fastSession = state({ status: 'streaming', live: { ...state().live, tps: 209, lastStep: { ...state().live.lastStep, tps: 120 } } });
+  await panel.set(fastSession);
+  const beforeSwitch = await settle(panel, 'tps', '209');
+  check('panel shows a fast live rate before the switch', beforeSwitch.tps === '209' && beforeSwitch.tpsTier === 'ultra', `${beforeSwitch.tps} ${beforeSwitch.tpsTier}`);
+  await panel.switchSession(state({ status: 'idle', live: { ...state().live, tps: 0, lastStep: null } }), 'ses_switched');
+  const switched = await panel.read();
+  check(
+    'panel starts a switched session from zero, with no stale tier or last step',
+    switched.tps === '0' &&
+      switched.tpsTier === null &&
+      switched.lastRateTier === null &&
+      switched.lastRateText === '' &&
+      switched.liveTopY === 8,
+    `${switched.tps} ${switched.tpsTier} ${switched.lastRateTier} ${JSON.stringify(switched.lastRateText)} ${switched.liveTopY}`,
+  );
+
   // an answer that leaves the step list off must keep the bars already drawn
   const cached = state({ status: 'streaming' });
   delete cached.steps;
@@ -446,6 +500,10 @@ try {
     nm.text.slice(0, 100),
   );
 
+  const low = await run('panel-low');
+  const lowRate = await low.read();
+  check('panel fills the chart for a low rate too', lowRate.liveTopY === 8, `${lowRate.liveTopY} at ${lowRate.tps} t/s`);
+
   // --- the Work Status section --------------------------------------------
   const status = await run('status');
   const sIdle = await status.read();
@@ -466,6 +524,15 @@ try {
       sHotLast.lastRateColor === 'rgb(212, 175, 55)' &&
       /^rgba\(212, 175, 55, 0\.45\) 0px 0px 8px$/.test(String(sHotLast.lastRateShadow)),
     `${sHotLast.lastRateTier} ${sHotLast.lastRateColor} ${sHotLast.lastRateShadow}`,
+  );
+
+  const sBoundaryBase = state();
+  await status.set({ ...sBoundaryBase, live: { ...sBoundaryBase.live, lastStep: { ...sBoundaryBase.live.lastStep, tps: 150.4 } } });
+  const sBoundary = await status.read();
+  check(
+    'status colours the last step by the digits it prints',
+    sBoundary.lastRateTier === 'blazing' && /last 150 t\/s/.test(sBoundary.text),
+    `${sBoundary.lastRateTier} ${sBoundary.text.slice(0, 40)}`,
   );
   check('status sets Consumed to the same size as the other stats', sIdle.consumedFont === sIdle.inFont, `${sIdle.consumedFont}/${sIdle.inFont}`);
 
@@ -507,6 +574,17 @@ try {
   check('status says how many subagents are included', /1 of 2 subagents/.test(sSub.text), sSub.text.slice(0, 80));
   check('status marks a subagent step', /last 33 t\/s · sub/.test(sSub.text), sSub.text.slice(0, 80));
   check('status keeps the first-token wait beside the subagents', /1 of 2 subagents · first token 6\.5 s/.test(sSub.text), sSub.text.slice(0, 80));
+
+  const fastStatus = state({ status: 'streaming', live: { ...state().live, tps: 209, lastStep: { ...state().live.lastStep, tps: 120 } } });
+  await status.set(fastStatus);
+  await settle(status, 'tps', '209');
+  await status.switchSession(state({ status: 'idle', live: { ...state().live, tps: 0, lastStep: null } }), 'ses_switched');
+  const statusSwitched = await status.read();
+  check(
+    'status starts a switched session from zero, with no stale tier or last step',
+    statusSwitched.tps === '0' && statusSwitched.tpsTier === null && statusSwitched.lastRateTier === null && statusSwitched.lastRateText === '',
+    `${statusSwitched.tps} ${statusSwitched.tpsTier} ${statusSwitched.lastRateTier}`,
+  );
   check('status runs without an exception', (await status.errors()).length === 0, (await status.errors()).join(' | '));
 } finally {
   server.close();

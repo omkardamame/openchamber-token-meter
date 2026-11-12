@@ -201,7 +201,9 @@ function render(data) {
     ui.lastRest.textContent = data.live?.subagent ? 'subagent tool' : 'running a tool';
   } else if (lastStep?.tps) {
     ui.lastRate.textContent = `last ${Math.round(lastStep.tps)} t/s`;
-    ui.lastRate.dataset.tier = speedTier(lastStep.tps);
+    // Classify the digits on screen, exactly like the headline, so a 19.6 t/s
+    // step printed as "20" is not coloured as a slow rate.
+    ui.lastRate.dataset.tier = speedTier(Math.round(lastStep.tps));
     ui.lastRest.textContent = lastSub;
   } else {
     ui.lastRate.textContent = '';
@@ -317,10 +319,20 @@ host.onReady((ctx) => {
   }
   const nextSession = ctx.session?.id ?? null;
   if (nextSession === sessionId) return;
-  lastStepsSeq = -1;
+  // Same reset as the panel: no digits, tier, spark scale or last-step line
+  // from the previous session may survive the switch.
+  targetTps = 0;
+  shownTps = 0;
+  lastRounded = 0;
   streamingNow = false;
   lastTier = '';
+  sparkScale = 1;
+  ui.tps.textContent = '0';
   delete ui.tps.dataset.tier;
+  ui.lastRate.textContent = '';
+  ui.lastRest.textContent = 'no finished step yet';
+  delete ui.lastRate.dataset.tier;
+  lastStepsSeq = -1;
   sessionId = nextSession;
   current = null;
   clearNotice();
