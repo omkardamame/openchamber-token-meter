@@ -62,71 +62,126 @@
         color: var(--oc-muted);
         white-space: nowrap;
       }
+      /* The dot and its halo. The halo is a round gradient hung off the dot, not
+         a box-shadow: a shadow cast by a 7px box is a blurred rounded square,
+         and at this size the corners read square. The gradient is round at every
+         size and fades like light. It carries the state colour; the core pulses
+         inside it, and both breathe on the same clock. */
       .dot {
+        position: relative;
         width: 7px;
         height: 7px;
         border-radius: 50%;
         background: var(--oc-muted);
         flex: none;
       }
+      .dot::before {
+        content: '';
+        position: absolute;
+        inset: -7px;
+        border-radius: 50%;
+        background: radial-gradient(
+          circle closest-side,
+          transparent 0%,
+          color-mix(in srgb, var(--dot-glow, transparent) 30%, transparent) 26%,
+          color-mix(in srgb, var(--dot-glow, transparent) 58%, transparent) 36%,
+          color-mix(in srgb, var(--dot-glow, transparent) 16%, transparent) 58%,
+          transparent 95%
+        );
+        opacity: 0;
+        /* A state change drops the animation; this fades the halo out instead
+           of blinking it away. */
+        transition: opacity 220ms ease, transform 220ms ease;
+        pointer-events: none;
+      }
       /* Dim at rest: no glow, nothing moving. */
       .dot[data-state='idle'],
       .dot:not([data-state]) {
         background: var(--oc-muted);
         opacity: 0.45;
-        box-shadow: none;
         animation: none;
       }
       /* Tokens arriving: a slow breathing glow in the success colour. */
       .dot[data-state='streaming'] {
+        --dot-glow: var(--oc-success);
         background: var(--oc-success);
         animation: breathe 2.4s ease-in-out infinite;
+      }
+      .dot[data-state='streaming']::before {
+        animation: halo-breathe 2.4s ease-in-out infinite;
       }
       /* A turn is running without the model: a sharper, uneven orange glow. */
       .dot[data-state='tool'],
       .dot[data-state='waiting'] {
+        --dot-glow: var(--oc-warning);
         background: var(--oc-warning);
         animation: break-glow 1.1s cubic-bezier(0.2, 0.9, 0.1, 1) infinite;
+      }
+      .dot[data-state='tool']::before,
+      .dot[data-state='waiting']::before {
+        animation: halo-break 1.1s cubic-bezier(0.2, 0.9, 0.1, 1) infinite;
       }
       .dot[data-state='error'] {
         background: var(--oc-error);
         opacity: 0.8;
-        box-shadow: none;
         animation: none;
       }
       @keyframes breathe {
         0%,
         100% {
           opacity: 0.55;
-          box-shadow: 0 0 0 0 transparent;
         }
         50% {
           opacity: 1;
-          box-shadow: 0 0 7px 2px color-mix(in srgb, var(--oc-success) 55%, transparent);
+        }
+      }
+      @keyframes halo-breathe {
+        0%,
+        100% {
+          opacity: 0.18;
+          transform: scale(0.82);
+        }
+        50% {
+          opacity: 0.95;
+          transform: scale(1.12);
         }
       }
       @keyframes break-glow {
         0% {
           opacity: 0.45;
-          box-shadow: 0 0 2px 0 color-mix(in srgb, var(--oc-warning) 30%, transparent);
         }
         40% {
           opacity: 1;
-          box-shadow: 0 0 8px 2px color-mix(in srgb, var(--oc-warning) 65%, transparent);
         }
         55% {
           opacity: 0.55;
-          box-shadow: 0 0 3px 1px color-mix(in srgb, var(--oc-warning) 35%, transparent);
         }
         75% {
           opacity: 0.95;
-          box-shadow: 0 0 6px 2px color-mix(in srgb, var(--oc-warning) 55%, transparent);
+        }
+      }
+      @keyframes halo-break {
+        0% {
+          opacity: 0.12;
+          transform: scale(0.8);
+        }
+        40% {
+          opacity: 0.95;
+          transform: scale(1.08);
+        }
+        55% {
+          opacity: 0.28;
+          transform: scale(0.88);
+        }
+        75% {
+          opacity: 0.85;
+          transform: scale(1.02);
         }
       }
       @media (prefers-reduced-motion: reduce) {
-        .dot {
+        .dot,
+        .dot::before {
           animation: none !important;
-          box-shadow: none !important;
         }
       }
       .live {

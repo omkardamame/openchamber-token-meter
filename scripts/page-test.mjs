@@ -123,9 +123,15 @@ const harness = `<!doctype html><meta charset="utf-8"><title>page test</title>
     const rateStyle = rate ? getComputedStyle(rate) : null;
     const last = doc.querySelector('.last-rate');
     const lastStyle = last ? getComputedStyle(last) : null;
+    const dotShadow = dot ? getComputedStyle(dot).boxShadow : null;
+    const dotHalo = dot ? getComputedStyle(dot, '::before').backgroundImage : null;
+    const mini = doc.querySelector('.mini');
     return {
       text,
       dotState: dot ? dot.getAttribute('data-state') : null,
+      dotShadow,
+      dotHalo,
+      miniPad: mini ? getComputedStyle(mini).paddingLeft : null,
       tpsTier: rate ? rate.getAttribute('data-tier') : null,
       tpsColor: rateStyle ? rateStyle.color : null,
       tpsShadow: rateStyle ? rateStyle.textShadow : null,
@@ -357,6 +363,11 @@ try {
   check('panel draws the live rate while generating', streaming.tps === '36', String(streaming.tps));
   check('panel breathes the dot while generating', streaming.dotState === 'streaming', String(streaming.dotState));
   check(
+    'panel glows the dot with a round halo instead of a box-shadow',
+    streaming.dotShadow === 'none' && /^radial-gradient/.test(streaming.dotHalo ?? ''),
+    `${streaming.dotShadow} | ${(streaming.dotHalo ?? '').slice(0, 44)}`,
+  );
+  check(
     'panel colours a 36 t/s rate green and keeps it semibold',
     streaming.tpsTier === 'steady' &&
       streaming.tpsColor === 'rgb(118, 172, 79)' &&
@@ -540,6 +551,13 @@ try {
   const sStreaming = await settle(status, 'tps', '36');
   check('status draws the live rate while generating', sStreaming.tps === '36', String(sStreaming.tps));
   check('status breathes the dot while generating', sStreaming.dotState === 'streaming', String(sStreaming.dotState));
+  check(
+    'status glows the dot with a round halo the frame has room for',
+    sStreaming.dotShadow === 'none' &&
+      /^radial-gradient/.test(sStreaming.dotHalo ?? '') &&
+      Number.parseFloat(sStreaming.miniPad) >= 7,
+    `${sStreaming.dotShadow} | ${(sStreaming.dotHalo ?? '').slice(0, 44)} | pad ${sStreaming.miniPad}`,
+  );
   check(
     'status colours a 36 t/s rate green and keeps it semibold',
     sStreaming.tpsTier === 'steady' &&
