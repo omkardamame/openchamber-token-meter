@@ -543,6 +543,11 @@ try {
   check('panel explains a refused answer', /cannot read this session/.test(broken.text), broken.text.slice(0, 70));
   check('panel runs without an exception', (await panel.errors()).length === 0, (await panel.errors()).join(' | '));
 
+  // A count just under a million rounds to 1.0M, never "1000k".
+  await panel.set(state({ totals: { ...state().totals, input: 999_700, prompt: 999_700 } }));
+  const roundedCount = await panel.read();
+  check('panel rounds a count just under a million to 1.0M', /^1\.0M/.test(roundedCount.values[0]), roundedCount.values[0]);
+
   const noModel = await run('panel-nomodel');
   const nm = await noModel.read();
   check(

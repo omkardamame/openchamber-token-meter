@@ -5,7 +5,11 @@ export function compact(value) {
   const n = Number(value) || 0;
   if (n >= 1_000_000_000) return `${(n / 1_000_000_000).toFixed(n >= 10_000_000_000 ? 0 : 1)}B`;
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(n >= 100_000_000 ? 0 : 1)}M`;
-  if (n >= 10_000) return `${Math.round(n / 1_000)}k`;
+  // Rounding a count just under a million must not read "1000k".
+  if (n >= 10_000) {
+    const thousands = Math.round(n / 1_000);
+    return thousands >= 1_000 ? `${(n / 1_000_000).toFixed(1)}M` : `${thousands}k`;
+  }
   if (n >= 1_000) return `${(n / 1_000).toFixed(1)}k`;
   return String(Math.round(n));
 }
