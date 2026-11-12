@@ -631,13 +631,17 @@ function startPolling() {
 
 async function poll() {
   if (!sessionId || inflight || document.hidden) return;
+  const asked = sessionId;
   inflight = true;
   try {
     const result = await host.serviceRequest({
       method: 'GET',
       path: '/state',
-      query: { session: sessionId, steps: String(lastStepsSeq) },
+      query: { session: asked, steps: String(lastStepsSeq) },
     });
+    // The frame may have moved to another session while this was in flight. The
+    // answer describes the session that just left, so it must not paint.
+    if (asked !== sessionId) return;
     const data = JSON.parse(result.body);
     // An omitted list means the sequence matched: keep the copy already drawn.
     if (Array.isArray(data.steps)) {
@@ -654,6 +658,8 @@ async function poll() {
     failures = 0;
     render(data);
   } catch (error) {
+    // A failure for the session that just left says nothing about this one.
+    if (asked !== sessionId) return;
     failures += 1;
     handleError(error);
   } finally {
@@ -719,6 +725,18 @@ host.onReady((ctx) => {
   sessionId = nextSession;
   current = null;
   clearNotice();
+  // Everything on screen describes the session that left: its totals, cost,
+  // steps, curve and subagents. Painted empty here, they cannot sit under the
+  // new session's name until its first answer lands.
+  paintCells(rowNodes, {});
+  paintCost({});
+  paintSubagents([], 0, 0);
+  drawSteps({ steps: [], stepsKnown: 0 });
+  drawLive({ points: [], rates: { avg: 0, peak: 0 } });
+  // An empty window raises the curve's floor to 8 t/s; the session that follows
+  // must be free to choose its own scale from the first sample.
+  liveScale = 1;
+  ui.source.textContent = '';
   if (!sessionId) {
     ui.app.style.display = 'none';
     stopPolling();

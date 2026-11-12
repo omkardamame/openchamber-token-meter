@@ -103,16 +103,26 @@ const harness = `<!doctype html><meta charset="utf-8"><title>page test</title>
     }
     if (message.type === 'service-request') {
       const answer = window.__answer ? window.__answer(message.payload) : { status: 200, body: JSON.stringify(window.__state) };
-      reply(answer);
+      if (window.__delayMs) setTimeout(() => reply(answer), window.__delayMs);
+      else reply(answer);
       return;
     }
     if (message.type === 'set-height') return;
   });
+  window.__delayMs = 0;
   window.__setState = (next) => { window.__state = next; };
   // A second ready is how the host switches sessions; the SDK re-fires onReady.
   window.__switchSession = (next, id) => {
     window.__state = next;
     frame.contentWindow.postMessage(ready({ ...pageSession, id }), '*');
+  };
+  // Every value the first totals cell is painted with, so a paint that flashes
+  // the session the frame just left can still be caught after the fact.
+  window.__trail = [];
+  window.__watchTotals = () => {
+    const cell = frame.contentDocument.querySelector('.totals-grid .cell-value');
+    window.__trail = [cell ? cell.textContent : null];
+    new MutationObserver(() => window.__trail.push(cell.textContent)).observe(cell, { childList: true, characterData: true, subtree: true });
   };
   window.__state = __STATE__;
   window.__read = () => {
@@ -252,6 +262,13 @@ const run = async (page) => {
       await browser(['eval', `window.__switchSession(${JSON.stringify(next)}, ${JSON.stringify(id)})`]);
       await new Promise((resolve) => setTimeout(resolve, 500));
     },
+    delay: async (ms) => {
+      await browser(['eval', `window.__delayMs = ${ms}`]);
+    },
+    watchTotals: async () => {
+      await browser(['eval', 'window.__watchTotals()']);
+    },
+    trail: async () => JSON.parse(JSON.parse(await browser(['eval', 'JSON.stringify(window.__trail)']))),
   };
 };
 
@@ -448,6 +465,29 @@ try {
     `${switched.tps} ${switched.tpsTier} ${switched.lastRateTier} ${JSON.stringify(switched.lastRateText)} ${switched.liveTopY}`,
   );
 
+  // A slow service must not leave the old session's numbers under the new
+  // session's name, and an answer it sends for the session that just left must
+  // not paint it back. The trail records every value the totals cell took.
+  const slowOld = state({ status: 'idle', live: { ...state().live, tps: 0 }, totals: { ...state().totals, input: 999_000, consumed: 999_000 } });
+  await panel.set(slowOld);
+  check('panel draws the session before a slow switch', /999k/.test((await panel.read()).text), '999k');
+  await panel.delay(1500);
+  await new Promise((resolve) => setTimeout(resolve, 320));
+  await panel.watchTotals();
+  await panel.switchSession(state({ status: 'idle', live: { ...state().live, tps: 0 }, totals: { ...state().totals, input: 7_000, consumed: 9_000 } }), 'ses_slow');
+  const cleanSwitch = await panel.read();
+  check('panel clears the totals the moment the session switches', !/999k/.test(cleanSwitch.text), cleanSwitch.text.slice(0, 60));
+  await panel.delay(0);
+  await new Promise((resolve) => setTimeout(resolve, 1800));
+  const trail = (await panel.trail()).slice(1);
+  check(
+    'panel never paints an answer for the session it left',
+    !trail.some((value) => String(value).startsWith('999k')),
+    trail.join(' | ').slice(0, 120),
+  );
+  const finalRead = await panel.read();
+  check('panel draws the session it switched to', /7\.0k/.test(finalRead.text), finalRead.text.slice(0, 60));
+
   // an answer that leaves the step list off must keep the bars already drawn
   const cached = state({ status: 'streaming' });
   delete cached.steps;
@@ -603,6 +643,33 @@ try {
     statusSwitched.tps === '0' && statusSwitched.tpsTier === null && statusSwitched.lastRateTier === null && statusSwitched.lastRateText === '',
     `${statusSwitched.tps} ${statusSwitched.tpsTier} ${statusSwitched.lastRateTier}`,
   );
+
+  // Same rule as the panel: no stale totals, and no late answer for the session
+  // that left may paint it back.
+  const statusSlowOld = state({ status: 'idle', live: { ...state().live, tps: 0 }, totals: { ...state().totals, input: 999_000, consumed: 999_000 } });
+  await status.set(statusSlowOld);
+  check('status draws the session before a slow switch', /999k/.test((await status.read()).text), '999k');
+  await status.delay(2000);
+  await new Promise((resolve) => setTimeout(resolve, 620));
+  await status.watchTotals();
+  await status.switchSession(state({ status: 'idle', live: { ...state().live, tps: 0 }, totals: { ...state().totals, input: 7_000, consumed: 9_000 } }), 'ses_slow');
+  const statusClean = await status.read();
+  check('status clears the totals the moment the session switches', !/999k/.test(statusClean.text), statusClean.text.slice(0, 60));
+  await status.delay(0);
+  await new Promise((resolve) => setTimeout(resolve, 2400));
+  const statusTrail = (await status.trail()).slice(1);
+  check(
+    'status never paints an answer for the session it left',
+    !statusTrail.some((value) => String(value).startsWith('999k')),
+    statusTrail.join(' | ').slice(0, 120),
+  );
+  const statusFinal = await status.read();
+  check('status draws the session it switched to', /7\.0k/.test(statusFinal.text), statusFinal.text.slice(0, 60));
+
+  // A section with no chat open says why it is empty instead of drawing a box.
+  await status.switchSession(state(), null);
+  const statusEmpty = await status.read();
+  check('status says why it is empty with no session', /Open a chat to read its usage/.test(statusEmpty.text), statusEmpty.text.slice(0, 60));
   check('status runs without an exception', (await status.errors()).length === 0, (await status.errors()).join(' | '));
 } finally {
   server.close();

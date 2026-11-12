@@ -230,13 +230,17 @@ function render(data) {
 
 async function poll() {
   if (!sessionId || inflight || document.hidden) return;
+  const asked = sessionId;
   inflight = true;
   try {
     const result = await host.serviceRequest({
       method: 'GET',
       path: '/state',
-      query: { session: sessionId, steps: String(lastStepsSeq) },
+      query: { session: asked, steps: String(lastStepsSeq) },
     });
+    // The section may have moved to another session while this was in flight;
+    // the answer is about the session that left and must not paint.
+    if (asked !== sessionId) return;
     const data = JSON.parse(result.body);
     // This surface draws no steps: it keeps the sequence only, so the service
     // leaves the list off the answer.
@@ -247,6 +251,7 @@ async function poll() {
     failures = 0;
     render(data);
   } catch (error) {
+    if (asked !== sessionId) return;
     failures += 1;
     const code = error instanceof HostRequestError ? error.code : '';
     if (!banner) {
@@ -336,9 +341,18 @@ host.onReady((ctx) => {
   sessionId = nextSession;
   current = null;
   clearNotice();
+  // The cells and the foot describe the session that left; painted empty, they
+  // cannot sit under the new session's name until its first answer lands.
+  paintCells(cellNodes, {});
+  drawSpark({ points: [] });
+  ui.foot.textContent = '';
+  fitHeight();
   if (!sessionId) {
     stopPolling();
     ui.app.style.display = 'none';
+    // The host still draws the section title, so say why the body is empty
+    // instead of handing it a blank box.
+    if (!banner) notice.replaceChildren(el('span', 'empty-note', 'Open a chat to read its usage.'));
     fitHeight();
     return;
   }
