@@ -3,6 +3,31 @@
 Every release of Token Meter, newest first. A release is a tag; nothing here is
 dated by guesswork — each entry is what shipped in that tag.
 
+## [1.8.0] - 2026-11-13
+
+### Added
+
+- The live curve is a smooth monotone line with a labelled scale (top and half), marks at 15, 30 and 45 seconds ago, and a crosshair under the pointer that reads the rate and its age ("42 t/s · 12 s ago").
+- Hovering the per-step chart highlights the bar and reads its rate, tokens, duration, clock time and cost under the chart; a subagent's step says so.
+- A turn timer beside the status while a turn runs ("generating · 1m 03s").
+- The Last turn cost names its steps and generated tokens on hover.
+- The Work Status section ends its foot with the session cost.
+- The headline number snaps instead of easing when the system asks for reduced motion.
+
+### Fixed
+
+- With two tools running at once, the first to finish set the session to idle while the second still ran. Tools are counted now, and the last one hands the status back to the running turn.
+- A finished tool or an answered question showed "idle" in the middle of a turn.
+- A first history read cut short by its 6 s deadline stayed partial for five minutes; it is read again after 15 s once the turn is quiet.
+- The footer flickered "connecting to OpenCode events" every 55 s while the service recycled its own stream.
+- The panel named its live window "last 5 s"; the window is 3 s.
+- The per-step chart rebuilt every bar on each 250 ms poll, which also destroyed its tooltips. It redraws only when the steps, the size or the hovered bar change.
+
+### Changed
+
+- The service keeps the merged step list, its rates and the recovered model rates until a step list changes, instead of working them out on every poll.
+- The Work Status spark draws the same smooth curve as the panel.
+
 ## [1.7.1] - 2026-11-13
 
 ### Fixed
