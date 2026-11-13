@@ -108,7 +108,6 @@ function build() {
       <svg class="spark" data-chart="spark" height="30" aria-hidden="true"></svg>
     </div>
     <div class="grid totals-grid"></div>
-    <div class="foot"></div>
   `;
   root.append(app);
   return {
@@ -119,7 +118,6 @@ function build() {
     lastRest: app.querySelector('.last-rest'),
     spark: app.querySelector('[data-chart="spark"]'),
     grid: app.querySelector('.grid'),
-    foot: app.querySelector('.foot'),
   };
 }
 
@@ -184,7 +182,6 @@ function render(data) {
   clearNotice();
   paintCells(cellNodes, data);
   const streaming = data.status === 'streaming';
-  const subagents = data.subagents ?? { count: 0, running: 0, streaming: 0, tool: 0 };
   ui.dot.dataset.state = dotState(data.status);
   const quiet = (data.live?.charsPerSecond ?? 0) < 5;
   targetTps = streaming ? (data.live?.tps ?? 0) : 0;
@@ -216,23 +213,6 @@ function render(data) {
   }
 
   drawSpark(data);
-
-  const foot = [];
-  const subCount = subagents.count ?? 0;
-  const subRunning = subagents.running ?? 0;
-  if (subCount > 0) {
-    foot.push(
-      subRunning > 0 && subRunning < subCount
-        ? `${subRunning} of ${subCount} subagents`
-        : `${subCount} subagent${subCount === 1 ? '' : 's'}`,
-    );
-  }
-  if (streaming && data.live?.ttftMs >= 100) foot.push(`first token ${(data.live.ttftMs / 1000).toFixed(1)} s`);
-  // What the session and its subagents have cost so far, last: the same four
-  // decimals as the panel's Total, so the two surfaces agree digit for digit.
-  const spent = data.cost?.total;
-  if (typeof spent === 'number' && spent > 0) foot.push(`$${spent.toFixed(4)}`);
-  ui.foot.textContent = data.error ? 'cannot read history' : foot.join(' · ');
   fitHeight();
 }
 
@@ -349,11 +329,10 @@ host.onReady((ctx) => {
   sessionId = nextSession;
   current = null;
   clearNotice();
-  // The cells and the foot describe the session that left; painted empty, they
-  // cannot sit under the new session's name until its first answer lands.
+  // The cells describe the session that left; painted empty, they cannot sit
+  // under the new session's name until its first answer lands.
   paintCells(cellNodes, {});
   drawSpark({ points: [] });
-  ui.foot.textContent = '';
   fitHeight();
   if (!sessionId) {
     stopPolling();

@@ -458,9 +458,43 @@
         white-space: nowrap;
       }
       .cost-rates {
+        display: flex;
+        flex-direction: column;
+        gap: 1px;
         font-size: 11.5px;
         color: var(--oc-muted);
         font-variant-numeric: tabular-nums;
+        line-height: 1.35;
+      }
+      .cost-rates .tier {
+        display: block;
+      }
+      .cost-rates .rate-row {
+        display: grid;
+        grid-template-columns: minmax(58px, 1fr) 44px 44px 50px;
+        gap: 6px;
+        align-items: baseline;
+      }
+      .cost-rates .rate-name,
+      .cost-rates .rate-num {
+        white-space: nowrap;
+      }
+      .cost-rates .rate-num {
+        text-align: right;
+      }
+      .cost-rates .rate-head {
+        font-size: 10.5px;
+        opacity: 0.75;
+      }
+      .cost-rates .rate-row[data-active='true'] {
+        color: var(--oc-fg);
+      }
+      .cost-rates .rate-row[data-tier='peak'][data-active='true'] {
+        color: var(--oc-warning);
+      }
+      .cost-rates .rate-row[data-active='false'] {
+        color: var(--oc-muted);
+        opacity: 0.72;
       }
       .block.steps {
         flex: 1 1 auto;

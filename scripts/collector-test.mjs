@@ -8,6 +8,7 @@ import path from 'node:path';
 import { createCollector, applyRecord, loadHistory, applyEvent, tick, snapshot } from '../service/src/collector.js';
 import { compress, easeToward, ratesOf } from '../shared/chart.js';
 import { dotState } from '../shared/cells.js';
+import { isPeakAt, timeTariff } from '../shared/pricing.js';
 import { speedTier } from '../shared/speed-color.js';
 
 const MANAGED = path.join(os.homedir(), '.config', 'openchamber', 'managed-opencode');
@@ -522,6 +523,178 @@ for (let i = 0; i < 12; i += 1) {
   });
 }
 check('a non-linear cost yields no rate instead of a guess', snapshot(tieredRun).cost.rates === null, JSON.stringify(snapshot(tieredRun).cost.rates));
+check(
+  'a failed fit says whether it was short of steps or saw tiers',
+  snapshot(costRun).cost.ratesNote === 'fewSteps' &&
+    snapshot(tieredRun).cost.ratesNote === 'nonLinear' &&
+    snapshot(rateRun).cost.ratesNote === null,
+  `${snapshot(costRun).cost.ratesNote}/${snapshot(tieredRun).cost.ratesNote}/${snapshot(rateRun).cost.ratesNote}`,
+);
+const noCacheRun = createCollector('ses_rate_nocache');
+noCacheRun.model = 'no-cache-model';
+noCacheRun.steps = rateRun.steps.map((step) => {
+  const input = step.total - step.tokens;
+  return {
+    ...step,
+    model: 'no-cache-model',
+    cacheRead: 0,
+    cost: (input * 0.15 + step.tokens * 0.6) / 1e6,
+  };
+});
+noCacheRun.stepsSeq = noCacheRun.steps.length;
+check(
+  'a fit with no cache reads says so',
+  snapshot(noCacheRun).cost.rates === null && snapshot(noCacheRun).cost.ratesNote === 'noCache',
+  JSON.stringify(snapshot(noCacheRun).cost.ratesNote),
+);
+
+// ---------------------------------------------------------------- time tariffs
+// OpenCode Go prices DeepSeek in two tiers: peak is 2× off-peak, 01:00-04:00
+// and 06:00-10:00 UTC, Monday-Friday. The meter names both sides and marks the
+// one active at the snapshot's clock.
+check(
+  'peak windows are UTC weekday hours and end-exclusive',
+  isPeakAt(Date.UTC(2026, 10, 11, 1, 0)) &&
+    isPeakAt(Date.UTC(2026, 10, 11, 3, 59)) &&
+    !isPeakAt(Date.UTC(2026, 10, 11, 4, 0)) &&
+    isPeakAt(Date.UTC(2026, 10, 11, 6, 0)) &&
+    isPeakAt(Date.UTC(2026, 10, 11, 9, 59)) &&
+    !isPeakAt(Date.UTC(2026, 10, 11, 10, 0)) &&
+    !isPeakAt(Date.UTC(2026, 10, 14, 2, 0)),
+  'Wed 01:00 / 03:59 / 04:00 / 06:00 / 09:59 / 10:00 and Sat 02:00 UTC',
+);
+check(
+  'time tariffs are keyed by provider and model',
+  Boolean(timeTariff('opencode-go', 'deepseek-v4.1-flash')) &&
+    Boolean(timeTariff('opencode-go', 'deepseek-v4-pro')) &&
+    Boolean(timeTariff('deepseek', 'deepseek-flash')) &&
+    Boolean(timeTariff('deepseek', 'deepseek-v4-pro')) &&
+    timeTariff('opencode-go', 'glm-5.3-flash') === null &&
+    timeTariff('deepseek', 'deepseek-v4.1-flash') === null &&
+    timeTariff('requesty', 'deepseek-v4.1-flash') === null,
+  'Go and official DeepSeek only',
+);
+
+const officialTariff = timeTariff('deepseek', 'deepseek-flash');
+check(
+  'the official DeepSeek schedule exempts Chinese public holidays',
+  isPeakAt(Date.UTC(2026, 9, 1, 2, 0), officialTariff.schedule) === false &&
+    isPeakAt(Date.UTC(2026, 9, 1, 2, 0)) === true &&
+    isPeakAt(Date.UTC(2026, 9, 8, 2, 0), officialTariff.schedule) === true,
+  'Oct 1 holiday vs Oct 8 normal Thursday',
+);
+
+const peakAt = Date.UTC(2026, 10, 11, 2, 0);
+const offPeakAt = Date.UTC(2026, 10, 11, 4, 30);
+const tariffRun = createCollector('ses_tariff_test');
+tariffRun.model = 'deepseek-v4.1-flash';
+tariffRun.provider = 'opencode-go';
+const peakTariff = snapshot(tariffRun, peakAt).cost.tariff;
+check(
+  'a peak snapshot marks the peak side and doubles the off-peak card',
+  peakTariff?.peak === true &&
+    peakTariff.multiplier === 2 &&
+    peakTariff.tiers.offPeak.input === 0.15 &&
+    peakTariff.tiers.peak.input === 0.3 &&
+    peakTariff.tiers.peak.output === 1.2 &&
+    peakTariff.tiers.peak.cacheRead === 0.006,
+  JSON.stringify(peakTariff),
+);
+const offPeakTariff = snapshot(tariffRun, offPeakAt).cost.tariff;
+check(
+  'an off-peak snapshot marks the off-peak side and keeps the pair',
+  offPeakTariff?.peak === false &&
+    offPeakTariff.tiers.offPeak.output === 0.6 &&
+    offPeakTariff.tiers.peak.output === 1.2,
+  JSON.stringify(offPeakTariff),
+);
+
+const officialRun = createCollector('ses_tariff_official');
+officialRun.model = 'deepseek-flash';
+officialRun.provider = 'deepseek';
+const officialPeak = snapshot(officialRun, Date.UTC(2026, 9, 8, 2, 0)).cost.tariff;
+check(
+  'the official DeepSeek provider gets its own card and window',
+  officialPeak?.peak === true &&
+    officialPeak.holidayYear === 2026 &&
+    /excluding Chinese public holidays/.test(officialPeak.window),
+  JSON.stringify(officialPeak),
+);
+const officialHoliday = snapshot(officialRun, Date.UTC(2026, 9, 1, 2, 0)).cost.tariff;
+check(
+  'a Chinese public holiday is off-peak on the official API',
+  officialHoliday?.peak === false,
+  JSON.stringify(officialHoliday),
+);
+const officialLater = snapshot(officialRun, Date.UTC(2027, 0, 5, 2, 0)).cost.tariff;
+check(
+  'the official holiday calendar flags a later year',
+  officialLater?.holidayStale === true,
+  JSON.stringify(officialLater),
+);
+
+// The recovered rates are what the session actually paid, so they replace the
+// card's side when they match it; a peak-only session must not double twice.
+const recoveredTariff = createCollector('ses_tariff_recovered');
+recoveredTariff.model = 'deepseek-v4.1-flash';
+recoveredTariff.provider = 'opencode-go';
+recoveredTariff.steps = rateRun.steps.map((step) => ({ ...step, model: 'deepseek-v4.1-flash' }));
+recoveredTariff.stepsSeq = recoveredTariff.steps.length;
+const recoveredSnap = snapshot(recoveredTariff, peakAt).cost.tariff;
+check(
+  'recovered off-peak rates fill both sides of the tariff',
+  recoveredSnap?.source === 'recovered' &&
+    recoveredSnap.tiers.offPeak.input === 0.15 &&
+    recoveredSnap.tiers.peak.input === 0.3,
+  JSON.stringify(recoveredSnap),
+);
+const peakOnlyRun = createCollector('ses_tariff_peak_only');
+peakOnlyRun.model = 'deepseek-v4.1-flash';
+peakOnlyRun.provider = 'opencode-go';
+peakOnlyRun.steps = rateRun.steps.map((step) => ({ ...step, model: 'deepseek-v4.1-flash', cost: step.cost * 2 }));
+peakOnlyRun.stepsSeq = peakOnlyRun.steps.length;
+const peakOnlySnap = snapshot(peakOnlyRun, peakAt).cost.tariff;
+check(
+  'a session that only ran at peak does not double its peak rate',
+  peakOnlySnap?.source === 'recovered' &&
+    peakOnlySnap.tiers.peak.input === 0.3 &&
+    peakOnlySnap.tiers.offPeak.input === 0.15,
+  JSON.stringify(peakOnlySnap),
+);
+
+const flatRun = createCollector('ses_tariff_flat');
+flatRun.model = 'glm-5.3-flash';
+flatRun.provider = 'opencode-go';
+check('a flat-priced model has no tariff', snapshot(flatRun, peakAt).cost.tariff === null, JSON.stringify(snapshot(flatRun, peakAt).cost.tariff));
+check(
+  'a tariff without a model provider stays flat',
+  snapshot(Object.assign(createCollector('ses_tariff_noprovider'), { model: 'deepseek-v4.1-flash' }), peakAt).cost.tariff === null,
+  'no provider',
+);
+
+// A different provider with a different flat price must keep its own numbers,
+// not inherit the card because its model happens to be called DeepSeek.
+const otherProvider = createCollector('ses_tariff_other_provider');
+otherProvider.model = 'deepseek-flash';
+otherProvider.provider = 'requesty';
+otherProvider.steps = rateRun.steps.map((step) => {
+  const input = step.total - step.tokens;
+  return {
+    ...step,
+    model: 'deepseek-flash',
+    cost: (input * 0.2 + step.tokens * 0.8 + step.cacheRead * 0.004) / 1e6,
+  };
+});
+otherProvider.stepsSeq = otherProvider.steps.length;
+const otherSnap = snapshot(otherProvider, peakAt);
+check(
+  'a different provider keeps its own recovered cost, not the card',
+  otherSnap.cost.tariff === null &&
+    otherSnap.cost.rates?.input === 0.2 &&
+    otherSnap.cost.rates?.output === 0.8 &&
+    otherSnap.cost.rates?.cacheRead === 0.004,
+  JSON.stringify(otherSnap.cost.rates),
+);
 
 // The recovered rates are cached with the steps but keyed by the model: the
 // model can change while the step list does not.

@@ -1,6 +1,7 @@
 // Aggregates token usage for one session from OpenCode's own API and event stream.
 // No DOM, no host: the server in ./main.js hands it an `apiGet` function.
 import { ratesOf } from '../../shared/chart.js';
+import { isPeakAt, tariffTiers, timeTariff } from '../../shared/pricing.js';
 
 const HISTORY_PAGES = 20;
 const HISTORY_PAGE_SIZE = 100;
@@ -68,8 +69,10 @@ export function createCollector(id) {
     lineageAt: 0,
     lineageTriedAt: 0,
     lineageLoading: false,
-    // The model the session is running, for the recovered cost rates.
+    // The model the session is running, for the recovered cost rates, and the
+    // provider that bills it, for a time-of-day tariff when it has one.
     model: null,
+    provider: null,
     status: 'idle',
     // How many tool calls are running right now. A turn can run two at once,
     // and the first to finish must not hand the status back while the other
@@ -244,6 +247,7 @@ export function applyRecord(collector, record) {
   if (!record) return;
   if (typeof record.title === 'string' && record.title) collector.title = record.title;
   if (typeof record.model?.id === 'string') collector.model = record.model.id;
+  if (typeof record.model?.providerID === 'string') collector.provider = record.model.providerID;
   const busy = record.time?.busy;
   const idle = record.time?.idle;
   const working = Boolean(busy && (!idle || busy > idle));
@@ -323,6 +327,7 @@ function stepFromMessage(message) {
     id: message.id,
     at: typeof streamed === 'number' ? streamed : created,
     model: typeof message.model?.id === 'string' ? message.model.id : null,
+    provider: typeof message.model?.providerID === 'string' ? message.model.providerID : null,
     tokens: output,
     total: (tokens.input ?? 0) + output,
     cost: typeof message.cost === 'number' ? message.cost : 0,
@@ -420,6 +425,7 @@ export async function loadHistory(collector, apiGet, deadline = 0, { stepsOnly =
     steps.sort((a, b) => a.at - b.at);
     collector.steps = steps.slice(-MAX_STEPS);
     collector.model = steps.at(-1)?.model ?? collector.model;
+    collector.provider = steps.at(-1)?.provider ?? collector.provider;
     collector.stepsSeq += 1;
     collector.lastStep = [...collector.steps].reverse().find((step) => step.tps) ?? null;
     collector.lastTtftMs = [...collector.steps].reverse().find((step) => step.ttftMs > 0)?.ttftMs ?? null;
@@ -515,11 +521,13 @@ export function applyEvent(collector, event) {
     case 'session.step.started':
       collector.pendingTools = 0;
       if (typeof data.model?.id === 'string') collector.model = data.model.id;
+      if (typeof data.model?.providerID === 'string') collector.provider = data.model.providerID;
       collector.stream = {
         started: typeof data.started === 'number' ? data.started : at,
         startedAt: at,
         streamedAt: null,
         model: collector.model,
+        provider: collector.provider,
         messageID: data.assistantMessageID ?? null,
         chars: 0,
         firstOutputAt: null,
@@ -548,6 +556,7 @@ export function applyEvent(collector, event) {
           id: data.assistantMessageID ?? null,
           at: endAt,
           model: stream?.model ?? collector.model,
+          provider: stream?.provider ?? collector.provider,
           tokens: output,
           total: tokens.input + output,
           cost: typeof data.cost === 'number' ? data.cost : 0,
@@ -819,6 +828,20 @@ export function snapshot(collector, now = Date.now(), tree = [collector]) {
     modelCostRates = modelRates(steps, model);
     derived.ratesByModel.set(modelKey, modelCostRates);
   }
+  // A model with a published time-of-day tariff gets both sides drawn, with
+  // the side that is active at `now` marked. A flat model has no tariff and
+  // keeps the one recovered rate line. When the fit fails on a provider with
+  // no schedule, say whether it ran out of steps or saw more than one price.
+  const tariff = timeTariff(collector.provider, model);
+  const tiers = tariff ? tariffTiers(tariff, modelCostRates) : null;
+  const pricedSteps = steps.filter((step) => step.model === model && step.cost > 0);
+  const ratesNote = modelCostRates
+    ? null
+    : pricedSteps.length < 8
+      ? 'fewSteps'
+      : pricedSteps.some((step) => step.cacheRead > 0)
+        ? 'nonLinear'
+        : 'noCache';
   const status = treeStatus(collector, members);
   // Every subagent still working, with its own rate: the headline adds them up,
   // the list says what makes it. Eight is enough to draw; `running` keeps the
@@ -876,8 +899,26 @@ export function snapshot(collector, now = Date.now(), tree = [collector]) {
       // Effective, not list price: every token and cache read in the cost.
       perMillion: consumed > 0 ? Math.round((totalCost / consumed) * 1e6 * 1e4) / 1e4 : null,
       // The model's own rates, recovered from its step costs; null when the
-      // steps cannot pin them down.
+      // steps cannot pin them down. `ratesNote` says why when they are null.
       rates: modelCostRates,
+      ratesNote,
+      // Both sides of a published time-of-day tariff, and which one is active
+      // now. Null for the flat-priced models, which keep `rates` alone.
+      tariff: tariff
+        ? {
+            provider: collector.provider,
+            model,
+            peak: isPeakAt(now, tariff.schedule),
+            multiplier: tariff.peakMultiplier,
+            window: tariff.schedule.label,
+            holidayYear: tariff.schedule.holidayYear ?? null,
+            holidayStale: tariff.schedule.holidayYear
+              ? new Date(now).getUTCFullYear() > tariff.schedule.holidayYear
+              : false,
+            source: tiers.source,
+            tiers: { offPeak: tiers.offPeak, peak: tiers.peak },
+          }
+        : null,
     },
     // What the running turn has used so far, counted from the same list the
     // chart draws: the frames say "this turn" without a second read.

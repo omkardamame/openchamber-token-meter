@@ -18,6 +18,7 @@ docs/STATE.md
 .env
 .env.*
 *.local
+.openchamber/
 *.zip
 *.tgz
 /tmp/

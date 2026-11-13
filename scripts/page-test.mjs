@@ -52,6 +52,18 @@ const state = (over = {}) =>
       lastTurn: 0.08,
       perMillion: 0.0504,
       rates: { model: 'deepseek-v4.1-flash', input: 0.15, output: 0.6, cacheRead: 0.003 },
+      tariff: {
+        provider: 'opencode-go',
+        model: 'deepseek-v4.1-flash',
+        peak: true,
+        multiplier: 2,
+        window: '01:00–04:00 and 06:00–10:00 UTC, Mon–Fri',
+        source: 'recovered',
+        tiers: {
+          offPeak: { input: 0.15, output: 0.6, cacheRead: 0.003 },
+          peak: { input: 0.3, output: 1.2, cacheRead: 0.006 },
+        },
+      },
     },
     subagents: { count: 0, running: 0, loading: 0, partial: 0, streaming: 0, tool: 0, active: [] },
     series: { t0: Date.now() - 5000, step: 250, v: [30, 34, 36] },
@@ -209,6 +221,13 @@ const harness = `<!doctype html><meta charset="utf-8"><title>page test</title>
       stepsAvgColor: doc.querySelector('.steps-avg') ? getComputedStyle(doc.querySelector('.steps-avg')).color : null,
       costModelFont: doc.querySelector('.cost-model') ? getComputedStyle(doc.querySelector('.cost-model')).fontSize : null,
       costTotalFont: doc.querySelector('.cost-total') ? getComputedStyle(doc.querySelector('.cost-total')).fontSize : null,
+      costTiers: [...doc.querySelectorAll('.cost-rates .rate-row[data-tier]')].map((node) => ({
+        tier: node.getAttribute('data-tier'),
+        active: node.getAttribute('data-active'),
+        color: getComputedStyle(node).color,
+        cells: [...node.querySelectorAll('.rate-num')].map((cell) => cell.textContent),
+      })),
+      costRatesTitle: (doc.querySelector('.cost-rates') || {}).title,
       ttftFont: (() => {
         const cell = [...doc.querySelectorAll('.totals-grid .cell')].find((node) => node.querySelector('.cell-label')?.textContent === 'TTFT');
         return cell ? getComputedStyle(cell.querySelector('.cell-value')).fontSize : null;
@@ -255,7 +274,6 @@ const harness = `<!doctype html><meta charset="utf-8"><title>page test</title>
       stepsNowHidden: doc.querySelector('.steps-now') ? doc.querySelector('.steps-now').hidden : null,
       statusLabel: (doc.querySelector('.status-label') || {}).textContent,
       costTurnTitle: (doc.querySelector('.cost-turn') || {}).title,
-      foot: (doc.querySelector('.foot') || {}).textContent,
       labels: [...doc.querySelectorAll('svg text')].map((n) => n.textContent),
     };
   };
@@ -414,6 +432,11 @@ try {
   check('panel pins the tallest step to the top of its chart', idle.stepsPeakTop === 6, String(idle.stepsPeakTop));
   check('panel shows the last measured step', /last 33 t\/s/.test(idle.text), idle.text.slice(0, 60));
   check(
+    'panel puts the last turn cost after the last measured step',
+    /last 33 t\/s · 7\.8 s · 1\.1k tok · \$0\.0800/.test(idle.text),
+    idle.text.slice(0, 100),
+  );
+  check(
     'panel colours the last measured step by its tier',
     idle.lastRateTier === 'steady' && idle.lastRateColor === 'rgb(118, 172, 79)' && idle.lastRateShadow === 'none',
     `${idle.lastRateTier} ${idle.lastRateColor} ${idle.lastRateShadow}`,
@@ -479,9 +502,67 @@ try {
     `${idle.costModelFont}/${idle.costTotalFont} · ${idle.ttftFont}/${idle.inFont}`,
   );
   check(
-    'panel names the actual input, output and cache rates',
-    /model rates \/ 1M · in \$0\.15 · out \$0\.60 · cache \$0\.003/.test(idle.text),
-    idle.text.slice(-160),
+    'panel puts the active peak row above the off-peak row',
+    idle.costTiers?.[0]?.tier === 'peak' &&
+      idle.costTiers[0].active === 'true' &&
+      idle.costTiers[0].cells.join('|') === '$0.30|$1.20|$0.006' &&
+      idle.costTiers?.[1]?.tier === 'off-peak' &&
+      idle.costTiers[1].active === 'false' &&
+      idle.costTiers[1].cells.join('|') === '$0.15|$0.60|$0.003',
+    JSON.stringify(idle.costTiers),
+  );
+  check(
+    'panel marks the active peak row in the warning colour',
+    idle.costTiers?.[0]?.color === 'rgb(245, 158, 11)',
+    String(idle.costTiers?.[0]?.color),
+  );
+
+  await panel.set(state({ cost: { ...state().cost, tariff: { ...state().cost.tariff, peak: false } } }));
+  const offPeak = await panel.read();
+  check(
+    'panel puts the active off-peak row first',
+    offPeak.costTiers?.[0]?.tier === 'off-peak' &&
+      offPeak.costTiers[0].active === 'true' &&
+      offPeak.costTiers[0].cells.join('|') === '$0.15|$0.60|$0.003' &&
+      offPeak.costTiers?.[1]?.tier === 'peak' &&
+      offPeak.costTiers[1].cells.join('|') === '$0.30|$1.20|$0.006',
+    JSON.stringify(offPeak.costTiers),
+  );
+
+  await panel.set(state({ cost: { ...state().cost, rates: null } }));
+  const cardOnly = await panel.read();
+  check(
+    'panel draws the tariff card before a rate is recovered',
+    cardOnly.costTiers.length === 2 &&
+      cardOnly.costTiers[0].tier === 'peak' &&
+      cardOnly.costTiers[0].cells.join('|') === '$0.30|$1.20|$0.006',
+    JSON.stringify(cardOnly.costTiers),
+  );
+
+  await panel.set(state({ cost: { ...state().cost, tariff: null } }));
+  const flatModel = await panel.read();
+  check(
+    'panel falls back to one recovered line for a flat-priced model',
+    /model rates \/ 1M · in \$0\.15 · out \$0\.60 · cache \$0\.003/.test(flatModel.text) && flatModel.costTiers.length === 0,
+    JSON.stringify(flatModel.costTiers),
+  );
+
+  await panel.set(state({ cost: { ...state().cost, rates: null, tariff: null, ratesNote: 'nonLinear' } }));
+  const nonLinear = await panel.read();
+  check(
+    'panel explains a provider with more than one price and no schedule',
+    nonLinear.costTiers.length === 0 &&
+      /multiple rates; no schedule/.test(nonLinear.text) &&
+      /no published schedule/.test(nonLinear.costRatesTitle ?? ''),
+    String(nonLinear.costRatesTitle),
+  );
+
+  await panel.set(state({ cost: { ...state().cost, rates: null, tariff: null, ratesNote: 'noCache' } }));
+  const noCache = await panel.read();
+  check(
+    'panel explains a fit with no cache reads',
+    /cannot separate the cache rate/.test(noCache.costRatesTitle ?? ''),
+    String(noCache.costRatesTitle),
   );
 
   await panel.set({ ...state(), stepsKnown: 5 });
@@ -789,13 +870,17 @@ try {
   const sIdle = await status.read();
   check('status draws all eight cells', sIdle.cells.join(',') === 'In,Out,Think,Total out,Cache,Cache hit,TTFT,Consumed', sIdle.cells.join(','));
   check('status draws the consumed total', sIdle.values.some((v) => v.startsWith('49.2M')), sIdle.values.join(' | '));
+  check(
+    'status has no cost or footer below the stats',
+    !/\$/.test(sIdle.text) && !/first token/.test(sIdle.text),
+    sIdle.text.slice(-80),
+  );
   check('status shows the last measured step', /last 33 t\/s/.test(sIdle.text), sIdle.text.slice(0, 60));
   check(
     'status colours the last measured step by its tier',
     sIdle.lastRateTier === 'steady' && sIdle.lastRateColor === 'rgb(118, 172, 79)' && sIdle.lastRateShadow === 'none',
     `${sIdle.lastRateTier} ${sIdle.lastRateColor} ${sIdle.lastRateShadow}`,
   );
-  check('status ends its foot with the session cost', sIdle.foot === '$0.3100', String(sIdle.foot));
   const statusHotBase = state();
   await status.set({ ...statusHotBase, live: { ...statusHotBase.live, lastStep: { ...statusHotBase.live.lastStep, tps: 120 } } });
   const sHotLast = await settle(status, 'lastRateColor', 'rgb(212, 175, 55)');
@@ -859,17 +944,7 @@ try {
     subagents: { count: 2, running: 1, streaming: 1, tool: 0 },
   });
   const sSub = await status.read();
-  check('status says how many subagents are included', /1 of 2 subagents/.test(sSub.text), sSub.text.slice(0, 80));
   check('status marks a subagent step', /last 33 t\/s · sub/.test(sSub.text), sSub.text.slice(0, 80));
-  check(
-    'status keeps the first-token wait and the cost beside the subagents',
-    /1 of 2 subagents · first token 6\.5 s · \$0\.3100/.test(sSub.text),
-    sSub.text.slice(0, 90),
-  );
-  const freeBase = state();
-  await status.set({ ...freeBase, cost: { ...freeBase.cost, total: 0 } });
-  const sFree = await status.read();
-  check('status leaves the foot empty when the session cost nothing', sFree.foot === '', String(sFree.foot));
 
   const fastStatus = state({ status: 'streaming', live: { ...state().live, tps: 209, lastStep: { ...state().live.lastStep, tps: 120 } } });
   await status.set(fastStatus);

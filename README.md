@@ -33,12 +33,15 @@ https://github.com/omkardamame/openchamber-token-meter.git
   of the tree are running.
 - **Totals** — In, Out, Think, Total out, Cache, Cache hit, TTFT, Consumed.
 - **Cost** — the session's total, the last turn, the model, its blended cost
-  per million and its actual input, output and cache-hit rates.
+  per million and its actual input, output and cache-hit rates. A model with
+  published peak and off-peak pricing shows both, with the tier active now
+  marked. The last turn's cost also sits at the end of the last measured step's
+  line.
 - **Per step** — the session's step count and its last 1,000 steps, with a
   start/now time axis, orange for the session and blue for a subagent, the green
   average and the red best step.
-- **Work Status** — the same numbers as a compact strip in the chat panel, so
-  the speed sits next to the conversation.
+- **Work Status** — the same speed and totals as a compact strip in the chat
+  panel, so the speed sits next to the conversation.
 
 ## Where the numbers come from
 
@@ -62,6 +65,17 @@ and cache-read tokens, so a least-squares fit returns the provider's real linear
 price. It needs a few differently shaped steps; when a tier or a cache-write
 charge makes the cost non-linear, the rates are withheld instead of guessed.
 The blended effective rate sits beside them.
+
+For a provider/model pair with a published time-of-day tariff, both sides are
+named and the one active now is marked. The current cards are OpenCode Go's
+DeepSeek models and DeepSeek's own API: peak is 2× off-peak, 01:00–04:00 and
+06:00–10:00 UTC, Monday–Friday; every other hour, weekends included, is
+off-peak. DeepSeek's own API also treats Chinese public holidays as off-peak.
+The table is keyed by provider and model, so a different API keeps its own
+recovered rates; if that API has time tiers but no known schedule, the line
+says "multiple rates; no schedule" instead of applying the wrong card. The cards come from the provider's
+published rates, while the recovered rates still win whenever they match a
+side, so a price change shows up without a new version.
 
 Totals, per-step speed and TTFT are measured. The live `N t/s` is an estimate:
 streamed characters × a ratio learned from finished steps, kept per session so

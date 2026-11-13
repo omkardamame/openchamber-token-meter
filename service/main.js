@@ -18,6 +18,107 @@ function ratesOf(steps) {
   return { avg: ms > 0 ? tokens / ms * 1000 : 0, peak };
 }
 
+// shared/pricing.js
+var UTC_WEEKDAY = {
+  windows: [
+    [1, 4],
+    [6, 10]
+  ],
+  label: "01:00–04:00 and 06:00–10:00 UTC, Mon–Fri",
+  holidays: null
+};
+var CN_HOLIDAY_RANGES = [
+  ["2026-01-01", "2026-01-03"],
+  ["2026-02-15", "2026-02-23"],
+  ["2026-04-04", "2026-04-06"],
+  ["2026-05-01", "2026-05-05"],
+  ["2026-06-19", "2026-06-21"],
+  ["2026-09-25", "2026-09-27"],
+  ["2026-10-01", "2026-10-07"]
+];
+function holidaySet(ranges) {
+  const days = new Set;
+  for (const [start, end] of ranges) {
+    const from = Date.parse(`${start}T00:00:00Z`);
+    const to = Date.parse(`${end}T00:00:00Z`);
+    for (let at = from;at <= to; at += 86400000) {
+      days.add(new Date(at).toISOString().slice(0, 10));
+    }
+  }
+  return days;
+}
+var UTC_WEEKDAY_CN = {
+  windows: UTC_WEEKDAY.windows,
+  label: "01:00–04:00 and 06:00–10:00 UTC, Mon–Fri, excluding Chinese public holidays",
+  holidays: holidaySet(CN_HOLIDAY_RANGES),
+  holidayYear: 2026
+};
+var flash = (schedule) => ({
+  schedule,
+  peakMultiplier: 2,
+  offPeak: { input: 0.15, output: 0.6, cacheRead: 0.003 },
+  peak: { input: 0.3, output: 1.2, cacheRead: 0.006 }
+});
+var pro = (schedule) => ({
+  schedule,
+  peakMultiplier: 2,
+  offPeak: { input: 0.66, output: 1.98, cacheRead: 0.022 },
+  peak: { input: 1.32, output: 3.96, cacheRead: 0.044 }
+});
+var TIME_TARIFFS = {
+  "opencode-go/deepseek-v4.1-flash": flash(UTC_WEEKDAY),
+  "opencode-go/deepseek-v4-pro": pro(UTC_WEEKDAY),
+  "deepseek/deepseek-flash": flash(UTC_WEEKDAY_CN),
+  "deepseek/deepseek-v4-flash": flash(UTC_WEEKDAY_CN),
+  "deepseek/deepseek-v4-flash-vision-exp": flash(UTC_WEEKDAY_CN),
+  "deepseek/deepseek-v4-pro": pro(UTC_WEEKDAY_CN)
+};
+function timeTariff(provider, model) {
+  if (!provider || !model)
+    return null;
+  return TIME_TARIFFS[`${provider}/${model}`] ?? null;
+}
+function isPeakAt(at, schedule = UTC_WEEKDAY) {
+  const date = new Date(Number(at));
+  if (!Number.isFinite(date.getTime()))
+    return false;
+  const day = date.getUTCDay();
+  if (day === 0 || day === 6)
+    return false;
+  const minute = date.getUTCHours() * 60 + date.getUTCMinutes();
+  if (!schedule.windows.some(([start, end]) => minute >= start * 60 && minute < end * 60))
+    return false;
+  if (schedule.holidays?.has(date.toISOString().slice(0, 10)))
+    return false;
+  return true;
+}
+var pick = (rates) => ({ input: rates.input, output: rates.output, cacheRead: rates.cacheRead });
+var scale = (rates, factor) => ({
+  input: Math.round(rates.input * factor * 1e6) / 1e6,
+  output: Math.round(rates.output * factor * 1e6) / 1e6,
+  cacheRead: Math.round(rates.cacheRead * factor * 1e6) / 1e6
+});
+function tariffTiers(tariff, rates = null) {
+  const card = {
+    source: "card",
+    offPeak: { ...tariff.offPeak },
+    peak: { ...tariff.peak }
+  };
+  if (!rates)
+    return card;
+  const near = (a, b) => Math.abs(a - b) <= Math.max(0.000001, Math.abs(b) * 0.01);
+  const matches = (side) => near(rates.input, side.input) && near(rates.output, side.output) && near(rates.cacheRead, side.cacheRead);
+  const atPeak = matches(tariff.peak);
+  const atOffPeak = matches(tariff.offPeak);
+  if (atPeak && !atOffPeak) {
+    return { source: "recovered", offPeak: scale(rates, 1 / tariff.peakMultiplier), peak: pick(rates) };
+  }
+  if (atOffPeak || !atPeak) {
+    return { source: "recovered", offPeak: pick(rates), peak: scale(rates, tariff.peakMultiplier) };
+  }
+  return card;
+}
+
 // service/src/collector.js
 var HISTORY_PAGES = 20;
 var HISTORY_PAGE_SIZE = 100;
@@ -77,6 +178,7 @@ function createCollector(id) {
     lineageTriedAt: 0,
     lineageLoading: false,
     model: null,
+    provider: null,
     status: "idle",
     pendingTools: 0,
     error: null,
@@ -213,6 +315,8 @@ function applyRecord(collector, record) {
     collector.title = record.title;
   if (typeof record.model?.id === "string")
     collector.model = record.model.id;
+  if (typeof record.model?.providerID === "string")
+    collector.provider = record.model.providerID;
   const busy = record.time?.busy;
   const idle = record.time?.idle;
   const working = Boolean(busy && (!idle || busy > idle));
@@ -278,6 +382,7 @@ function stepFromMessage(message) {
     id: message.id,
     at: typeof streamed === "number" ? streamed : created,
     model: typeof message.model?.id === "string" ? message.model.id : null,
+    provider: typeof message.model?.providerID === "string" ? message.model.providerID : null,
     tokens: output,
     total: (tokens.input ?? 0) + output,
     cost: typeof message.cost === "number" ? message.cost : 0,
@@ -356,6 +461,7 @@ async function loadHistory(collector, apiGet, deadline = 0, { stepsOnly = false 
     steps.sort((a, b) => a.at - b.at);
     collector.steps = steps.slice(-MAX_STEPS);
     collector.model = steps.at(-1)?.model ?? collector.model;
+    collector.provider = steps.at(-1)?.provider ?? collector.provider;
     collector.stepsSeq += 1;
     collector.lastStep = [...collector.steps].reverse().find((step) => step.tps) ?? null;
     collector.lastTtftMs = [...collector.steps].reverse().find((step) => step.ttftMs > 0)?.ttftMs ?? null;
@@ -451,11 +557,14 @@ function applyEvent(collector, event) {
       collector.pendingTools = 0;
       if (typeof data.model?.id === "string")
         collector.model = data.model.id;
+      if (typeof data.model?.providerID === "string")
+        collector.provider = data.model.providerID;
       collector.stream = {
         started: typeof data.started === "number" ? data.started : at,
         startedAt: at,
         streamedAt: null,
         model: collector.model,
+        provider: collector.provider,
         messageID: data.assistantMessageID ?? null,
         chars: 0,
         firstOutputAt: null,
@@ -482,6 +591,7 @@ function applyEvent(collector, event) {
           id: data.assistantMessageID ?? null,
           at: endAt,
           model: stream?.model ?? collector.model,
+          provider: stream?.provider ?? collector.provider,
           tokens: output,
           total: tokens.input + output,
           cost: typeof data.cost === "number" ? data.cost : 0,
@@ -578,17 +688,17 @@ function modelRates(steps, model) {
   if (rows.length < 8 || !rows.some((row) => row[2] > 0))
     return null;
   const n = 3;
-  const scale = Array.from({ length: n }, (_, column) => Math.sqrt(rows.reduce((sum, row) => sum + row[column] * row[column], 0) / rows.length));
-  if (scale.some((value) => !(value > 0)))
+  const scale2 = Array.from({ length: n }, (_, column) => Math.sqrt(rows.reduce((sum, row) => sum + row[column] * row[column], 0) / rows.length));
+  if (scale2.some((value) => !(value > 0)))
     return null;
   const a = Array.from({ length: n }, () => Array(n).fill(0));
   const b = Array(n).fill(0);
   for (const row of rows) {
     for (let i = 0;i < n; i += 1) {
-      const left = row[i] / scale[i];
+      const left = row[i] / scale2[i];
       b[i] += left * row[3];
       for (let j = 0;j < n; j += 1)
-        a[i][j] += left * (row[j] / scale[j]);
+        a[i][j] += left * (row[j] / scale2[j]);
     }
   }
   const maxPivot = Math.max(...a.map((row, i) => Math.abs(row[i])));
@@ -611,7 +721,7 @@ function modelRates(steps, model) {
       b[row] -= factor * b[column];
     }
   }
-  const x = b.map((value, i) => value / a[i][i] / scale[i]);
+  const x = b.map((value, i) => value / a[i][i] / scale2[i]);
   if (x.some((value) => !Number.isFinite(value) || value < -0.000001))
     return null;
   let error = 0;
@@ -705,6 +815,10 @@ function snapshot(collector, now = Date.now(), tree = [collector]) {
     modelCostRates = modelRates(steps, model);
     derived.ratesByModel.set(modelKey, modelCostRates);
   }
+  const tariff = timeTariff(collector.provider, model);
+  const tiers = tariff ? tariffTiers(tariff, modelCostRates) : null;
+  const pricedSteps = steps.filter((step) => step.model === model && step.cost > 0);
+  const ratesNote = modelCostRates ? null : pricedSteps.length < 8 ? "fewSteps" : pricedSteps.some((step) => step.cacheRead > 0) ? "nonLinear" : "noCache";
   const status = treeStatus(collector, members);
   const active = [];
   for (const member of members) {
@@ -757,7 +871,19 @@ function snapshot(collector, now = Date.now(), tree = [collector]) {
       total: totalCost,
       lastTurn: lastTurnCost,
       perMillion: consumed > 0 ? Math.round(totalCost / consumed * 1e6 * 1e4) / 1e4 : null,
-      rates: modelCostRates
+      rates: modelCostRates,
+      ratesNote,
+      tariff: tariff ? {
+        provider: collector.provider,
+        model,
+        peak: isPeakAt(now, tariff.schedule),
+        multiplier: tariff.peakMultiplier,
+        window: tariff.schedule.label,
+        holidayYear: tariff.schedule.holidayYear ?? null,
+        holidayStale: tariff.schedule.holidayYear ? new Date(now).getUTCFullYear() > tariff.schedule.holidayYear : false,
+        source: tiers.source,
+        tiers: { offPeak: tiers.offPeak, peak: tiers.peak }
+      } : null
     },
     turn: {
       active: Boolean(collector.turnActive),

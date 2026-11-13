@@ -201,13 +201,13 @@ function rateMoney(value) {
   return `$${n < 1 ? n.toFixed(2) : n.toFixed(1)}`;
 }
 
-/** A model's list rate: 0.003 shows as $0.003, 0.15 as $0.15. */
+/** A model's list rate: 0.003 shows as $0.003, 0.6 as $0.60, 1.2 as $1.20. */
 function listRate(value) {
   const n = Number(value) || 0;
   if (!n) return '$0';
   if (n < 0.001) return `$${n.toFixed(4)}`;
   if (n < 0.01) return `$${n.toFixed(3)}`;
-  if (n < 1) return `$${n.toFixed(2)}`;
+  if (n < 10) return `$${n.toFixed(2)}`;
   return `$${n.toFixed(1)}`;
 }
 
@@ -223,6 +223,9 @@ function paintCost(data) {
   const turn = data.turn ?? {};
   const total = typeof cost.total === 'number' ? cost.total : (totals.cost ?? 0);
   ui.costTotal.textContent = money4(total);
+  ui.costTotal.title = cost.tariff
+    ? 'OpenCode’s recorded cost; the active side of the rate table is what the provider charges'
+    : 'this session and its subagents, as OpenCode recorded it';
   ui.costTurn.textContent = typeof cost.lastTurn === 'number' ? money4(cost.lastTurn) : '—';
   ui.costTurn.title =
     (data.subagents?.loading ?? 0) > 0 || (data.subagents?.partial ?? 0) > 0 || data.historyPartial
@@ -237,15 +240,78 @@ function paintCost(data) {
   // The model's own list rates, recovered from OpenCode's step costs. They are
   // what the provider charged per million, not the blended rate above. A model
   // switch mid-session shows a dash until the new model has its own steps.
-  const rates = cost.rates && (!modelLabel || cost.rates.model === modelLabel) ? cost.rates : null;
-  ui.costRates.textContent = rates
-    ? `model rates / 1M · in ${listRate(rates.input)} · out ${listRate(rates.output)} · cache ${listRate(rates.cacheRead)}`
-    : 'model rates / 1M · —';
+  //
+  // A model with a published time-of-day tariff shows both sides, the active
+  // one first and in its own colour: peak at 2× is the number that matters
+  // while a peak window is open, and the off-peak line stays visible so the
+  // pair can be read without a tooltip.
+  // A stale recovered rate means the session has moved model; the tariff came
+  // from the same model and must go with it. With no recovered rate yet the
+  // tariff still stands on its own card.
+  const sameModel = !cost.rates || !modelLabel || cost.rates.model === modelLabel;
+  const tariff = cost.tariff && sameModel && (!modelLabel || cost.tariff.model === modelLabel) ? cost.tariff : null;
+  const rates = cost.rates && sameModel ? cost.rates : null;
+  if (tariff?.tiers) {
+    const peak = Boolean(tariff.peak);
+    const active = peak ? tariff.tiers.peak : tariff.tiers.offPeak;
+    const other = peak ? tariff.tiers.offPeak : tariff.tiers.peak;
+    const row = (name, tierRates, tier, current) => {
+      const node = el('div', 'rate-row');
+      node.dataset.tier = tier;
+      node.dataset.active = current ? 'true' : 'false';
+      node.append(
+        el('span', 'rate-name', name),
+        el('span', 'rate-num', listRate(tierRates.input)),
+        el('span', 'rate-num', listRate(tierRates.output)),
+        el('span', 'rate-num', listRate(tierRates.cacheRead)),
+      );
+      return node;
+    };
+    const head = el('div', 'rate-row rate-head');
+    head.append(
+      el('span', 'rate-name', 'rates / 1M'),
+      el('span', 'rate-num', 'in'),
+      el('span', 'rate-num', 'out'),
+      el('span', 'rate-num', 'cache'),
+    );
+    ui.costRates.replaceChildren(
+      head,
+      row(peak ? 'peak now' : 'off-peak now', active, peak ? 'peak' : 'off-peak', true),
+      row(peak ? 'off-peak' : 'peak', other, peak ? 'off-peak' : 'peak', false),
+    );
+    ui.costRates.title = `${tariff.provider === 'opencode-go' ? 'OpenCode Go' : tariff.provider} peak: ${tariff.window}; peak is ${tariff.multiplier}× off-peak. ${
+      tariff.holidayYear
+        ? `Chinese public holidays are off-peak (${tariff.holidayYear} calendar${tariff.holidayStale ? '; update it for the current year' : ''}). `
+        : ''
+    }${
+      tariff.source === 'recovered'
+        ? 'rates recovered from this session’s step costs'
+        : 'rates from the published price card'
+    }.`;
+    return;
+  }
+  ui.costRates.replaceChildren(
+    el(
+      'span',
+      'tier',
+      rates
+        ? `model rates / 1M · in ${listRate(rates.input)} · out ${listRate(rates.output)} · cache ${listRate(rates.cacheRead)}`
+        : cost.ratesNote === 'nonLinear'
+          ? 'model rates / 1M · multiple rates; no schedule'
+          : 'model rates / 1M · —',
+    ),
+  );
   ui.costRates.title = rates
     ? `recovered from this session's own step costs for ${rates.model}`
     : cost.rates
       ? `the rates recovered so far are for ${cost.rates.model}, not the session's current ${modelLabel}`
-      : 'not enough differently shaped steps to recover the model’s input, output and cache rates';
+      : cost.tariff
+        ? `the tariff shown so far is for ${cost.tariff.model}, not the session's current ${modelLabel}`
+        : cost.ratesNote === 'nonLinear'
+          ? 'the step costs do not fit one linear price; this provider may charge tiers or a cache-write fee, and the meter has no published schedule for it'
+          : cost.ratesNote === 'noCache'
+            ? 'no cache-read tokens yet; the fit cannot separate the cache rate'
+            : 'not enough differently shaped steps to recover the model’s input, output and cache rates';
 }
 
 function drawLive(data) {
@@ -664,17 +730,18 @@ function render(data) {
 
   const lastStep = data.live?.lastStep;
   const lastSub = lastStep?.sub ? ' · subagent' : '';
+  const lastCost = typeof data.cost?.lastTurn === 'number' ? ` · ${money4(data.cost.lastTurn)}` : '';
   if (lastStep?.tps) {
     ui.lastRate.textContent = `last ${Math.round(lastStep.tps)} t/s`;
     // Classify the digits on screen, exactly like the headline, so a 19.6 t/s
     // step printed as "20" is not coloured as a slow rate.
     ui.lastRate.dataset.tier = speedTier(Math.round(lastStep.tps));
-    ui.lastRest.textContent = ` · ${seconds(lastStep.ms)} · ${compact(lastStep.tokens)} tok${lastSub}`;
+    ui.lastRest.textContent = ` · ${seconds(lastStep.ms)} · ${compact(lastStep.tokens)} tok${lastSub}${lastCost}`;
   } else {
     ui.lastRate.textContent = '';
     delete ui.lastRate.dataset.tier;
     ui.lastRest.textContent = lastStep
-      ? `last step ${seconds(lastStep.ms)} · ${compact(lastStep.tokens)} tok · too short to rate${lastSub}`
+      ? `last step ${seconds(lastStep.ms)} · ${compact(lastStep.tokens)} tok · too short to rate${lastSub}${lastCost}`
       : 'no finished step yet';
   }
 
