@@ -3,6 +3,19 @@
 Every release of Token Meter, newest first. A release is a tag; nothing here is
 dated by guesswork — each entry is what shipped in that tag.
 
+## [1.9.0] - 2026-11-13
+
+### Added
+
+- The rail panel Cost block now draws the model's published peak and off-peak rates side by side, with the tier active now marked. The card is keyed by provider and model, not by model name: OpenCode Go's `deepseek-v4.1-flash` / `deepseek-v4-pro`, and DeepSeek's own `deepseek-flash` / `deepseek-v4-pro` (plus the legacy Flash ids). Peak is 2× off-peak, 01:00–04:00 and 06:00–10:00 UTC, Monday–Friday; weekends are off-peak. DeepSeek's own API also treats Chinese public holidays as off-peak, with the 2026 calendar included.
+- A provider without a known card keeps the rates recovered from its own step costs. If its costs do not fit one linear price, the panel says `multiple rates; no schedule` instead of applying another provider's card. A failed fit also says whether it ran out of steps or has no cache reads yet.
+- The last turn's cost also sits at the end of the last measured step's line (`last 153 t/s · 1.6 s · 238 tok · $0.0671`).
+
+### Changed
+
+- The Work Status section ends at Consumed. Its footer below the stats — session cost, subagent count and first-token wait — is gone, so nothing is drawn below TTFT in that section.
+- The rail panel keeps its full Cost block: total, last turn, model, effective rate and the rate table.
+
 ## [1.8.0] - 2026-11-13
 
 ### Added
