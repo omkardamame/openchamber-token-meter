@@ -13,6 +13,8 @@ import { execFile, spawnSync } from 'node:child_process';
 import { promisify } from 'node:util';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { smoothPath } from '../shared/chart.js';
+import { duration } from '../shared/summary.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -57,9 +59,10 @@ const state = (over = {}) =>
     stepsFrom: Date.now() - 120_000,
     stepsKnown: 2,
     steps: [
-      { tokens: 1100, ms: 7800, tps: 141, aborted: false },
-      { tokens: 900, ms: 5000, tps: 180, aborted: false },
+      { tokens: 1100, ms: 7800, tps: 141, aborted: false, at: Date.now() - 60_000, cost: 0.0012 },
+      { tokens: 900, ms: 5000, tps: 180, aborted: false, at: Date.now() - 30_000, cost: 0.0034 },
     ],
+    turn: { active: false, startedAt: Date.now() - 90_000, tokens: 2000, steps: 2 },
     rates: { avg: 79, peak: 334 },
     stream: { state: 'open' },
     loading: false,
@@ -102,7 +105,7 @@ const harness = `<!doctype html><meta charset="utf-8"><title>page test</title>
       return;
     }
     if (message.type === 'service-request') {
-      const answer = window.__answer ? window.__answer(message.payload) : { status: 200, body: JSON.stringify(window.__state) };
+      const answer = window.__answer ? window.__answer(message.payload) : window.__answerFor(message.payload);
       if (window.__delayMs) setTimeout(() => reply(answer), window.__delayMs);
       else reply(answer);
       return;
@@ -111,6 +114,53 @@ const harness = `<!doctype html><meta charset="utf-8"><title>page test</title>
   });
   window.__delayMs = 0;
   window.__setState = (next) => { window.__state = next; };
+  // The service leaves the step list out when the frame already has this
+  // sequence, which is what lets the frame keep one array object between polls.
+  // Mimic it, so a poll that changed nothing can keep the bars it drew.
+  window.__served = { seq: null, signature: '' };
+  window.__answerFor = (payload) => {
+    const current = window.__state;
+    const signature = JSON.stringify(current && current.steps);
+    const asked = payload && payload.query ? payload.query.steps : undefined;
+    if (
+      current &&
+      Array.isArray(current.steps) &&
+      window.__served.seq !== null &&
+      String(asked) === String(window.__served.seq) &&
+      signature === window.__served.signature
+    ) {
+      const { steps, ...rest } = current;
+      return { status: 200, body: JSON.stringify(rest) };
+    }
+    window.__served = { seq: current ? current.stepsSeq : null, signature };
+    return { status: 200, body: JSON.stringify(current) };
+  };
+  // Pointer events are dispatched inside the iframe: the page compares clientX
+  // with its own bounding rect, so the coordinates are iframe coordinates.
+  window.__hover = (selector, fraction) => {
+    const target = frame.contentDocument.querySelector(selector);
+    if (!target) return false;
+    const rect = target.getBoundingClientRect();
+    const View = frame.contentWindow;
+    target.dispatchEvent(new View.PointerEvent('pointermove', {
+      clientX: rect.left + rect.width * fraction,
+      clientY: rect.top + rect.height * 0.5,
+      bubbles: true,
+    }));
+    return true;
+  };
+  window.__leave = (selector) => {
+    const target = frame.contentDocument.querySelector(selector);
+    if (!target) return false;
+    target.dispatchEvent(new frame.contentWindow.PointerEvent('pointerleave', { bubbles: false }));
+    return true;
+  };
+  window.__markStep = () => {
+    const rect = frame.contentDocument.querySelector('[data-chart="steps"] rect:not([data-role])');
+    if (!rect) return false;
+    rect.setAttribute('data-mark', '1');
+    return true;
+  };
   // A second ready is how the host switches sessions; the SDK re-fires onReady.
   window.__switchSession = (next, id) => {
     window.__state = next;
@@ -151,7 +201,7 @@ const harness = `<!doctype html><meta charset="utf-8"><title>page test</title>
       cells: [...doc.querySelectorAll('.totals-grid .cell-label')].map((n) => n.textContent),
       values: [...doc.querySelectorAll('.totals-grid .cell-value')].map((n) => n.textContent.trim()),
       tps: (doc.querySelector('.tps-value') || doc.querySelector('.tps') || {}).textContent,
-      bars: doc.querySelectorAll('[data-chart="steps"] rect').length,
+      bars: doc.querySelectorAll('[data-chart="steps"] rect:not([data-role="step-hover-col"])').length,
       stepSvg: (doc.querySelector('[data-chart="steps"]') || {}).innerHTML ?? '',
       subsHidden: doc.querySelector('.subagents') ? doc.querySelector('.subagents').hidden : null,
       legendHidden: doc.querySelector('.legend') ? doc.querySelector('.legend').hidden : null,
@@ -180,16 +230,32 @@ const harness = `<!doctype html><meta charset="utf-8"><title>page test</title>
       stepsPeakSep: doc.querySelector('.steps-peak') ? getComputedStyle(doc.querySelector('.steps-peak'), '::before').content : null,
       stepsAxisText: doc.querySelector('.steps-axis') ? doc.querySelector('.steps-axis').innerText.replace(/\\s+/g, ' ').trim() : null,
       liveTopY: (() => {
-        const line = doc.querySelector('[data-chart="live"] polyline');
+        const line = doc.querySelector('[data-chart="live"] path[data-role="live-line"]');
         if (!line) return null;
-        return Math.min(...line.getAttribute('points').trim().split(/\\s+/).map((pair) => Number(pair.split(',')[1])));
+        return Math.round(line.getBBox().y * 10) / 10;
       })(),
-      livePolyline: Boolean(doc.querySelector('[data-chart="live"] polyline')),
-      liveDots: doc.querySelectorAll('[data-chart="live"] circle').length,
+      livePolyline: Boolean(doc.querySelector('[data-chart="live"] path[data-role="live-line"]')),
+      liveCurve: (() => {
+        const line = doc.querySelector('[data-chart="live"] path[data-role="live-line"]');
+        return line ? String(line.getAttribute('d')).includes('C') : false;
+      })(),
+      liveDots: doc.querySelectorAll('[data-chart="live"] circle:not([data-role])').length,
+      liveCross: Boolean(doc.querySelector('[data-chart="live"] [data-role="live-cross"]')),
+      gridLabels: [...doc.querySelectorAll('[data-chart="live"] [data-role="grid-label"]')].map((n) => n.textContent),
+      timeGrid: doc.querySelectorAll('[data-chart="live"] line[data-role="time-grid"]').length,
+      peakText: (doc.querySelector('.axis-peak') || {}).textContent,
       stepsPeakTop: (() => {
-        const rects = [...doc.querySelectorAll('[data-chart="steps"] rect')];
+        const rects = [...doc.querySelectorAll('[data-chart="steps"] rect:not([data-role="step-hover-col"])')];
         return rects.length ? Math.min(...rects.map((rect) => Number(rect.getAttribute('y')))) : null;
       })(),
+      stepMark: Boolean(doc.querySelector('[data-chart="steps"] rect[data-mark="1"]')),
+      stepsHoverText: (doc.querySelector('.steps-hover') || {}).textContent,
+      stepsHoverHidden: doc.querySelector('.steps-hover') ? doc.querySelector('.steps-hover').hidden : null,
+      stepsStartHidden: doc.querySelector('.steps-start') ? doc.querySelector('.steps-start').hidden : null,
+      stepsNowHidden: doc.querySelector('.steps-now') ? doc.querySelector('.steps-now').hidden : null,
+      statusLabel: (doc.querySelector('.status-label') || {}).textContent,
+      costTurnTitle: (doc.querySelector('.cost-turn') || {}).title,
+      foot: (doc.querySelector('.foot') || {}).textContent,
       labels: [...doc.querySelectorAll('svg text')].map((n) => n.textContent),
     };
   };
@@ -268,6 +334,17 @@ const run = async (page) => {
     watchTotals: async () => {
       await browser(['eval', 'window.__watchTotals()']);
     },
+    hover: async (selector, fraction) => {
+      await browser(['eval', `window.__hover(${JSON.stringify(selector)}, ${fraction})`]);
+      await new Promise((resolve) => setTimeout(resolve, 150));
+    },
+    leave: async (selector) => {
+      await browser(['eval', `window.__leave(${JSON.stringify(selector)})`]);
+      await new Promise((resolve) => setTimeout(resolve, 150));
+    },
+    markStep: async () => {
+      await browser(['eval', 'window.__markStep()']);
+    },
     trail: async () => JSON.parse(JSON.parse(await browser(['eval', 'JSON.stringify(window.__trail)']))),
   };
 };
@@ -283,6 +360,34 @@ const settle = async (handle, field, want) => {
 };
 
 try {
+  // --- the shared curve and the turn timer ---------------------------------
+  const spike = [
+    { x: 0, y: 40 },
+    { x: 10, y: 40 },
+    { x: 20, y: 0 },
+    { x: 30, y: 40 },
+  ];
+  const spikePath = smoothPath(spike);
+  const controls = spikePath
+    .split(' C ')
+    .slice(1)
+    .flatMap((segment) => segment.split(' ').slice(0, 2).map((pair) => Number(pair.split(',')[1])));
+  check(
+    'curve stays inside the samples it was given',
+    spikePath.includes('C') && controls.length === 6 && controls.every((y) => y >= 0 && y <= 40),
+    controls.join(' | '),
+  );
+  check('curve draws one sample as a point', smoothPath([{ x: 1, y: 2 }]) === 'M 1.0,2.0', smoothPath([{ x: 1, y: 2 }]));
+  check('curve draws nothing for no samples', smoothPath([]) === '', `"${smoothPath([])}"`);
+  check(
+    'timer reads seconds, minutes and hours',
+    duration(42_000) === '42s' &&
+      duration(83_000) === '1m 23s' &&
+      duration(3_723_000) === '1h 02m' &&
+      duration(900) === '',
+    [duration(42_000), duration(83_000), duration(3_723_000), `"${duration(900)}"`].join(' | '),
+  );
+
   // --- the panel -----------------------------------------------------------
   const panel = await run('panel');
   const idle = await panel.read();
@@ -291,6 +396,21 @@ try {
   check('panel draws the measured ttft', idle.values.some((v) => v.includes('6.5 s')), idle.values.join(' | '));
   check('panel labels the average and the peak', idle.labels.some((l) => l.startsWith('avg 79')) && idle.labels.some((l) => l.startsWith('peak 334')), idle.labels.join(' | '));
   check('panel makes the live curve use the full chart height', idle.liveTopY === 8, String(idle.liveTopY));
+  check(
+    'panel labels the live scale at half and full height',
+    idle.gridLabels.length === 2 &&
+      /^\d+$/.test(idle.gridLabels[0]) &&
+      Number(idle.gridLabels[0]) > 0 &&
+      Math.abs(Number(idle.gridLabels[0]) - 2 * Number(idle.gridLabels[1])) <= 2,
+    idle.gridLabels.join(' | '),
+  );
+  check('panel marks where 15, 30 and 45 seconds ago sit', idle.timeGrid === 3, String(idle.timeGrid));
+  check('panel draws the live curve as a smooth path', idle.liveCurve === true, String(idle.liveCurve));
+  check(
+    'panel says what the last turn was made of',
+    idle.costTurnTitle === '2 steps · 2.0k generated tokens',
+    String(idle.costTurnTitle),
+  );
   check('panel pins the tallest step to the top of its chart', idle.stepsPeakTop === 6, String(idle.stepsPeakTop));
   check('panel shows the last measured step', /last 33 t\/s/.test(idle.text), idle.text.slice(0, 60));
   check(
@@ -318,6 +438,11 @@ try {
     onePoint.liveDots === 1 && onePoint.livePolyline === false,
     `${onePoint.liveDots} dots, line ${onePoint.livePolyline}`,
   );
+
+  // A resting session samples zeros; the 8 t/s floor is not a measured scale.
+  await panel.set({ ...oneBase, series: { t0: Date.now() - 2000, step: 250, v: [0, 0, 0, 0] } });
+  const flat = await panel.read();
+  check('panel leaves the scale unlabelled while nothing was measured', flat.gridLabels.length === 0, flat.gridLabels.join(' | '));
 
   const boundaryBase = state();
   await panel.set({ ...boundaryBase, live: { ...boundaryBase.live, lastStep: { ...boundaryBase.live.lastStep, tps: 19.6 } } });
@@ -442,7 +567,33 @@ try {
   await panel.set(state({ status: 'streaming', live: { ...state().live, tps: 120, charsPerSecond: 0 } }));
   const quietRate = await settle(panel, 'tps', '120');
   check('panel drops the tier when nothing is streaming', quietRate.tpsTier === null, `${quietRate.tpsTier} ${quietRate.tpsColor}`);
-
+  check(
+    'panel names the 3 s window while nothing streams',
+    /thinking · nothing streamed in the last 3 s/.test(quietRate.text),
+    quietRate.text.slice(0, 90),
+  );
+  await panel.set(state({ status: 'streaming', live: { ...state().live, tps: 41, charsPerSecond: 0, subagent: true } }));
+  const quietSub = await panel.read();
+  check(
+    'panel names the 3 s window for a quiet subagent too',
+    /a subagent is thinking · nothing streamed in the last 3 s/.test(quietSub.text),
+    quietSub.text.slice(0, 100),
+  );
+  await panel.set(state({ status: 'streaming' }));
+  const streamingNote = await panel.read();
+  check(
+    'panel names the live window as the last 3 s',
+    /last 3 s · ~313 chars\/s/.test(streamingNote.text),
+    streamingNote.text.slice(0, 100),
+  );
+  // The turn timer rides the status label, against the service's own clock.
+  const turnBase = state();
+  await panel.set({ ...turnBase, status: 'streaming', turn: { active: true, startedAt: Date.now() - 65_000, tokens: 2000, steps: 2 } });
+  const turnRunning = await panel.read();
+  check('panel times the turn that is running', /^generating · 1m 0\ds$/.test(turnRunning.statusLabel ?? ''), String(turnRunning.statusLabel));
+  await panel.set({ ...state(), turn: { active: false, startedAt: Date.now() - 90_000, tokens: 2000, steps: 2 } });
+  const turnIdle = await panel.read();
+  check('panel shows no timer when no turn is running', turnIdle.statusLabel === 'idle', String(turnIdle.statusLabel));
   await panel.set(state({ status: 'idle' }));
   const settledIdle = await settle(panel, 'tps', '0');
   check('panel lets a resting rate keep the neutral colour', settledIdle.tpsTier === null, `${settledIdle.tpsTier} ${settledIdle.tpsColor}`);
@@ -495,6 +646,72 @@ try {
   const reused = await panel.read();
   check('panel keeps its bars when the list is omitted', reused.bars > 0, `${reused.bars} bars`);
 
+  // --- per-step hover -------------------------------------------------------
+  await panel.set(state({ status: 'idle' }));
+  const stepBase = await panel.read();
+  check('panel draws one bar per rated step', stepBase.bars === 2, `${stepBase.bars} bars`);
+  // A poll with the same list must not rebuild the bars: a marked one survives
+  // three polls, and with them any hover the pointer had found.
+  await panel.markStep();
+  await new Promise((resolve) => setTimeout(resolve, 700));
+  const stepStill = await panel.read();
+  check('panel keeps its bars between polls with an unchanged step list', stepStill.stepMark === true, 'marked rect still drawn');
+  await panel.hover('[data-chart="steps"]', 0.75);
+  const stepHover = await panel.read();
+  check('panel counts both bars while one is hovered', stepHover.bars === 2, `${stepHover.bars} bars`);
+  check(
+    'panel reads the hovered step under the pointer',
+    /^180 t\/s · 900 tok in 5\.0 s · \d\d:\d\d:\d\d · \$0\.0034$/.test(stepHover.stepsHoverText ?? ''),
+    String(stepHover.stepsHoverText),
+  );
+  check(
+    'panel hides the two axis times while a step is hovered',
+    stepHover.stepsHoverHidden === false && stepHover.stepsStartHidden === true && stepHover.stepsNowHidden === true,
+    `${stepHover.stepsHoverHidden}/${stepHover.stepsStartHidden}/${stepHover.stepsNowHidden}`,
+  );
+  await panel.leave('[data-chart="steps"]');
+  const stepLeft = await panel.read();
+  check(
+    'panel puts the axis back when the pointer leaves',
+    stepLeft.stepsHoverHidden === true &&
+      stepLeft.stepsStartHidden === false &&
+      stepLeft.stepsNowHidden === false &&
+      /start \d\d:\d\d:\d\d/.test(stepLeft.stepsAxisText ?? '') &&
+      /now \d\d:\d\d:\d\d/.test(stepLeft.stepsAxisText ?? ''),
+    `${stepLeft.stepsHoverHidden}/${stepLeft.stepsStartHidden}/${stepLeft.stepsNowHidden} ${stepLeft.stepsAxisText}`,
+  );
+  await panel.set(state({ steps: [{ tokens: 900, ms: 5000, tps: 180, aborted: false }] }));
+  await panel.hover('[data-chart="steps"]', 0.5);
+  const oldStore = await panel.read();
+  check(
+    'panel reads a step from an older service without a time or a cost',
+    oldStore.stepsHoverText === '180 t/s · 900 tok in 5.0 s',
+    String(oldStore.stepsHoverText),
+  );
+  await panel.leave('[data-chart="steps"]');
+
+  // --- live hover -----------------------------------------------------------
+  const wideSeries = { t0: Date.now() - 59_000, step: 250, v: Array(236).fill(40) };
+  await panel.set(state({ series: wideSeries }));
+  const wide = await panel.read();
+  check('panel draws a whole minute of live samples', wide.peakText === 'live peak 40 t/s', String(wide.peakText));
+  await panel.hover('[data-chart="live"]', 0.5);
+  const hoveredLive = await panel.read();
+  check(
+    'panel reads the rate and the age under the live pointer',
+    /^40 t\/s · \d+ s ago$/.test(hoveredLive.peakText ?? '') && hoveredLive.liveCross === true,
+    `${hoveredLive.peakText} / cross ${hoveredLive.liveCross}`,
+  );
+  await panel.leave('[data-chart="live"]');
+  const leftLive = await panel.read();
+  check(
+    'panel goes back to the live peak when the pointer leaves',
+    leftLive.peakText === 'live peak 40 t/s' && leftLive.liveCross === false,
+    `${leftLive.peakText} / cross ${leftLive.liveCross}`,
+  );
+
+
+
   await panel.set(state({ status: 'tool' }));
   const tool = await panel.read();
   check('panel says a tool is running', /a tool is running/.test(tool.text), tool.text.slice(0, 60));
@@ -525,7 +742,14 @@ try {
   check('panel names the subagent behind the rate', /a subagent is generating/.test(subagent.text), subagent.text.slice(0, 90));
   check('panel says how many subagents are in the totals', /2 subagents/.test(subagent.text), subagent.text.slice(0, 90));
   check('panel marks the last step as a subagent’s', /last 33 t\/s .*subagent/.test(subagent.text), subagent.text.slice(-90));
-  check('panel draws a subagent step differently', /subagent ·/.test(subagent.stepSvg) && subagent.bars === 1, `${subagent.bars} bars`);
+  await panel.hover('[data-chart="steps"]', 0.5);
+  const subStep = await panel.read();
+  check(
+    'panel names the subagent in the hovered step',
+    subStep.bars === 1 && / · subagent$/.test(subStep.stepsHoverText ?? ''),
+    `${subStep.bars} bars · ${subStep.stepsHoverText}`,
+  );
+  await panel.leave('[data-chart="steps"]');
   check('panel breathes the dot while a subagent generates', subagent.dotState === 'streaming', String(subagent.dotState));
   check('panel lists the running subagent with its own rate', subagent.subsHidden === false && /1 running · 2 total/.test(subagent.text) && /SA-2 store\+route coupon validation/.test(subagent.text) && /37 t\/s/.test(subagent.text), subagent.text.slice(0, 120));
   check('panel labels the bars: session and subagent', subagent.legendHidden === false && subagent.legendText === 'session subagent', String(subagent.legendText));
@@ -571,6 +795,7 @@ try {
     sIdle.lastRateTier === 'steady' && sIdle.lastRateColor === 'rgb(118, 172, 79)' && sIdle.lastRateShadow === 'none',
     `${sIdle.lastRateTier} ${sIdle.lastRateColor} ${sIdle.lastRateShadow}`,
   );
+  check('status ends its foot with the session cost', sIdle.foot === '$0.3100', String(sIdle.foot));
   const statusHotBase = state();
   await status.set({ ...statusHotBase, live: { ...statusHotBase.live, lastStep: { ...statusHotBase.live.lastStep, tps: 120 } } });
   const sHotLast = await settle(status, 'lastRateColor', 'rgb(212, 175, 55)');
@@ -636,7 +861,15 @@ try {
   const sSub = await status.read();
   check('status says how many subagents are included', /1 of 2 subagents/.test(sSub.text), sSub.text.slice(0, 80));
   check('status marks a subagent step', /last 33 t\/s · sub/.test(sSub.text), sSub.text.slice(0, 80));
-  check('status keeps the first-token wait beside the subagents', /1 of 2 subagents · first token 6\.5 s/.test(sSub.text), sSub.text.slice(0, 80));
+  check(
+    'status keeps the first-token wait and the cost beside the subagents',
+    /1 of 2 subagents · first token 6\.5 s · \$0\.3100/.test(sSub.text),
+    sSub.text.slice(0, 90),
+  );
+  const freeBase = state();
+  await status.set({ ...freeBase, cost: { ...freeBase.cost, total: 0 } });
+  const sFree = await status.read();
+  check('status leaves the foot empty when the session cost nothing', sFree.foot === '', String(sFree.foot));
 
   const fastStatus = state({ status: 'streaming', live: { ...state().live, tps: 209, lastStep: { ...state().live.lastStep, tps: 120 } } });
   await status.set(fastStatus);

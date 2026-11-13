@@ -60,3 +60,72 @@ export function nextScale(previous, values) {
   if (target >= previous) return target;
   return previous + (target - previous) * 0.06;
 }
+
+/**
+ * The wire carries the live series as values against a fixed cadence; this turns
+ * it back into the {t, v} points the charts draw. `t` is nominal (t0 + i·step),
+ * within a few ms of each sample, which is a third of a pixel on a 60 s window.
+ */
+export function seriesPoints(data) {
+  const series = data.series;
+  if (!series || !Array.isArray(series.v)) return [];
+  const step = series.step > 0 ? series.step : 250;
+  return series.v.map((value, index) => ({ t: series.t0 + index * step, v: value }));
+}
+
+/**
+ * A smooth SVG path through {x, y} points, one cubic Bézier per segment, with
+ * Fritsch-Carlson tangents. The tangents are chosen so the curve cannot rise
+ * above the higher of its two samples or dip below the lower one: a chart of a
+ * measured rate must not draw a rate the service never reported. The points
+ * must have strictly increasing x.
+ */
+export function smoothPath(points) {
+  const list = Array.isArray(points) ? points : [];
+  const round = (value) => value.toFixed(1);
+  if (list.length === 0) return '';
+  if (list.length === 1) return `M ${round(list[0].x)},${round(list[0].y)}`;
+  const n = list.length;
+  const dx = [];
+  const slope = [];
+  for (let i = 0; i < n - 1; i += 1) {
+    dx[i] = list[i + 1].x - list[i].x;
+    slope[i] = (list[i + 1].y - list[i].y) / dx[i];
+  }
+  const m = new Array(n);
+  m[0] = slope[0];
+  m[n - 1] = slope[n - 2];
+  for (let i = 1; i < n - 1; i += 1) {
+    m[i] = slope[i - 1] * slope[i] <= 0 ? 0 : (slope[i - 1] + slope[i]) / 2;
+  }
+  // Clamp a tangent that is more than three times its segment's slope: three is
+  // the steepest a monotone cubic may be without overshooting its samples.
+  for (let i = 0; i < n - 1; i += 1) {
+    if (slope[i] === 0) {
+      m[i] = 0;
+      m[i + 1] = 0;
+    } else {
+      const a = m[i] / slope[i];
+      const b = m[i + 1] / slope[i];
+      const s = a * a + b * b;
+      if (s > 9) {
+        const t = 3 / Math.sqrt(s);
+        m[i] = t * a * slope[i];
+        m[i + 1] = t * b * slope[i];
+      }
+    }
+  }
+  let d = `M ${round(list[0].x)},${round(list[0].y)}`;
+  for (let i = 0; i < n - 1; i += 1) {
+    const x0 = list[i].x;
+    const y0 = list[i].y;
+    const x1 = list[i + 1].x;
+    const y1 = list[i + 1].y;
+    const c1x = x0 + dx[i] / 3;
+    const c1y = y0 + (m[i] * dx[i]) / 3;
+    const c2x = x1 - dx[i] / 3;
+    const c2y = y1 - (m[i + 1] * dx[i]) / 3;
+    d += ` C ${round(c1x)},${round(c1y)} ${round(c2x)},${round(c2y)} ${round(x1)},${round(y1)}`;
+  }
+  return d;
+}

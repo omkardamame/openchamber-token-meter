@@ -1,7 +1,7 @@
 import { HostRequestError, connectHost } from '@openchamber/sdk';
 import { applyHostReady, mountBanner, mountEmpty } from '@openchamber/sdk/ui';
-import { compact, seconds } from '../../shared/summary.js';
-import { easeToward, nextScale } from '../../shared/chart.js';
+import { compact, duration, seconds } from '../../shared/summary.js';
+import { easeToward, nextScale, seriesPoints, smoothPath } from '../../shared/chart.js';
 import { dotState, mountCells, paintCells } from '../../shared/cells.js';
 import { el } from '../../shared/dom.js';
 import { speedTier } from '../../shared/speed-color.js';
@@ -31,6 +31,19 @@ let lastRounded = -1;
 let streamingNow = false;
 let lastTier = '';
 let modelLabel = '';
+let liveHoverX = null;
+let stepHover = null;
+let lastDrawnSteps = null;
+let lastDrawnW = 0;
+let lastDrawnH = 0;
+let lastDrawnHover = null;
+let drawnSteps = [];
+let drawnSlot = 0;
+
+// A reader who asked the system for less motion gets the measured number
+// without the easing travel; the digits are the same either way.
+const REDUCED_MOTION =
+  typeof window.matchMedia === 'function' && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 
 /**
  * Move the headline towards the measured rate instead of snapping to it. The
@@ -40,7 +53,7 @@ let modelLabel = '';
  */
 function animateSpeed(dt) {
   if (!ui) return;
-  shownTps = easeToward(shownTps, targetTps, dt);
+  shownTps = REDUCED_MOTION ? targetTps : easeToward(shownTps, targetTps, dt);
   const rounded = Math.round(shownTps);
   if (rounded !== lastRounded) {
     lastRounded = rounded;
@@ -62,18 +75,6 @@ function paintTier() {
   lastTier = tier;
   if (tier) ui.tpsValue.dataset.tier = tier;
   else delete ui.tpsValue.dataset.tier;
-}
-
-/**
- * The wire carries the live series as values against a fixed cadence; this turns
- * it back into the {t, v} points the chart draws. `t` is nominal (t0 + i·step),
- * within a few ms of each sample, which is a third of a pixel on a 60 s window.
- */
-function seriesPoints(data) {
-  const series = data.series;
-  if (!series || !Array.isArray(series.v)) return [];
-  const step = series.step > 0 ? series.step : 250;
-  return series.v.map((value, index) => ({ t: series.t0 + index * step, v: value }));
 }
 
 /** The host's clock at the last answer, advanced by the time since it arrived. */
@@ -136,7 +137,7 @@ function build() {
     <section class="block steps">
       <div class="block-head"><span>Per step</span><span class="block-meta"><span class="steps-count"></span> <span class="steps-avg"></span> <span class="steps-peak"></span></span></div>
       <div class="chart-wrap"><svg class="chart" data-chart="steps" aria-hidden="true"></svg></div>
-      <div class="steps-axis" hidden><span class="steps-start"></span><span class="steps-now"></span></div>
+      <div class="steps-axis" hidden><span class="steps-start"></span><span class="steps-now"></span><span class="steps-hover" hidden></span></div>
       <div class="legend" hidden><span><i class="swatch main"></i>session</span><span><i class="swatch sub"></i>subagent</span></div>
     </section>
 
@@ -172,6 +173,7 @@ function build() {
     stepsAxis: app.querySelector('.steps-axis'),
     stepsStart: app.querySelector('.steps-start'),
     stepsNow: app.querySelector('.steps-now'),
+    stepsHover: app.querySelector('.steps-hover'),
     foot: app.querySelector('.foot-text'),
   };
 }
@@ -218,13 +220,16 @@ function listRate(value) {
 function paintCost(data) {
   const cost = data.cost ?? {};
   const totals = data.totals ?? {};
+  const turn = data.turn ?? {};
   const total = typeof cost.total === 'number' ? cost.total : (totals.cost ?? 0);
   ui.costTotal.textContent = money4(total);
   ui.costTurn.textContent = typeof cost.lastTurn === 'number' ? money4(cost.lastTurn) : '—';
   ui.costTurn.title =
     (data.subagents?.loading ?? 0) > 0 || (data.subagents?.partial ?? 0) > 0 || data.historyPartial
       ? 'history is partial; the last turn can grow'
-      : '';
+      : turn.steps > 0
+        ? `${turn.steps} step${turn.steps === 1 ? '' : 's'} · ${compact(turn.tokens)} generated tokens`
+        : '';
   ui.costModel.textContent = modelLabel || cost.rates?.model || '—';
   ui.costModel.title = modelLabel || cost.rates?.model || '';
   ui.costRate.textContent = typeof cost.perMillion === 'number' ? `${rateMoney(cost.perMillion)} / 1M` : '—';
@@ -279,6 +284,8 @@ function drawLive(data) {
   // References above the visible peak sit on the top edge rather than leaving
   // the plot; the drawn curve itself can never exceed `max`.
   const share = (value) => Math.min(1, Math.max(0, value) / max);
+  const lineY = (value) => height - pad - share(value) * (height - pad * 2);
+  const xOf = (point) => ((point.t - from) / 60_000) * width;
 
   const pieces = [];
   pieces.push(
@@ -289,12 +296,34 @@ function drawLive(data) {
       `</linearGradient></defs>`,
   );
 
-  const midY = pad + (height - pad * 2) * 0.5;
-  pieces.push(
-    `<line x1="0" y1="${midY.toFixed(1)}" x2="${width}" y2="${midY.toFixed(1)}" stroke="var(--oc-border)" stroke-width="1" stroke-dasharray="2 4" opacity="0.8" />`,
-  );
+  // The scale down the left edge: the top and the middle of the plot, labelled
+  // with the rate they stand for. An empty or all-zero window says nothing,
+  // because every number on it would be the 8 t/s floor, not a measurement.
+  if (liveTop > 0) {
+    const topValue = Math.round(max);
+    const halfValue = Math.round(max / 2);
+    const topY = lineY(max);
+    const halfY = lineY(max / 2);
+    pieces.push(
+      `<line x1="0" y1="${topY.toFixed(1)}" x2="${width}" y2="${topY.toFixed(1)}" stroke="var(--oc-border)" stroke-width="1" stroke-dasharray="2 4" opacity="0.8" />`,
+      `<text x="2" y="${(topY + 10).toFixed(1)}" text-anchor="start" fill="var(--oc-muted)" font-size="9.5" opacity="0.8" data-role="grid-label">${topValue}</text>`,
+      `<line x1="0" y1="${halfY.toFixed(1)}" x2="${width}" y2="${halfY.toFixed(1)}" stroke="var(--oc-border)" stroke-width="1" stroke-dasharray="2 4" opacity="0.8" />`,
+    );
+    // A scale near 1 rounds both lines to the same number; one label is enough.
+    if (halfValue !== topValue) {
+      pieces.push(
+        `<text x="2" y="${(halfY - 3).toFixed(1)}" text-anchor="start" fill="var(--oc-muted)" font-size="9.5" opacity="0.8" data-role="grid-label">${halfValue}</text>`,
+      );
+    }
+  }
+  // Where 15, 30 and 45 seconds ago sit. Without them the 60 s window has no
+  // marks at all and a shape can only be read by counting pixels.
+  for (const part of [0.25, 0.5, 0.75]) {
+    pieces.push(
+      `<line x1="${(width * part).toFixed(1)}" y1="${pad}" x2="${(width * part).toFixed(1)}" y2="${(height - pad).toFixed(1)}" stroke="var(--oc-border)" stroke-width="1" opacity="0.5" data-role="time-grid" />`,
+    );
+  }
 
-  const lineY = (value) => height - pad - share(value) * (height - pad * 2);
   let avgLabelY = null;
   if (rates.avg > 0) {
     const y = lineY(rates.avg);
@@ -321,23 +350,38 @@ function drawLive(data) {
     );
   }
 
+  // The sample nearest the pointer. Its rate is the smoothed value the curve
+  // draws, and its age is measured from the window's own clock, so the readout
+  // names a point a reader can put a finger on.
+  let hovered = null;
+  if (liveHoverX !== null && smooth.length > 1) {
+    let nearest = 0;
+    for (let index = 1; index < visible.length; index += 1) {
+      if (Math.abs(xOf(visible[index]) - liveHoverX) < Math.abs(xOf(visible[nearest]) - liveHoverX)) nearest = index;
+    }
+    hovered = { x: xOf(visible[nearest]), y: lineY(smooth[nearest]), value: smooth[nearest], at: visible[nearest].t };
+  }
+
   if (smooth.length > 1) {
-    const coords = smooth.map((value, index) => {
-      const x = ((visible[index].t - from) / 60_000) * width;
-      const y = height - pad - share(value) * (height - pad * 2);
-      return `${x.toFixed(1)},${y.toFixed(1)}`;
-    });
-    const line = coords.join(' ');
-    const lastX = coords[coords.length - 1].split(',')[0];
+    const points = smooth.map((value, index) => ({ x: xOf(visible[index]), y: lineY(value) }));
+    const line = smoothPath(points);
+    const first = points[0];
+    const last = points[points.length - 1];
+    const baseline = height - pad;
     pieces.push(
-      `<polygon points="0,${height - pad} ${line} ${lastX},${height - pad}" fill="url(#tm-live-fill)" />`,
-      `<polyline points="${line}" fill="none" stroke="var(--oc-primary)" stroke-width="1.6" stroke-linejoin="round" stroke-linecap="round" />`,
+      `<path d="${line} L ${last.x.toFixed(1)},${baseline.toFixed(1)} L ${first.x.toFixed(1)},${baseline.toFixed(1)} Z" fill="url(#tm-live-fill)" data-role="live-fill" />`,
+      `<path d="${line}" fill="none" stroke="var(--oc-primary)" stroke-width="1.6" stroke-linejoin="round" stroke-linecap="round" data-role="live-line" />`,
+      `<circle cx="${last.x.toFixed(1)}" cy="${last.y.toFixed(1)}" r="2.6" fill="var(--oc-primary)" />`,
     );
-    const [cx, cy] = coords[coords.length - 1].split(',');
-    pieces.push(`<circle cx="${cx}" cy="${cy}" r="2.6" fill="var(--oc-primary)" />`);
+    if (hovered) {
+      pieces.push(
+        `<line x1="${hovered.x.toFixed(1)}" y1="${pad}" x2="${hovered.x.toFixed(1)}" y2="${baseline.toFixed(1)}" stroke="var(--oc-fg)" opacity="0.35" stroke-width="1" data-role="live-cross" />`,
+        `<circle cx="${hovered.x.toFixed(1)}" cy="${hovered.y.toFixed(1)}" r="3" fill="var(--oc-fg)" data-role="live-cross-dot" />`,
+      );
+    }
   } else if (smooth.length === 1) {
     // One sample is not a baseline: draw the point where it actually sits.
-    const x = ((visible[0].t - from) / 60_000) * width;
+    const x = xOf(visible[0]);
     pieces.push(`<circle cx="${x.toFixed(1)}" cy="${lineY(smooth[0]).toFixed(1)}" r="2.6" fill="var(--oc-primary)" />`);
   } else {
     pieces.push(
@@ -345,7 +389,25 @@ function drawLive(data) {
     );
   }
   svg.innerHTML = pieces.join('');
-  ui.peak.textContent = peakValue > 0 ? `live peak ${compact(peakValue)} t/s` : '';
+  ui.peak.textContent = hovered
+    ? `${Math.round(hovered.value)} t/s · ${Math.max(0, Math.round((now - hovered.at) / 1_000))} s ago`
+    : peakValue > 0
+      ? `live peak ${compact(peakValue)} t/s`
+      : '';
+}
+
+/**
+ * The readout under the step chart: the bar's rate and size, plus the time it
+ * ran, what it cost and whose step it was when the service sends them. An older
+ * service leaves the last three out rather than printing a hole.
+ */
+function stepReadout(step) {
+  let text = `${Math.round(step.tps)} t/s · ${compact(step.tokens)} tok in ${seconds(step.ms)}`;
+  const at = clock(step.at);
+  if (at) text += ` · ${at}`;
+  if (step.cost > 0) text += ` · ${money4(step.cost)}`;
+  if (step.sub) text += ' · subagent';
+  return text;
 }
 
 function drawSteps(data) {
@@ -366,11 +428,23 @@ function drawSteps(data) {
       : known > all.length
         ? `the last ${all.length} steps are drawn`
         : 'every step the meter keeps';
+  // A list that shrank under the pointer has no bar at that index any more.
+  if (stepHover !== null && stepHover >= steps.length) stepHover = null;
+  const hover = stepHover;
   if (steps.length === 0) {
-    svg.innerHTML = `<text x="${(width / 2).toFixed(1)}" y="${(height / 2).toFixed(1)}" text-anchor="middle" fill="var(--oc-muted)" font-size="11">no finished steps yet</text>`;
     ui.stepsAvg.textContent = '';
     ui.stepsPeak.textContent = '';
     ui.stepsAxis.hidden = true;
+    ui.stepsHover.hidden = true;
+    ui.stepsHover.textContent = '';
+    drawnSteps = [];
+    drawnSlot = 0;
+    if (data.steps === lastDrawnSteps && width === lastDrawnW && height === lastDrawnH) return;
+    lastDrawnSteps = data.steps;
+    lastDrawnW = width;
+    lastDrawnH = height;
+    lastDrawnHover = null;
+    svg.innerHTML = `<text x="${(width / 2).toFixed(1)}" y="${(height / 2).toFixed(1)}" text-anchor="middle" fill="var(--oc-muted)" font-size="11">no finished steps yet</text>`;
     return;
   }
   ui.stepsAxis.hidden = false;
@@ -392,14 +466,48 @@ function drawSteps(data) {
   // With every step on the chart a long session gets one-pixel bars; a gap
   // under half a pixel would just erase them.
   const barWidth = Math.max(1, Math.min(14, slot - 1));
+  ui.stepsAvg.textContent = average > 0 ? `avg ${Math.round(average)} t/s` : '';
+  ui.stepsPeak.textContent = peak > 0 ? `peak ${Math.round(peak)} t/s` : '';
+  // The readout takes the axis row while a bar is under the pointer: the two
+  // time labels have nothing to say about one step.
+  if (hover === null) {
+    ui.stepsHover.hidden = true;
+    ui.stepsHover.textContent = '';
+    ui.stepsStart.hidden = false;
+    ui.stepsNow.hidden = false;
+  } else {
+    ui.stepsHover.hidden = false;
+    ui.stepsHover.textContent = stepReadout(steps[hover]);
+    ui.stepsStart.hidden = true;
+    ui.stepsNow.hidden = true;
+  }
+  // The pointer handler maps a position to the bar under it with these, so they
+  // always describe the list that was last drawn.
+  drawnSteps = steps;
+  drawnSlot = slot;
+  // Nothing changed: keep the bars, and with them the column the pointer is
+  // reading. This runs four times a second and rebuilding a thousand rects each
+  // time was the most expensive thing on the page.
+  if (data.steps === lastDrawnSteps && width === lastDrawnW && height === lastDrawnH && hover === lastDrawnHover) return;
+  lastDrawnSteps = data.steps;
+  lastDrawnW = width;
+  lastDrawnH = height;
+  lastDrawnHover = hover;
   const pieces = [];
+  if (hover !== null) {
+    pieces.push(
+      `<rect x="${(hover * slot).toFixed(1)}" y="0" width="${slot.toFixed(1)}" height="${height}" fill="var(--oc-fg)" opacity="0.08" data-role="step-hover-col" />`,
+    );
+  }
   steps.forEach((step, index) => {
     const h = Math.max(1.5, (step.tps / max) * (height - pad * 2));
     const x = index * slot + (slot - barWidth) / 2;
     const y = height - pad - h;
     const fill = step.sub ? 'var(--oc-info)' : 'var(--oc-primary)';
+    const opacity = index === hover ? 1 : 0.4 + 0.6 * (index / Math.max(1, steps.length - 1));
+    const role = index === hover ? ' data-role="step-hover"' : '';
     pieces.push(
-      `<rect x="${x.toFixed(1)}" y="${y.toFixed(1)}" width="${barWidth.toFixed(1)}" height="${h.toFixed(1)}" rx="1.5" fill="${fill}" opacity="${(0.4 + 0.6 * (index / Math.max(1, steps.length - 1))).toFixed(2)}"><title>${step.sub ? 'subagent · ' : ''}${Math.round(step.tps)} t/s · ${compact(step.tokens)} tokens in ${seconds(step.ms)}</title></rect>`,
+      `<rect x="${x.toFixed(1)}" y="${y.toFixed(1)}" width="${barWidth.toFixed(1)}" height="${h.toFixed(1)}" rx="1.5" fill="${fill}" opacity="${opacity.toFixed(2)}"${role} />`,
     );
   });
   // The session's own average and best step, over the bars drawn: the same
@@ -417,8 +525,6 @@ function drawSteps(data) {
     );
   }
   svg.innerHTML = pieces.join('');
-  ui.stepsAvg.textContent = average > 0 ? `avg ${Math.round(average)} t/s` : '';
-  ui.stepsPeak.textContent = peak > 0 ? `peak ${Math.round(peak)} t/s` : '';
 }
 
 const SUB_STATUS_TEXT = { tool: 'tool', 'waiting-permission': 'permission', 'waiting-question': 'question' };
@@ -512,6 +618,12 @@ function render(data) {
   const subLabel = subagents.count > 0 ? `${subagents.count} subagent${subagents.count === 1 ? '' : 's'}` : '';
   ui.dot.dataset.state = dotState(data.status);
   ui.statusLabel.textContent = STATUS[data.status] ?? STATUS.idle;
+  // How long the running turn has been going: the same clock the chart uses, so
+  // the label and the curve never disagree about "now".
+  if (data.turn?.active && data.turn.startedAt) {
+    const elapsed = duration(projectedNow(data) - data.turn.startedAt);
+    if (elapsed) ui.statusLabel.textContent += ` · ${elapsed}`;
+  }
   // The number is eased in animateSpeed; render only says where it should go.
   targetTps = data.status === 'streaming' ? (data.live?.tps ?? 0) : 0;
   if (lastRounded === -1) {
@@ -527,11 +639,11 @@ function render(data) {
     data.status === 'streaming'
       ? quiet
         ? data.live?.subagent
-          ? 'a subagent is thinking · nothing streamed in the last 5 s'
-          : 'thinking · nothing streamed in the last 5 s'
+          ? 'a subagent is thinking · nothing streamed in the last 3 s'
+          : 'thinking · nothing streamed in the last 3 s'
         : data.live?.subagent
           ? `${subagents.streaming > 1 ? `${subagents.streaming} subagents are` : 'a subagent is'} generating · ~${compact(data.live?.charsPerSecond ?? 0)} chars/s`
-          : `last 5 s · ~${compact(data.live?.charsPerSecond ?? 0)} chars/s`
+          : `last 3 s · ~${compact(data.live?.charsPerSecond ?? 0)} chars/s`
       : data.status === 'tool'
         ? data.live?.subagent
           ? 'a subagent is running a tool · the model is not streaming'
@@ -681,6 +793,30 @@ host.onReady((ctx) => {
     });
     observer.observe(ui.live);
     observer.observe(ui.stepsChart);
+    // Hover is read from the pointer rather than a <title>: a native tooltip
+    // takes a second to open, cannot be styled and cannot hold the whole
+    // readout. Both handlers stay attached for the life of the frame.
+    ui.live.addEventListener('pointermove', (event) => {
+      liveHoverX = event.clientX - ui.live.getBoundingClientRect().left;
+      if (current) drawLive(current);
+    });
+    ui.live.addEventListener('pointerleave', () => {
+      liveHoverX = null;
+      if (current) drawLive(current);
+    });
+    ui.stepsChart.addEventListener('pointermove', (event) => {
+      if (drawnSteps.length === 0 || !(drawnSlot > 0)) return;
+      const x = event.clientX - ui.stepsChart.getBoundingClientRect().left;
+      const index = Math.min(drawnSteps.length - 1, Math.max(0, Math.floor(x / drawnSlot)));
+      if (index === stepHover) return;
+      stepHover = index;
+      if (current) drawSteps(current);
+    });
+    ui.stepsChart.addEventListener('pointerleave', () => {
+      if (stepHover === null) return;
+      stepHover = null;
+      if (current) drawSteps(current);
+    });
     // Redraw between polls against the projected clock, but only while tokens
     // are moving and at a rate a 60 s curve needs: rebuilding the path at
     // 60 fps bought nothing and burnt CPU on every idle session.
@@ -722,6 +858,10 @@ host.onReady((ctx) => {
   delete ui.lastRate.dataset.tier;
   lastSteps = [];
   lastStepsSeq = -1;
+  // The drawn chart belongs to the session that left: force the empty one.
+  lastDrawnSteps = null;
+  stepHover = null;
+  liveHoverX = null;
   sessionId = nextSession;
   current = null;
   clearNotice();

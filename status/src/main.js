@@ -1,7 +1,7 @@
 import { HostRequestError, connectHost } from '@openchamber/sdk';
 import { applyHostReady, mountBanner } from '@openchamber/sdk/ui';
 import { seconds } from '../../shared/summary.js';
-import { compress, easeToward, nextScale } from '../../shared/chart.js';
+import { compress, easeToward, nextScale, seriesPoints, smoothPath } from '../../shared/chart.js';
 import { dotState, mountCells, paintCells } from '../../shared/cells.js';
 import { el } from '../../shared/dom.js';
 import { speedTier } from '../../shared/speed-color.js';
@@ -33,6 +33,11 @@ let lastRounded = -1;
 let streamingNow = false;
 let lastTier = '';
 
+// The same rule as the panel: a reader who asked for less motion reads the
+// measured number, drawn without the easing travel.
+const REDUCED_MOTION =
+  typeof window.matchMedia === 'function' && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
 /**
  * Same easing as the panel: the value is measured, the movement is drawn. The
  * colour follows the number on screen, not the target, so the two never
@@ -40,7 +45,7 @@ let lastTier = '';
  */
 function animateSpeed(dt) {
   if (!ui) return;
-  shownTps = easeToward(shownTps, targetTps, dt);
+  shownTps = REDUCED_MOTION ? targetTps : easeToward(shownTps, targetTps, dt);
   const rounded = Math.round(shownTps);
   if (rounded !== lastRounded) {
     lastRounded = rounded;
@@ -62,14 +67,6 @@ function paintTier() {
   lastTier = tier;
   if (tier) ui.tps.dataset.tier = tier;
   else delete ui.tps.dataset.tier;
-}
-
-/** The compact live series as the {t, v} points the spark draws. */
-function seriesPoints(data) {
-  const series = data.series;
-  if (!series || !Array.isArray(series.v)) return [];
-  const step = series.step > 0 ? series.step : 250;
-  return series.v.map((value, index) => ({ t: series.t0 + index * step, v: value }));
 }
 
 /** The host's clock at the last answer, advanced by the time since it arrived. */
@@ -145,19 +142,26 @@ function drawSpark(data) {
     return;
   }
   let smoothed = 0;
-  const coords = visible.map((point, index) => {
+  const points = visible.map((point, index) => {
     smoothed = index === 0 ? point.v : smoothed + (point.v - smoothed) * 0.3;
-    const x = ((point.t - from) / 60_000) * width;
-    const y = height - 1 - compress(smoothed, max) * (height - 3);
-    return `${x.toFixed(1)},${y.toFixed(1)}`;
+    return {
+      x: ((point.t - from) / 60_000) * width,
+      y: height - 1 - compress(smoothed, max) * (height - 3),
+    };
   });
+  // The same monotone curve as the panel: the spark shows the shape of a
+  // measured rate, so it must not draw a number the service never reported. The
+  // fill hangs from the curve down to the bottom edge.
+  const line = smoothPath(points);
+  const first = points[0];
+  const last = points[points.length - 1];
   svg.innerHTML = [
     `<defs><linearGradient id="tm-spark-fill" x1="0" y1="0" x2="0" y2="1">`,
     `<stop offset="0%" stop-color="var(--oc-primary)" stop-opacity="0.4" />`,
     `<stop offset="100%" stop-color="var(--oc-primary)" stop-opacity="0" />`,
     `</linearGradient></defs>`,
-    `<polygon points="0,${height} ${coords.join(' ')} ${width.toFixed(1)},${height}" fill="url(#tm-spark-fill)" />`,
-    `<polyline points="${coords.join(' ')}" fill="none" stroke="var(--oc-primary)" stroke-width="1.3" stroke-linejoin="round" />`,
+    `<path d="${line} L ${last.x.toFixed(1)},${height} L ${first.x.toFixed(1)},${height} Z" fill="url(#tm-spark-fill)" />`,
+    `<path d="${line}" fill="none" stroke="var(--oc-primary)" stroke-width="1.3" stroke-linejoin="round" />`,
   ].join('');
 }
 
@@ -224,6 +228,10 @@ function render(data) {
     );
   }
   if (streaming && data.live?.ttftMs >= 100) foot.push(`first token ${(data.live.ttftMs / 1000).toFixed(1)} s`);
+  // What the session and its subagents have cost so far, last: the same four
+  // decimals as the panel's Total, so the two surfaces agree digit for digit.
+  const spent = data.cost?.total;
+  if (typeof spent === 'number' && spent > 0) foot.push(`$${spent.toFixed(4)}`);
   ui.foot.textContent = data.error ? 'cannot read history' : foot.join(' · ');
   fitHeight();
 }

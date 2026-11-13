@@ -273,6 +273,11 @@
         height: auto;
         display: block;
       }
+      /* Both charts answer the pointer with a readout; the cursor says so. */
+      [data-chart='live'],
+      [data-chart='steps'] {
+        cursor: crosshair;
+      }
       .chart-wrap {
         position: relative;
         margin-top: 8px;
@@ -434,6 +439,14 @@
       }
       .steps-axis[hidden] {
         display: none;
+      }
+      /* The axis row carries three spans: start, now and the hovered step's
+         readout. Only one pair is ever shown. */
+      .steps-axis [hidden] {
+        display: none;
+      }
+      .steps-hover {
+        color: var(--oc-fg);
       }
       .block.steps .block-head .block-meta {
         white-space: normal;
