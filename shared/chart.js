@@ -62,15 +62,16 @@ export function nextScale(previous, values) {
 }
 
 /**
- * The wire carries the live series as values against a fixed cadence; this turns
- * it back into the {t, v} points the charts draw. `t` is nominal (t0 + i·step),
- * within a few ms of each sample, which is a third of a pixel on a 60 s window.
+ * The wire carries the live series as values plus each sample's own offset from
+ * t0 (`d`, in ms). An older service sends only the values; those are placed on
+ * its nominal cadence, which then is the best the frame can know.
  */
 export function seriesPoints(data) {
   const series = data.series;
   if (!series || !Array.isArray(series.v)) return [];
   const step = series.step > 0 ? series.step : 250;
-  return series.v.map((value, index) => ({ t: series.t0 + index * step, v: value }));
+  const offsets = Array.isArray(series.d) && series.d.length === series.v.length ? series.d : null;
+  return series.v.map((value, index) => ({ t: series.t0 + (offsets ? offsets[index] : index * step), v: value }));
 }
 
 /**

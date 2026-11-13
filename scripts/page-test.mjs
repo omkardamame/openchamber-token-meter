@@ -13,7 +13,7 @@ import { execFile, spawnSync } from 'node:child_process';
 import { promisify } from 'node:util';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { smoothPath } from '../shared/chart.js';
+import { seriesPoints, smoothPath } from '../shared/chart.js';
 import { duration } from '../shared/summary.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -66,7 +66,7 @@ const state = (over = {}) =>
       },
     },
     subagents: { count: 0, running: 0, loading: 0, partial: 0, streaming: 0, tool: 0, active: [] },
-    series: { t0: Date.now() - 5000, step: 250, v: [30, 34, 36] },
+    series: { t0: Date.now() - 5000, step: 250, d: [0, 250, 500], v: [30, 34, 36] },
     stepsSeq: 3,
     stepsFrom: Date.now() - 120_000,
     stepsKnown: 2,
@@ -260,6 +260,16 @@ const harness = `<!doctype html><meta charset="utf-8"><title>page test</title>
       })(),
       liveDots: doc.querySelectorAll('[data-chart="live"] circle:not([data-role])').length,
       liveCross: Boolean(doc.querySelector('[data-chart="live"] [data-role="live-cross"]')),
+      liveRight: (() => {
+        const line = doc.querySelector('[data-chart="live"] path[data-role="live-line"]');
+        if (!line) return null;
+        const box = line.getBBox();
+        return Math.round((box.x + box.width) * 10) / 10;
+      })(),
+      liveWidth: (() => {
+        const svg = doc.querySelector('[data-chart="live"]');
+        return svg ? svg.clientWidth : null;
+      })(),
       gridLabels: [...doc.querySelectorAll('[data-chart="live"] [data-role="grid-label"]')].map((n) => n.textContent),
       timeGrid: doc.querySelectorAll('[data-chart="live"] line[data-role="time-grid"]').length,
       peakText: (doc.querySelector('.axis-peak') || {}).textContent,
@@ -397,6 +407,24 @@ try {
   );
   check('curve draws one sample as a point', smoothPath([{ x: 1, y: 2 }]) === 'M 1.0,2.0', smoothPath([{ x: 1, y: 2 }]));
   check('curve draws nothing for no samples', smoothPath([]) === '', `"${smoothPath([])}"`);
+  check(
+    'an older series keeps the nominal cadence',
+    seriesPoints({ series: { t0: 1000, step: 250, v: [1, 2, 3] } })
+      .map((point) => point.t)
+      .join(',') === '1000,1250,1500',
+    seriesPoints({ series: { t0: 1000, step: 250, v: [1, 2, 3] } })
+      .map((point) => point.t)
+      .join(','),
+  );
+  check(
+    'a current series keeps each sample’s own time',
+    seriesPoints({ series: { t0: 1000, step: 250, d: [0, 250, 1500], v: [1, 2, 3] } })
+      .map((point) => point.t)
+      .join(',') === '1000,1250,2500',
+    seriesPoints({ series: { t0: 1000, step: 250, d: [0, 250, 1500], v: [1, 2, 3] } })
+      .map((point) => point.t)
+      .join(','),
+  );
   check(
     'timer reads seconds, minutes and hours',
     duration(42_000) === '42s' &&
@@ -792,6 +820,28 @@ try {
   );
 
 
+
+  // A poll is 250 ms plus its own round trip, and every poll samples the series:
+  // the last 240 samples span ~75 s at a 312 ms cadence. They belong at their own
+  // times, so the curve still ends at "now" instead of 15 s short of it.
+  const driftNow = Date.now();
+  await panel.set(
+    state({
+      generatedAt: driftNow,
+      series: {
+        t0: driftNow - 239 * 312 - 20,
+        step: 250,
+        d: Array.from({ length: 240 }, (_, index) => index * 312),
+        v: Array.from({ length: 240 }, (_, index) => 30 + (index % 7)),
+      },
+    }),
+  );
+  const drifted = await panel.read();
+  check(
+    'the curve ends at now even when the samples drift',
+    drifted.liveRight !== null && drifted.liveWidth !== null && drifted.liveWidth - drifted.liveRight <= 2,
+    `right ${drifted.liveRight} of ${drifted.liveWidth}`,
+  );
 
   await panel.set(state({ status: 'tool' }));
   const tool = await panel.read();

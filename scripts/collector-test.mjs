@@ -158,9 +158,30 @@ check('live rate follows the deltas', rate > 0, `${rate.toFixed(0)} tok/s from $
 const seriesSnap = snapshot(live, at + 2200).series;
 check('live series grows on tick', seriesSnap.v.length > 0, `${seriesSnap.v.length} points, step ${seriesSnap.step}`);
 check(
-  'the series travels as values against a fixed cadence',
-  seriesSnap.v.length === live.series.length && seriesSnap.t0 === live.series[0].t && seriesSnap.step === 250,
-  `t0 + ${seriesSnap.v.length}·${seriesSnap.step}`,
+  'the series travels as values plus each sample’s offset from t0',
+  seriesSnap.v.length === live.series.length &&
+    seriesSnap.t0 === live.series[0].t &&
+    seriesSnap.step === 250 &&
+    seriesSnap.d.length === seriesSnap.v.length &&
+    seriesSnap.d.every((offset, index) => offset === live.series[index].t - seriesSnap.t0),
+  `t0 + ${seriesSnap.d.at(-1)} ms (step ${seriesSnap.step})`,
+);
+// The panel polls every 250 ms plus its own round trip, and each poll samples
+// the series and resets the service ticker's clock: the samples drift apart and
+// the last 240 span more than 240 × 250 ms. On a nominal grid that drift moves
+// the curve's end that far behind "now" (15 s at a 312 ms cadence) and squeezes
+// the extra history into the window.
+const drifted = createCollector('ses_drift_test');
+const driftStart = at;
+const driftGap = 312;
+for (let index = 0; index < 240; index += 1) tick(drifted, driftStart + index * driftGap);
+const driftSnap = snapshot(drifted, driftStart + 240 * driftGap).series;
+check(
+  'a slower cadence keeps its own times on the wire',
+  driftSnap.d.length === 240 &&
+    driftSnap.d.at(-1) === 239 * driftGap &&
+    driftSnap.t0 + driftSnap.d.at(-1) === drifted.series.at(-1).t,
+  `last sample ${driftSnap.d.at(-1)} ms vs nominal ${(driftSnap.d.length - 1) * driftSnap.step} ms`,
 );
 emit('session.step.streamed', { assistantMessageID: 'msg_1' }, 2300);
 emit(

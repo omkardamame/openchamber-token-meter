@@ -847,6 +847,8 @@ function snapshot(collector, now = Date.now(), tree = [collector]) {
     tool: members.filter((member) => member !== collector && member.status === "tool").length,
     active: active.slice(0, 8).map((entry) => entry.item)
   };
+  const series = collector.series.slice(-SERIES_POINTS);
+  const seriesT0 = series.length ? series[0].t : now;
   return {
     ok: true,
     session: collector.id,
@@ -902,9 +904,10 @@ function snapshot(collector, now = Date.now(), tree = [collector]) {
     },
     subagents,
     series: {
-      t0: collector.series.length ? collector.series[0].t : now,
+      t0: seriesT0,
       step: SERIES_INTERVAL_MS,
-      v: collector.series.slice(-SERIES_POINTS).map((point) => point.v)
+      d: series.map((point) => point.t - seriesT0),
+      v: series.map((point) => point.v)
     },
     stepsSeq: members.reduce((sum, member) => sum + member.stepsSeq, 0),
     steps: wire,

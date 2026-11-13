@@ -873,6 +873,13 @@ export function snapshot(collector, now = Date.now(), tree = [collector]) {
     tool: members.filter((member) => member !== collector && member.status === 'tool').length,
     active: active.slice(0, 8).map((entry) => entry.item),
   };
+  // The series travels as values plus each sample's own offset from t0. The
+  // service's ticker and the frame's poll both sample, and a poll resets the
+  // ticker's 250 ms clock, so the spacing is never the nominal cadence for
+  // long. Values on a nominal grid end the curve before "now" by the whole
+  // drift, and squeeze that much extra history into the window.
+  const series = collector.series.slice(-SERIES_POINTS);
+  const seriesT0 = series.length ? series[0].t : now;
   return {
     ok: true,
     session: collector.id,
@@ -950,9 +957,10 @@ export function snapshot(collector, now = Date.now(), tree = [collector]) {
     },
     subagents,
     series: {
-      t0: collector.series.length ? collector.series[0].t : now,
+      t0: seriesT0,
       step: SERIES_INTERVAL_MS,
-      v: collector.series.slice(-SERIES_POINTS).map((point) => point.v),
+      d: series.map((point) => point.t - seriesT0),
+      v: series.map((point) => point.v),
     },
     // Every member's counter only grows, so their sum changes as soon as a
     // step arrives anywhere in the tree and the client knows to fetch the list.
