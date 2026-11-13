@@ -1,15 +1,12 @@
 # Changelog
 
-Every release of Token Meter, newest first; one or two concise lines per
-release — what shipped in that tag.
+Every release of Token Meter, newest first; one or two concise bullets per release — what shipped in that tag.
 
 ## [1.9.1] - 2026-11-13
 
 ### Fixed
 
-- The live curve ends at `now` again: the series carries each sample's own time,
-  not a nominal 250 ms grid, which stopped the line up to ~15 s short and
-  squeezed extra history into the window. Older services keep the grid.
+- The live curve ends at `now` again: the series carries each sample's own time, not a nominal 250 ms grid, which stopped the line up to ~15 s short and squeezed extra history into the window. Older services keep the grid.
 
 ## [1.9.0] - 2026-11-13
 
