@@ -78,6 +78,7 @@ function createCollector(id) {
     lineageLoading: false,
     model: null,
     status: "idle",
+    pendingTools: 0,
     error: null,
     totals: emptyTotals(),
     totalsFrom: "history",
@@ -97,8 +98,10 @@ function createCollector(id) {
     lastStep: null,
     historyAt: 0,
     historyPartial: false,
+    historyCut: false,
     historyTriedAt: 0,
     loading: null,
+    derived: null,
     touchedAt: Date.now()
   };
 }
@@ -223,6 +226,7 @@ function applyRecord(collector, record) {
       collector.status = "idle";
       collector.turnActive = false;
       collector.stream = null;
+      collector.pendingTools = 0;
     }
   }
   const tokens = record.tokens;
@@ -294,9 +298,11 @@ async function loadHistory(collector, apiGet, deadline = 0, { stepsOnly = false 
     const messages = [];
     let cursor = null;
     let complete = true;
+    let cutByDeadline = false;
     for (let page = 0;page < HISTORY_PAGES; page += 1) {
       if (deadline && Date.now() > deadline) {
         complete = false;
+        cutByDeadline = true;
         break;
       }
       const query = new URLSearchParams({ type: "assistant", limit: String(HISTORY_PAGE_SIZE) });
@@ -356,12 +362,14 @@ async function loadHistory(collector, apiGet, deadline = 0, { stepsOnly = false 
     if (tokens > 0 && chars > 0)
       calibrate(collector, chars, tokens);
     collector.historyPartial = !complete;
+    collector.historyCut = cutByDeadline;
     collector.historyAt = Date.now();
     collector.error = null;
     return complete;
   })().catch((error) => {
     collector.error = error?.message ?? String(error);
     collector.historyPartial = true;
+    collector.historyCut = false;
     return false;
   }).finally(() => {
     collector.loading = null;
@@ -401,23 +409,28 @@ function applyEvent(collector, event) {
       collector.turnStartedAt = typeof data.started === "number" ? data.started : at;
       return;
     case "session.tool.called":
+      collector.pendingTools += 1;
       collector.status = "tool";
       return;
     case "session.tool.success":
     case "session.tool.failed":
-      if (collector.status === "tool")
-        collector.status = "idle";
+      collector.pendingTools = Math.max(0, collector.pendingTools - 1);
+      if (collector.pendingTools === 0 && collector.status === "tool") {
+        collector.status = collector.stream || collector.turnActive ? "streaming" : "idle";
+      }
       return;
     case "session.execution.succeeded":
     case "session.execution.interrupted":
       collector.turnActive = false;
       collector.status = "idle";
       collector.stream = null;
+      collector.pendingTools = 0;
       return;
     case "session.execution.failed":
       collector.turnActive = false;
       collector.status = "failed";
       collector.stream = null;
+      collector.pendingTools = 0;
       return;
     case "permission.asked":
       collector.status = "waiting-permission";
@@ -432,9 +445,10 @@ function applyEvent(collector, event) {
     case "form.replied":
     case "form.cancelled":
       if (collector.status === "waiting-question")
-        collector.status = "idle";
+        collector.status = collector.turnActive ? "streaming" : "idle";
       return;
     case "session.step.started":
+      collector.pendingTools = 0;
       if (typeof data.model?.id === "string")
         collector.model = data.model.id;
       collector.stream = {
@@ -504,7 +518,7 @@ function applyEvent(collector, event) {
           collector.lastTtftMs = step.ttftMs;
       }
       collector.stream = null;
-      collector.status = "idle";
+      collector.status = collector.pendingTools > 0 ? "tool" : "idle";
       return;
     }
     case "session.usage.updated":
@@ -618,8 +632,6 @@ function modelRates(steps, model) {
 function snapshot(collector, now = Date.now(), tree = [collector]) {
   const members = tree.length ? tree : [collector];
   const totals = emptyTotals();
-  const steps = [];
-  const subSteps = new Set;
   for (const member of members) {
     totals.input += member.totals.input;
     totals.output += member.totals.output;
@@ -628,25 +640,56 @@ function snapshot(collector, now = Date.now(), tree = [collector]) {
     totals.cacheWrite += member.totals.cacheWrite;
     totals.cost += member.totals.cost;
     totals.steps += member.totals.steps;
-    for (const step of member.steps) {
-      steps.push(step);
-      if (member !== collector)
-        subSteps.add(step);
-    }
   }
-  steps.sort((a, b) => a.at - b.at);
-  const shownSteps = steps.slice(-MAX_STEPS);
-  const rates = ratesOf(steps);
+  const stepsKey = members.map((member) => `${member.id}:${member.stepsSeq}:${member.steps.length}`).join("|");
+  let derived = collector.derived;
+  if (derived?.key !== stepsKey) {
+    const steps2 = [];
+    const subSteps2 = new Set;
+    for (const member of members) {
+      for (const step of member.steps) {
+        steps2.push(step);
+        if (member !== collector)
+          subSteps2.add(step);
+      }
+    }
+    steps2.sort((a, b) => a.at - b.at);
+    const shownSteps2 = steps2.slice(-MAX_STEPS);
+    derived = {
+      key: stepsKey,
+      steps: steps2,
+      subSteps: subSteps2,
+      shownSteps: shownSteps2,
+      rates: ratesOf(steps2),
+      wire: shownSteps2.map((step) => ({
+        tokens: step.tokens,
+        ms: step.ms,
+        tps: step.tps,
+        aborted: step.aborted,
+        at: step.at,
+        cost: Math.round((step.cost ?? 0) * 1e6) / 1e6,
+        ...subSteps2.has(step) ? { sub: true } : {}
+      })),
+      ratesByModel: new Map
+    };
+    collector.derived = derived;
+  }
+  const { steps, subSteps, shownSteps, rates, wire } = derived;
   const prompt = totals.input + totals.cacheRead + totals.cacheWrite;
   const generated = totals.output + totals.reasoning;
   const consumed = prompt + generated;
   const totalCost = Math.round(totals.cost * 1e6) / 1e6;
   const stepsKnown = members.reduce((sum, member) => sum + Math.max(member.totals.steps, member.steps.length, member.knownSteps), 0);
   let lastTurnCost = 0;
+  let turnTokens = 0;
+  let turnSteps = 0;
   if (collector.turnStartedAt) {
     for (const step of steps) {
-      if (step.at >= collector.turnStartedAt)
+      if (step.at >= collector.turnStartedAt) {
         lastTurnCost += step.cost ?? 0;
+        turnTokens += step.tokens ?? 0;
+        turnSteps += 1;
+      }
     }
   }
   lastTurnCost = Math.round(lastTurnCost * 1e6) / 1e6;
@@ -654,7 +697,14 @@ function snapshot(collector, now = Date.now(), tree = [collector]) {
   const streamer = members.find((member) => member.status === "streaming" && member.ttftMs != null);
   const lastStepRaw = members.reduce((best, member) => member.lastStep && (!best || member.lastStep.at > best.at) ? member.lastStep : best, null);
   const model = collector.model ?? lastStepRaw?.model ?? null;
-  const modelCostRates = modelRates(steps, model);
+  const modelKey = model ?? "";
+  let modelCostRates;
+  if (derived.ratesByModel.has(modelKey)) {
+    modelCostRates = derived.ratesByModel.get(modelKey);
+  } else {
+    modelCostRates = modelRates(steps, model);
+    derived.ratesByModel.set(modelKey, modelCostRates);
+  }
   const status = treeStatus(collector, members);
   const active = [];
   for (const member of members) {
@@ -709,6 +759,12 @@ function snapshot(collector, now = Date.now(), tree = [collector]) {
       perMillion: consumed > 0 ? Math.round(totalCost / consumed * 1e6 * 1e4) / 1e4 : null,
       rates: modelCostRates
     },
+    turn: {
+      active: Boolean(collector.turnActive),
+      startedAt: collector.turnStartedAt || null,
+      tokens: turnTokens,
+      steps: turnSteps
+    },
     live: {
       tps: live,
       charsPerSecond: Math.round(members.reduce((sum, member) => sum + (member.status === "streaming" ? charsInWindow(member, now) : 0), 0) / (LIVE_WINDOW_MS / 1000)),
@@ -725,13 +781,7 @@ function snapshot(collector, now = Date.now(), tree = [collector]) {
       v: collector.series.slice(-SERIES_POINTS).map((point) => point.v)
     },
     stepsSeq: members.reduce((sum, member) => sum + member.stepsSeq, 0),
-    steps: shownSteps.map((step) => ({
-      tokens: step.tokens,
-      ms: step.ms,
-      tps: step.tps,
-      aborted: step.aborted,
-      ...subSteps.has(step) ? { sub: true } : {}
-    })),
+    steps: wire,
     stepsFrom: shownSteps[0]?.at ?? null,
     stepsKnown,
     rates: { avg: Math.round(rates.avg * 10) / 10, peak: Math.round(rates.peak * 10) / 10 },
@@ -1018,6 +1068,7 @@ function createService({ fetchImpl = fetch, log = () => {}, base = BASE, token =
     }
   }
   async function streamLoop() {
+    let recycled = false;
     while (!state.stopping) {
       if (!base || !upstreamIsLoopback) {
         state.stream = "off";
@@ -1027,7 +1078,8 @@ function createService({ fetchImpl = fetch, log = () => {}, base = BASE, token =
       }
       const controller = new AbortController;
       state.controller = controller;
-      state.stream = "connecting";
+      if (!recycled)
+        state.stream = "connecting";
       let cutByOurTimer = false;
       const timer = setTimeout(() => {
         cutByOurTimer = true;
@@ -1064,6 +1116,7 @@ function createService({ fetchImpl = fetch, log = () => {}, base = BASE, token =
         clearTimeout(timer);
         state.controller = null;
       }
+      recycled = cutByOurTimer;
       if (state.stopping)
         break;
       if (!cutByOurTimer && state.stream === "retrying")
@@ -1146,9 +1199,10 @@ function createService({ fetchImpl = fetch, log = () => {}, base = BASE, token =
       }
       const now = Date.now();
       const stale = now - collector.historyAt > HISTORY_RECONCILE_MS && !collector.turnActive;
+      const cutRetry = collector.historyCut && !collector.turnActive && now - collector.historyAt > 15000;
       if (stale)
         readTurnStart(collector, true);
-      const mayLoad = !collector.loading && now - collector.historyTriedAt >= (collector.error ? 15000 : 0) && (first || stale);
+      const mayLoad = !collector.loading && now - collector.historyTriedAt >= (collector.error ? 15000 : 0) && (first || stale || cutRetry);
       if (mayLoad) {
         const run = loadHistory(collector, apiGet, first ? now + FIRST_LOAD_BUDGET_MS : 0);
         if (first)

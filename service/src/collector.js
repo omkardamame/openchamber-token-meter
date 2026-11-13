@@ -71,6 +71,10 @@ export function createCollector(id) {
     // The model the session is running, for the recovered cost rates.
     model: null,
     status: 'idle',
+    // How many tool calls are running right now. A turn can run two at once,
+    // and the first to finish must not hand the status back while the other
+    // is still running.
+    pendingTools: 0,
     error: null,
     totals: emptyTotals(),
     totalsFrom: 'history',
@@ -93,8 +97,15 @@ export function createCollector(id) {
     lastStep: null,
     historyAt: 0,
     historyPartial: false,
+    // True when the first-load deadline cut the history short. The service then
+    // retries it once the turn is quiet, instead of leaving it wrong for the
+    // five minutes until the reconcile.
+    historyCut: false,
     historyTriedAt: 0,
     loading: null,
+    // The merged, sorted step list and what snapshot() derives from it; built
+    // again only when a member's step list changes.
+    derived: null,
     touchedAt: Date.now(),
   };
 }
@@ -252,6 +263,7 @@ export function applyRecord(collector, record) {
       collector.status = 'idle';
       collector.turnActive = false;
       collector.stream = null;
+      collector.pendingTools = 0;
     }
   }
   const tokens = record.tokens;
@@ -342,11 +354,14 @@ export async function loadHistory(collector, apiGet, deadline = 0, { stepsOnly =
     const messages = [];
     let cursor = null;
     let complete = true;
+    // The deadline is the only cut the service retries on its own.
+    let cutByDeadline = false;
     for (let page = 0; page < HISTORY_PAGES; page += 1) {
       // The first request must answer before the host's 20 s timeout, so a long
       // session loads what fits and reconciles the rest on a later poll.
       if (deadline && Date.now() > deadline) {
         complete = false;
+        cutByDeadline = true;
         break;
       }
       // A cursor already carries the order: OpenCode answers 400 when both are sent.
@@ -410,6 +425,7 @@ export async function loadHistory(collector, apiGet, deadline = 0, { stepsOnly =
     collector.lastTtftMs = [...collector.steps].reverse().find((step) => step.ttftMs > 0)?.ttftMs ?? null;
     if (tokens > 0 && chars > 0) calibrate(collector, chars, tokens);
     collector.historyPartial = !complete;
+    collector.historyCut = cutByDeadline;
     collector.historyAt = Date.now();
     collector.error = null;
     return complete;
@@ -417,6 +433,7 @@ export async function loadHistory(collector, apiGet, deadline = 0, { stepsOnly =
     .catch((error) => {
       collector.error = error?.message ?? String(error);
       collector.historyPartial = true;
+      collector.historyCut = false;
       return false;
     })
     .finally(() => {
@@ -455,22 +472,30 @@ export function applyEvent(collector, event) {
       collector.turnStartedAt = typeof data.started === 'number' ? data.started : at;
       return;
     case 'session.tool.called':
+      collector.pendingTools += 1;
       collector.status = 'tool';
       return;
     case 'session.tool.success':
     case 'session.tool.failed':
-      if (collector.status === 'tool') collector.status = 'idle';
+      collector.pendingTools = Math.max(0, collector.pendingTools - 1);
+      // The turn goes on after a tool: a second tool may still run, and even the
+      // last one hands back to the step that kept streaming behind it.
+      if (collector.pendingTools === 0 && collector.status === 'tool') {
+        collector.status = collector.stream || collector.turnActive ? 'streaming' : 'idle';
+      }
       return;
     case 'session.execution.succeeded':
     case 'session.execution.interrupted':
       collector.turnActive = false;
       collector.status = 'idle';
       collector.stream = null;
+      collector.pendingTools = 0;
       return;
     case 'session.execution.failed':
       collector.turnActive = false;
       collector.status = 'failed';
       collector.stream = null;
+      collector.pendingTools = 0;
       return;
     case 'permission.asked':
       collector.status = 'waiting-permission';
@@ -483,9 +508,12 @@ export function applyEvent(collector, event) {
       return;
     case 'form.replied':
     case 'form.cancelled':
-      if (collector.status === 'waiting-question') collector.status = 'idle';
+      // Answering a form does not end the turn: it streams on as a permission
+      // reply does.
+      if (collector.status === 'waiting-question') collector.status = collector.turnActive ? 'streaming' : 'idle';
       return;
     case 'session.step.started':
+      collector.pendingTools = 0;
       if (typeof data.model?.id === 'string') collector.model = data.model.id;
       collector.stream = {
         started: typeof data.started === 'number' ? data.started : at,
@@ -557,7 +585,7 @@ export function applyEvent(collector, event) {
         if (step.ttftMs > 0) collector.lastTtftMs = step.ttftMs;
       }
       collector.stream = null;
-      collector.status = 'idle';
+      collector.status = collector.pendingTools > 0 ? 'tool' : 'idle';
       return;
     }
     case 'session.usage.updated':
@@ -694,8 +722,6 @@ function modelRates(steps, model) {
 export function snapshot(collector, now = Date.now(), tree = [collector]) {
   const members = tree.length ? tree : [collector];
   const totals = emptyTotals();
-  const steps = [];
-  const subSteps = new Set();
   for (const member of members) {
     totals.input += member.totals.input;
     totals.output += member.totals.output;
@@ -704,14 +730,52 @@ export function snapshot(collector, now = Date.now(), tree = [collector]) {
     totals.cacheWrite += member.totals.cacheWrite;
     totals.cost += member.totals.cost;
     totals.steps += member.totals.steps;
-    for (const step of member.steps) {
-      steps.push(step);
-      if (member !== collector) subSteps.add(step);
-    }
   }
-  steps.sort((a, b) => a.at - b.at);
-  const shownSteps = steps.slice(-MAX_STEPS);
-  const rates = ratesOf(steps);
+  // The merged list, the subagent set, the rates and the wire rows change only
+  // when a member's step list does, and this runs up to six times a second:
+  // build them once per key and keep them on the collector. The model can change
+  // while the steps do not, so its recovered rates are cached per model.
+  const stepsKey = members.map((member) => `${member.id}:${member.stepsSeq}:${member.steps.length}`).join('|');
+  let derived = collector.derived;
+  if (derived?.key !== stepsKey) {
+    const steps = [];
+    const subSteps = new Set();
+    for (const member of members) {
+      for (const step of member.steps) {
+        steps.push(step);
+        if (member !== collector) subSteps.add(step);
+      }
+    }
+    steps.sort((a, b) => a.at - b.at);
+    const shownSteps = steps.slice(-MAX_STEPS);
+    derived = {
+      key: stepsKey,
+      steps,
+      subSteps,
+      shownSteps,
+      rates: ratesOf(steps),
+      // The chart draws every step the meter keeps (1000 at most), and only when
+      // its sequence is stale. It reads six fields: tokens, ms, tps, aborted,
+      // at and cost, plus `sub` on a subagent's step. Nothing else travels: the
+      // wire carried eleven fields for four the frame reads, which was two
+      // thirds of a 34 KB answer.
+      //
+      // This array is shared between answers, so a caller may drop the property
+      // from its own answer object but never sort or cut the array itself.
+      wire: shownSteps.map((step) => ({
+        tokens: step.tokens,
+        ms: step.ms,
+        tps: step.tps,
+        aborted: step.aborted,
+        at: step.at,
+        cost: Math.round((step.cost ?? 0) * 1e6) / 1e6,
+        ...(subSteps.has(step) ? { sub: true } : {}),
+      })),
+      ratesByModel: new Map(),
+    };
+    collector.derived = derived;
+  }
+  const { steps, subSteps, shownSteps, rates, wire } = derived;
   const prompt = totals.input + totals.cacheRead + totals.cacheWrite;
   const generated = totals.output + totals.reasoning;
   const consumed = prompt + generated;
@@ -726,9 +790,15 @@ export function snapshot(collector, now = Date.now(), tree = [collector]) {
   // The turn that is running, or the last one that ran. A step ended before the
   // turn began belongs to an earlier turn; the root's start bounds the tree.
   let lastTurnCost = 0;
+  let turnTokens = 0;
+  let turnSteps = 0;
   if (collector.turnStartedAt) {
     for (const step of steps) {
-      if (step.at >= collector.turnStartedAt) lastTurnCost += step.cost ?? 0;
+      if (step.at >= collector.turnStartedAt) {
+        lastTurnCost += step.cost ?? 0;
+        turnTokens += step.tokens ?? 0;
+        turnSteps += 1;
+      }
     }
   }
   lastTurnCost = Math.round(lastTurnCost * 1e6) / 1e6;
@@ -739,7 +809,16 @@ export function snapshot(collector, now = Date.now(), tree = [collector]) {
     null,
   );
   const model = collector.model ?? lastStepRaw?.model ?? null;
-  const modelCostRates = modelRates(steps, model);
+  // A least-squares solve over every step is the most expensive thing here, and
+  // its inputs are the steps plus the model name, both already keyed above.
+  const modelKey = model ?? '';
+  let modelCostRates;
+  if (derived.ratesByModel.has(modelKey)) {
+    modelCostRates = derived.ratesByModel.get(modelKey);
+  } else {
+    modelCostRates = modelRates(steps, model);
+    derived.ratesByModel.set(modelKey, modelCostRates);
+  }
   const status = treeStatus(collector, members);
   // Every subagent still working, with its own rate: the headline adds them up,
   // the list says what makes it. Eight is enough to draw; `running` keeps the
@@ -800,6 +879,14 @@ export function snapshot(collector, now = Date.now(), tree = [collector]) {
       // steps cannot pin them down.
       rates: modelCostRates,
     },
+    // What the running turn has used so far, counted from the same list the
+    // chart draws: the frames say "this turn" without a second read.
+    turn: {
+      active: Boolean(collector.turnActive),
+      startedAt: collector.turnStartedAt || null,
+      tokens: turnTokens,
+      steps: turnSteps,
+    },
     live: {
       tps: live,
       // What each member that is still generating streamed in the last three
@@ -829,19 +916,12 @@ export function snapshot(collector, now = Date.now(), tree = [collector]) {
     // Every member's counter only grows, so their sum changes as soon as a
     // step arrives anywhere in the tree and the client knows to fetch the list.
     stepsSeq: members.reduce((sum, member) => sum + member.stepsSeq, 0),
-    // The chart draws every step the meter keeps (400 at most), and only when
-    // its sequence is stale. Nothing else travels: the wire carried eleven
-    // fields for four the frame reads, which was two thirds of a 34 KB answer.
-    steps: shownSteps.map((step) => ({
-      tokens: step.tokens,
-      ms: step.ms,
-      tps: step.tps,
-      aborted: step.aborted,
-      ...(subSteps.has(step) ? { sub: true } : {}),
-    })),
+    // The cached wire rows; `steps=…` in the request drops this property from
+    // its own answer, never from the cache.
+    steps: wire,
     // The time of the leftmost bar, for the chart's own start label.
     stepsFrom: shownSteps[0]?.at ?? null,
-    // Every step the session and its subagents ran, not only the 400 drawn.
+    // Every step the session and its subagents ran, not only the 1000 drawn.
     stepsKnown,
     // Worked out over every step, so the drawn average stays the session's.
     rates: { avg: Math.round(rates.avg * 10) / 10, peak: Math.round(rates.peak * 10) / 10 },

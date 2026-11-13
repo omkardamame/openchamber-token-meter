@@ -330,6 +330,10 @@ export function createService({ fetchImpl = fetch, log = () => {}, base = BASE, 
   }
 
   async function streamLoop() {
+    // The stream is cut by our own 55 s timer and reopened at once; saying
+    // "connecting" for that reopening made the panel footer flicker every
+    // minute. Only a stream that really has to be re-established says so.
+    let recycled = false;
     while (!state.stopping) {
       if (!base || !upstreamIsLoopback) {
         state.stream = 'off';
@@ -339,7 +343,7 @@ export function createService({ fetchImpl = fetch, log = () => {}, base = BASE, 
       }
       const controller = new AbortController();
       state.controller = controller;
-      state.stream = 'connecting';
+      if (!recycled) state.stream = 'connecting';
       let cutByOurTimer = false;
       const timer = setTimeout(() => {
         cutByOurTimer = true;
@@ -375,6 +379,7 @@ export function createService({ fetchImpl = fetch, log = () => {}, base = BASE, 
         clearTimeout(timer);
         state.controller = null;
       }
+      recycled = cutByOurTimer;
       if (state.stopping) break;
       if (!cutByOurTimer && state.stream === 'retrying') await sleep(STREAM_RETRY_MS);
       else await sleep(STREAM_REOPEN_MS);
@@ -473,13 +478,17 @@ export function createService({ fetchImpl = fetch, log = () => {}, base = BASE, 
       // count a half-finished step and make the totals dip. A failed read waits
       // 15 s, so a broken upstream is not hammered once per poll.
       const stale = now - collector.historyAt > HISTORY_RECONCILE_MS && !collector.turnActive;
+      // A first load the 6 s deadline cut short finished nothing, so waiting for
+      // the reconcile would leave it short for five minutes; read it again once
+      // the turn is over, in the background.
+      const cutRetry = collector.historyCut && !collector.turnActive && now - collector.historyAt > 15_000;
       // A turn start missed while the stream was down is corrected with the
       // same slow cadence as the history.
       if (stale) void readTurnStart(collector, true);
       const mayLoad =
         !collector.loading &&
         now - collector.historyTriedAt >= (collector.error ? 15_000 : 0) &&
-        (first || stale);
+        (first || stale || cutRetry);
       if (mayLoad) {
         const run = loadHistory(collector, apiGet, first ? now + FIRST_LOAD_BUDGET_MS : 0);
         if (first) await run;

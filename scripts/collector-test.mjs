@@ -123,7 +123,7 @@ check(
   snap.steps.length <= 1000 &&
     snap.steps.every((step) => {
       const keys = Object.keys(step).sort().join(',');
-      return keys === 'aborted,ms,tokens,tps' || keys === 'aborted,ms,tokens,tps,sub';
+      return keys === 'aborted,at,cost,ms,tokens,tps' || keys === 'aborted,at,cost,ms,tokens,tps,sub';
     }),
   `${snap.steps.length} steps, ${Object.keys(snap.steps[0] ?? {}).length} fields`,
 );
@@ -395,6 +395,77 @@ emitCost('session.step.ended', costStep('msg_cost_3', 0.01), 4_000);
 const nextTurn = snapshot(costRun, costAt + 4_100);
 check('a new turn resets the last-turn cost', nextTurn.cost.lastTurn === 0.01, `$${nextTurn.cost.lastTurn}`);
 
+// ---------------------------------------------------------------- snapshot cache
+// snapshot() runs six times a second, and its merged, sorted step list, its
+// rates and its wire rows only change when a step list does.
+const cacheRun = createCollector('ses_cache_test');
+const cacheAt = Date.now();
+const emitCache = (type, data, offset = 0) =>
+  applyEvent(cacheRun, { type, created: cacheAt + offset, data: { sessionID: 'ses_cache_test', ...data } });
+emitCache('session.execution.started', {});
+emitCache('session.step.started', { assistantMessageID: 'msg_cache_1', started: cacheAt }, 10);
+emitCache('session.step.streamed', { assistantMessageID: 'msg_cache_1' }, 1_000);
+emitCache(
+  'session.step.ended',
+  { assistantMessageID: 'msg_cache_1', finish: 'stop', cost: 0, tokens: { input: 0, output: 300, reasoning: 100, cache: { read: 0, write: 0 } } },
+  1_100,
+);
+const cacheFirst = snapshot(cacheRun, cacheAt + 1_200);
+const cacheSecond = snapshot(cacheRun, cacheAt + 1_300);
+check(
+  'a quiet collector reuses its derived step list',
+  cacheFirst.steps === cacheSecond.steps && cacheSecond.steps.length === 1,
+  `${cacheSecond.steps.length} steps, ${cacheSecond.steps === cacheFirst.steps ? 'same array' : 'rebuilt'}`,
+);
+emitCache('session.step.started', { assistantMessageID: 'msg_cache_2', started: cacheAt + 2_000 }, 2_000);
+emitCache('session.step.streamed', { assistantMessageID: 'msg_cache_2' }, 3_000);
+emitCache(
+  'session.step.ended',
+  { assistantMessageID: 'msg_cache_2', finish: 'stop', cost: 0, tokens: { input: 0, output: 800, reasoning: 200, cache: { read: 0, write: 0 } } },
+  3_100,
+);
+const cacheThird = snapshot(cacheRun, cacheAt + 3_200);
+check(
+  'a new step rebuilds the derived list',
+  cacheThird.steps !== cacheFirst.steps && cacheThird.steps.length === 2,
+  `${cacheThird.steps.length} steps`,
+);
+
+// ---------------------------------------------------------------- the turn cell
+// What the running turn has used, so the frames can say "this turn" without a
+// second read.
+const turnRun = createCollector('ses_turn_test');
+const turnAt = Date.now();
+const emitTurn = (type, data, offset = 0) =>
+  applyEvent(turnRun, { type, created: turnAt + offset, data: { sessionID: 'ses_turn_test', ...data } });
+const freshTurn = snapshot(turnRun, turnAt).turn;
+check(
+  'a fresh collector has no turn',
+  freshTurn.active === false && freshTurn.startedAt === null && freshTurn.tokens === 0 && freshTurn.steps === 0,
+  JSON.stringify(freshTurn),
+);
+emitTurn('session.execution.started', {});
+emitTurn('session.step.started', { assistantMessageID: 'msg_turn', started: turnAt }, 10);
+emitTurn('session.step.streamed', { assistantMessageID: 'msg_turn' }, 900);
+emitTurn(
+  'session.step.ended',
+  { assistantMessageID: 'msg_turn', finish: 'stop', cost: 0, tokens: { input: 0, output: 700, reasoning: 300, cache: { read: 0, write: 0 } } },
+  1_000,
+);
+const runningTurn = snapshot(turnRun, turnAt + 1_100).turn;
+check(
+  'the turn counts the steps it has finished',
+  runningTurn.active === true && runningTurn.startedAt === turnAt && runningTurn.tokens === 1_000 && runningTurn.steps === 1,
+  JSON.stringify(runningTurn),
+);
+emitTurn('session.execution.succeeded', {}, 2_000);
+const doneTurn = snapshot(turnRun, turnAt + 2_100).turn;
+check(
+  'a finished turn keeps its numbers and stops being active',
+  doneTurn.active === false && doneTurn.startedAt === turnAt && doneTurn.tokens === 1_000 && doneTurn.steps === 1,
+  JSON.stringify(doneTurn),
+);
+
 // ---------------------------------------------------------------- model rates
 // OpenCode's step costs are linear in input, generated and cache-read tokens.
 // A fit recovers the model's own $/1M rates without a price table or a blocked
@@ -451,6 +522,24 @@ for (let i = 0; i < 12; i += 1) {
   });
 }
 check('a non-linear cost yields no rate instead of a guess', snapshot(tieredRun).cost.rates === null, JSON.stringify(snapshot(tieredRun).cost.rates));
+
+// The recovered rates are cached with the steps but keyed by the model: the
+// model can change while the step list does not.
+const rateReused = snapshot(rateRun);
+const rateReusedAgain = snapshot(rateRun);
+check(
+  'recovered rates ride with the cached step list',
+  rateReused.steps === rateReusedAgain.steps && rateReusedAgain.steps.length === 12,
+  `${rateReusedAgain.steps.length} steps`,
+);
+rateRun.model = 'another-model';
+const rateOtherModel = snapshot(rateRun);
+check(
+  'a model change re-derives the rates without rebuilding the steps',
+  rateOtherModel.steps === rateReused.steps && rateOtherModel.cost.rates === null,
+  JSON.stringify(rateOtherModel.cost.rates),
+);
+rateRun.model = 'rate-model';
 
 // A subagent whose history is longer than the kept list still counts in full.
 const knownRun = createCollector('ses_known_test');
@@ -517,6 +606,45 @@ check(
   `${capped.historyPartial}/${capped.knownSteps}`,
 );
 
+// regression: a first load the 6 s deadline cut short is flagged so the service
+// can retry it, instead of leaving it short until the five-minute reconcile
+const cut = createCollector('ses_cut_history');
+const cutEndless = async () => ({
+  data: [
+    {
+      id: 'msg_cut',
+      type: 'assistant',
+      time: { created: 1, streamed: 2 },
+      tokens: { input: 1, output: 1, reasoning: 0, cache: { read: 0, write: 0 } },
+      content: [],
+    },
+  ],
+  cursor: { next: 'CUT1' },
+});
+const cutResult = await loadHistory(cut, cutEndless, Date.now() - 1);
+check(
+  'a load cut by its deadline is flagged for a retry',
+  cutResult === false && cut.historyPartial === true && cut.historyCut === true,
+  `${cutResult}/${cut.historyPartial}/${cut.historyCut}`,
+);
+const cutDone = await loadHistory(cut, async () => ({
+  data: [
+    {
+      id: 'msg_cut_done',
+      type: 'assistant',
+      time: { created: 3, streamed: 4 },
+      tokens: { input: 1, output: 1, reasoning: 0, cache: { read: 0, write: 0 } },
+      content: [],
+    },
+  ],
+  cursor: { next: null },
+}));
+check(
+  'a full reload clears the deadline cut flag',
+  cutDone === true && cut.historyCut === false && cut.historyPartial === false,
+  `${cutDone}/${cut.historyCut}/${cut.historyPartial}`,
+);
+
 // regression: a first history read during a turn keeps the live step it lacks
 const mergeRun = createCollector('ses_merge_history');
 mergeRun.steps = [
@@ -574,7 +702,41 @@ for (let i = 0; i < 4; i += 1) {
 const toolChars = toolRun.chars.reduce((sum, bucket) => sum + bucket.n, 0);
 check('tool argument JSON stops counting past 200 chars', toolChars === 200, `${toolChars} chars counted`);
 emitTool('session.tool.success', { assistantMessageID: 'msg_tool', id: 'call_1' }, 600);
-check('a finished tool returns the status to idle', toolRun.status === 'idle', toolRun.status);
+check('a finished tool hands the status back to the running step', toolRun.status === 'streaming', toolRun.status);
+
+// Two tools can run at once: the first one back may not end the tool state, and
+// a step that ends under a running tool is still a turn in a tool.
+const parallelRun = createCollector('ses_parallel_tools');
+const parallelAt = Date.now();
+const emitParallel = (type, data, offset = 0) =>
+  applyEvent(parallelRun, { type, created: parallelAt + offset, data: { sessionID: 'ses_parallel_tools', ...data } });
+emitParallel('session.execution.started', {});
+emitParallel('session.step.started', { assistantMessageID: 'msg_par', started: parallelAt }, 10);
+emitParallel('session.tool.called', { assistantMessageID: 'msg_par', id: 'call_a' }, 20);
+emitParallel('session.tool.called', { assistantMessageID: 'msg_par', id: 'call_b' }, 30);
+emitParallel('session.tool.success', { assistantMessageID: 'msg_par', id: 'call_a' }, 40);
+check(
+  'a second running tool keeps the tool state',
+  parallelRun.status === 'tool' && parallelRun.pendingTools === 1,
+  `${parallelRun.status}, ${parallelRun.pendingTools} pending`,
+);
+emitParallel('session.tool.failed', { assistantMessageID: 'msg_par', id: 'call_b' }, 50);
+check('the last tool hands the status back to the turn', parallelRun.status === 'streaming', parallelRun.status);
+emitParallel('session.tool.called', { assistantMessageID: 'msg_par', id: 'call_c' }, 60);
+emitParallel('session.step.streamed', { assistantMessageID: 'msg_par' }, 900);
+emitParallel(
+  'session.step.ended',
+  { assistantMessageID: 'msg_par', finish: 'stop', cost: 0, tokens: { input: 5, output: 50, reasoning: 0, cache: { read: 0, write: 0 } } },
+  1_000,
+);
+check('a step that ends under a running tool stays in the tool state', parallelRun.status === 'tool', parallelRun.status);
+
+// No turn and no step behind it: the tool was the whole work.
+const lonelyTool = createCollector('ses_lonely_tool');
+applyEvent(lonelyTool, { type: 'session.tool.called', created: Date.now(), data: { sessionID: 'ses_lonely_tool', id: 'call_lone' } });
+check('a tool with no turn is a tool state', lonelyTool.status === 'tool', lonelyTool.status);
+applyEvent(lonelyTool, { type: 'session.tool.success', created: Date.now(), data: { sessionID: 'ses_lonely_tool', id: 'call_lone' } });
+check('a tool with no turn behind it returns to idle', lonelyTool.status === 'idle', lonelyTool.status);
 
 // a step's rate is measured over its text parts, not over the whole step
 const spanRun = createCollector('ses_span_test');
@@ -788,6 +950,24 @@ applyEvent(formRun, { type: 'form.created', created: formAt, data: { sessionID: 
 check('a question puts the session in waiting', formRun.status === 'waiting-question', formRun.status);
 applyEvent(formRun, { type: 'form.replied', created: formAt + 100, data: { sessionID: 'ses_form_test', form: { sessionID: 'ses_form_test' } } });
 check('an answered question clears the waiting state', formRun.status === 'idle', formRun.status);
+
+// A form answered mid-turn leaves the turn running, as a permission reply does.
+const formTurnRun = createCollector('ses_form_turn_test');
+const formTurnAt = Date.now();
+const emitForm = (type, offset = 0) =>
+  applyEvent(formTurnRun, {
+    type,
+    created: formTurnAt + offset,
+    data: { sessionID: 'ses_form_turn_test', form: { sessionID: 'ses_form_turn_test' } },
+  });
+emitForm('session.execution.started', 0);
+emitForm('form.created', 100);
+check('a question mid-turn is a waiting state', formTurnRun.status === 'waiting-question', formTurnRun.status);
+emitForm('form.replied', 200);
+check('a question answered mid-turn returns to the running turn', formTurnRun.status === 'streaming', formTurnRun.status);
+emitForm('form.created', 300);
+emitForm('form.cancelled', 400);
+check('a question cancelled mid-turn returns to the running turn', formTurnRun.status === 'streaming', formTurnRun.status);
 
 // a late event must not break the ordered character window
 const orderRun = createCollector('ses_order_test');
