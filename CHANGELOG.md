@@ -3,6 +3,12 @@
 Every release of Token Meter, newest first. A release is a tag; nothing here is
 dated by guesswork — each entry is what shipped in that tag.
 
+## [1.9.1] - 2026-11-13
+
+### Fixed
+
+- The live curve ends at `now` again. The wire carried values against a fixed 250 ms cadence, but the service's ticker and the frame's poll both sample, and each poll resets the ticker's clock: samples land at 250 ms plus the poll's round trip. Mapped onto the nominal grid, the last 240 samples spanned the real ~75 s but drew as 60 s — the curve stopped up to ~15 s before `now` and squeezed that extra history into the window. The wire now carries each sample's own offset from `t0`; an older service still falls back to the nominal grid. A slower cadence keeps its own times on the wire, and the curve ends at `now` even when the samples drift.
+
 ## [1.9.0] - 2026-11-13
 
 ### Added
