@@ -313,7 +313,14 @@ function paintCost(data) {
           `API value at ${source ?? 'published'} rates`,
           `billed ${moneyValue(cost.billed?.total ?? 0)}`,
           cost.lowerBound
-            ? `${Math.round((cost.coverage ?? 0) * 100)}% of these tokens have a published rate, so this is a lower bound`
+            ? `${Math.round((cost.coverage ?? 0) * 100)}% of these tokens have a published rate, so this is a lower bound${
+                Array.isArray(cost.unpriced) && cost.unpriced.length
+                  ? ` · no rate for ${cost.unpriced
+                      .slice(0, 3)
+                      .map((entry) => entry.model ?? entry.provider ?? 'an unknown model')
+                      .join(', ')}${cost.unpriced.length > 3 ? ` and ${cost.unpriced.length - 3} more` : ''}`
+                  : ''
+              }`
             : '',
           cost.drift ? 'the rate table disagrees with the recorded cost; open the rates line for both numbers' : '',
         ]

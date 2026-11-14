@@ -1280,6 +1280,13 @@ function snapshot(collector, now = Date.now(), tree = [collector], priceBook = n
       drift: api.drift,
       coverage: Math.round(api.coverage * 1e6) / 1e6,
       lowerBound: api.lowerBound,
+      ...api.unpriced.length ? {
+        unpriced: api.unpriced.map((entry) => ({
+          consumed: entry.consumed,
+          model: entry.model ?? null,
+          provider: entry.provider ?? null
+        }))
+      } : {},
       ...api.models.length > 1 ? {
         models: api.models.map((entry) => ({
           apiValue: round6(entry.apiValue),

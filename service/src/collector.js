@@ -1037,6 +1037,17 @@ export function snapshot(collector, now = Date.now(), tree = [collector], priceB
           drift: api.drift,
           coverage: Math.round(api.coverage * 1e6) / 1e6,
           lowerBound: api.lowerBound,
+          // Which models dragged the total below complete: the panel names them
+          // in the total's title, so `≥` is never unattributed.
+          ...(api.unpriced.length
+            ? {
+                unpriced: api.unpriced.map((entry) => ({
+                  consumed: entry.consumed,
+                  model: entry.model ?? null,
+                  provider: entry.provider ?? null,
+                })),
+              }
+            : {}),
           // One model needs no list: `rates` above already is its card.
           ...(api.models.length > 1
             ? {

@@ -742,12 +742,17 @@ try {
     `${noPriceUi.costTotal} ${noPriceUi.costSource}`,
   );
 
-  await panel.set(priced({ coverage: 0.5, lowerBound: true, priceNote: 'partial', total: 12 }));
+  await panel.set(priced({ coverage: 0.5, lowerBound: true, priceNote: 'partial', total: 12, unpriced: [{ consumed: 1e6, model: 'unknown/model', provider: 'nowhere' }] }));
   const partialUi = await panel.read();
   check(
     'UI-10 a partial tree carries the floor mark',
     partialUi.costTotal === '≥ $12.00' && /lower bound/.test(partialUi.costTotalTitle ?? ''),
     `${partialUi.costTotal} ${String(partialUi.costTotalTitle).slice(0, 60)}`,
+  );
+  check(
+    'UI-23 the floor mark names the unpriced model',
+    /no rate for unknown\/model/.test(partialUi.costTotalTitle ?? ''),
+    String(partialUi.costTotalTitle).slice(-80),
   );
 
   await panel.set(

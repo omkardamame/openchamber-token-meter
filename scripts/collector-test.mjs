@@ -808,6 +808,14 @@ check(
   partialSnap.cost.lowerBound === true && partialSnap.cost.coverage === 0.5 && partialSnap.cost.total === 4,
   `coverage ${partialSnap.cost.coverage}, $${partialSnap.cost.total}`,
 );
+check(
+  'SN-19 the lower bound names what it could not price',
+  Array.isArray(partialSnap.cost.unpriced) &&
+    partialSnap.cost.unpriced.length === 1 &&
+    partialSnap.cost.unpriced[0].model === 'unknown/model' &&
+    partialSnap.cost.unpriced[0].provider === 'nowhere',
+  JSON.stringify(partialSnap.cost.unpriced),
+);
 
 const goPeakAt = Date.UTC(2026, 10, 16, 2, 0, 0);
 const goRun = withPrices('ses_price_go', 'opencode-go', 'deepseek-v4.1-flash', [
