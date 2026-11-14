@@ -1,6 +1,7 @@
 # API Value Pricing — Spec and Plan
 
-Status: **approved 2026-11-14; no production code written**.
+Status: **approved 2026-11-14; Phase 1 built** — committed book, resolver,
+compute, 55 pure checks. Phase 2 (snapshot wiring) not started.
 Owner: Omkar.
 Scope: the rail panel's `Cost` block (OpenChamber extension `token-meter`).
 Providers in scope: **Anthropic** (`anthropic`, `claude-agent`), **OpenAI**
@@ -220,17 +221,23 @@ drift against the committed book; it is not a gate.
 `shared/price-resolve.js` — pure, no fs, no network, no OpenCode client.
 
 ```js
-resolvePrice(book, { provider, model, promptTokens, at })
+resolvePrice(book, { provider, model, promptTokens, at, overrides })
 // -> null | {
-//   provider, model, name, rates, source, match, release,
+//   provider, model, name, rates, source, match, release, checkedAt,
 //   tier: null | { minContext, rates },
-//   timeTier: null | 'peak' | 'off-peak'
+//   timeTier: null | 'peak' | 'off-peak',
+//   timeHours: null | string,        // the tariff's window, for the title
 // }
 ```
 
+`overrides` is the validated map from `price-overrides.json`; passing it keeps
+the resolver pure and leaves the file read to the service.
+
 Order:
 
-1. **Exact**: `book.providers[provider]?.models[model]`.
+1. **Exact**: `book.providers[provider]?.models[model]`. A case-only difference
+   is the same model and resolves here too: vendors write `zai-org/GLM-5.3`
+   while a session records `zai-org/glm-5.3`.
 2. **Provider alias**: map `claude-agent` → `anthropic`, `command-code` →
    `commandcode`; try exact again.
 3. **Model alias**: `book.aliases.models[originalProvider]?.[model]`; resolve in
@@ -253,7 +260,10 @@ Order:
    applies to a lab fallback too (an override on `anthropic/claude-fable-5-2`
    wins for `commandcode` traffic priced through the Anthropic card). An
    override never creates a match on its own: a key with no resolvable card
-   stays `null`. Rates are applied before tiers.
+   stays `null`. Rates are applied before tiers. An override also clears the
+   context tier and the time tariff: one deliberate set of four rates is the
+   whole answer, so `tier` and `timeTier` come back `null` and `source` reads
+   `manual override`.
 8. **None**: return `null`.
 
 Tiers:
@@ -270,20 +280,26 @@ the caller decides whether to fall back to recovered billed rates.
 
 ## 6. Computation
 
-`computeApiValue(book, steps, { turnStartedAt })` — pure:
+`computeApiValue(book, steps, { turnStartedAt, provider, model, overrides, recovered })` — pure:
 
 ```js
 // Returns:
 {
-  total, lastTurn, effective, coverage, lowerBound,
-  pricedTokens, totalTokens,
+  total, lastTurn, effective, perMillion, coverage, lowerBound,
+  pricedTokens, totalTokens, pricedSteps,
   models: [ { provider, model, name, source, match, apiValue, billed,
-              tokens, consumed, coverage, rates, drift } ],
-  billed: { total, lastTurn, effective },
+              tokens: { input, generated, cacheRead, cacheWrite },
+              consumed, coverage, rates, tier, timeTier, drift, steps } ],
+  billed: { total, lastTurn, perMillion, effective },
   drift: null | { model, relative },
   priceNote: null | 'noPrice' | 'partial' | 'drift' | 'free' | 'noBilledCost',
+  unpriced: [ { provider, model, consumed } ],   // the models behind `≥`
 }
 ```
+
+`provider` and `model` are the collector's, for a step that carries neither.
+`recovered` is `null | { provider, model, rates }` — the fit recovered from
+recorded costs, used only for the exact provider and model it was fitted on.
 
 Rules:
 
@@ -298,7 +314,9 @@ Rules:
   model only. For the recovered fallback, use a fit only when every step in it
   shares the step's provider; Phase 2 must key both by `provider/model`.
 - Sum `apiCost`; sum `consumed` for priced steps; sum all consumed.
-- `coverage = pricedConsumed / totalConsumed` (0 when totalConsumed is 0).
+- `coverage = pricedConsumed / totalConsumed`; when nothing was consumed at all
+  it is `1` if some step had a card and `0` otherwise, so a zero-token step is
+  never reported as a lower bound.
 - `lowerBound = coverage < 1 - 1e-9`.
 - `lastTurn` sums steps with `at >= turnStartedAt` (0 if no turn).
 - Group by `provider/model` for `models`; keep insertion order by first step,
@@ -315,8 +333,11 @@ Rules:
 - `priceNote` precedence: `noPrice` (coverage 0) → `partial` (`<1`) → `drift`
   (any drift) → `free` (all cards 0) → `noBilledCost` (`billed.total === 0` and
   `total > 0`).
-- Empty steps: `total = 0`, `coverage = 0`, `priceNote = 'noPrice'`; the UI
-  shows `—` or `$0.0000` as specified in section 8.
+- A step's `tokens` is `output + reasoning`, so a group reports
+  `{ input, generated, cacheRead, cacheWrite }`; the output/reasoning split is
+  not on the step and is not invented here.
+- Empty steps: `total = null`, `coverage = 0`, `priceNote = 'noPrice'`; the UI
+  shows `—` (section 8.2).
 
 Budget: at most 1,000 steps per snapshot. Compute once per `stepsKey` and cache
 on `collector.derived.api`; `lastTurn` is a filter over the cached per-step
@@ -353,7 +374,7 @@ cost: {
     input: 4, output: 20, cacheRead: 0.2, cacheWrite: 5,
     source: 'Anthropic list',
     match: 'alias',
-    checkedAt: '2026-11-13',
+    checkedAt: '2026-11-14',
     tier: null,                  // or { minContext, rates }
     timeTier: null,              // or 'peak' / 'off-peak'
   },
@@ -365,8 +386,8 @@ cost: {
   // only when the tree used more than one model
   models: [
     { provider, model, name, source, match, apiValue, billed,
-      tokens: { input, output, reasoning, cacheRead, cacheWrite },
-      consumed, coverage, rates, drift },
+      tokens: { input, generated, cacheRead, cacheWrite },
+      consumed, coverage, rates, tier, timeTier, drift, steps },
   ],
   tariff: { /* existing shape; time tiers for the current model */ },
 }
@@ -399,7 +420,7 @@ Cost
 └─────────────────────┴─────────────────────┘
 rates / 1M                    in     out    read   write
 list ...................  $4.00  $20.00  $0.20   $5.00
-Anthropic list · 2026-11-13
+Anthropic list · 2026-11-14
 ```
 
 - `Total` value = API value; `API` badge next to the label.
@@ -414,7 +435,7 @@ Anthropic list · 2026-11-13
   - `manual` for an override.
   - `context >272k` for an active context tier.
 - Source line below: `<source> · <checkedAt>`. For a lab fallback:
-  `Command Code via Anthropic list · 2026-11-13`.
+  `Command Code via Anthropic list · 2026-11-14`.
 - If `models.length > 1`: append `+N models` to the source line; title lists
   each model's name, value and rates.
 - If `lowerBound`: prefix the total and last turn with `≥ `; title lists
