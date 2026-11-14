@@ -126,7 +126,7 @@ function build() {
     <section class="block cost">
       <div class="block-head" title="This session and its subagents"><span>Cost</span></div>
       <div class="grid cost-grid">
-        <div class="cell"><span class="cell-label">Total</span><span class="cell-value cost-total">—</span></div>
+        <div class="cell"><span class="cell-label">Total<i class="api-badge" hidden>API</i></span><span class="cell-value cost-total">—</span></div>
         <div class="cell"><span class="cell-label">Last turn</span><span class="cell-value cost-turn">—</span></div>
         <div class="cell"><span class="cell-label">Model</span><span class="cell-value cost-model">—</span></div>
         <div class="cell"><span class="cell-label">Effective</span><span class="cell-value cost-rate">—</span></div>
@@ -162,6 +162,7 @@ function build() {
     costModel: app.querySelector('.cost-model'),
     costRate: app.querySelector('.cost-rate'),
     costRates: app.querySelector('.cost-rates'),
+    apiBadge: app.querySelector('.api-badge'),
     subsBlock: app.querySelector('.subagents'),
     subsMeta: app.querySelector('.subs-meta'),
     subsList: app.querySelector('.subs-list'),
@@ -201,56 +202,217 @@ function rateMoney(value) {
   return `$${n < 1 ? n.toFixed(2) : n.toFixed(1)}`;
 }
 
-/** A model's list rate: 0.003 shows as $0.003, 0.6 as $0.60, 1.2 as $1.20. */
+/** A list rate per million: cheap rates keep their significant digits. */
 function listRate(value) {
   const n = Number(value) || 0;
   if (!n) return '$0';
   if (n < 0.001) return `$${n.toFixed(4)}`;
   if (n < 0.01) return `$${n.toFixed(3)}`;
-  if (n < 10) return `$${n.toFixed(2)}`;
-  return `$${n.toFixed(1)}`;
+  return `$${n.toFixed(2)}`;
 }
 
 /**
- * What this session and its subagents cost: all of it, the turn that is running
- * (or the last one), and the model behind it with its effective rate. The rate
- * is observed, not list price: the extension cannot read a provider's price
- * table, so it divides this session's cost by every token it processed.
+ * Money for a headline: the magnitude decides the precision. A subscription's
+ * API value is often four figures, a turn is often cents, and printing
+ * `$1180.0000` would bury the number that matters.
+ */
+function moneyValue(value) {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return '—';
+  if (Math.abs(value) >= 1000) {
+    return `$${value.toLocaleString('en-US', { maximumFractionDigits: 2, minimumFractionDigits: 2 })}`;
+  }
+  if (Math.abs(value) >= 10) return `$${value.toFixed(2)}`;
+  return `$${value.toFixed(4)}`;
+}
+
+/** One row of the rates table: a label and the four published numbers. */
+function rateRow(name, rates, options = {}) {
+  const node = el('div', 'rate-row');
+  if (options.tier) {
+    node.dataset.tier = options.tier;
+    node.dataset.active = options.active ? 'true' : 'false';
+  }
+  node.append(
+    el('span', 'rate-name', name),
+    el('span', 'rate-num', listRate(rates.input)),
+    el('span', 'rate-num', listRate(rates.output)),
+    el('span', 'rate-num', listRate(rates.cacheRead)),
+    el('span', 'rate-num', listRate(rates.cacheWrite)),
+  );
+  return node;
+}
+
+function rateHead() {
+  const head = el('div', 'rate-row rate-head');
+  head.append(
+    el('span', 'rate-name', 'rates / 1M'),
+    el('span', 'rate-num', 'in'),
+    el('span', 'rate-num', 'out'),
+    el('span', 'rate-num', 'read'),
+    el('span', 'rate-num', 'write'),
+  );
+  return head;
+}
+
+/** Where the number came from, when, and whether it disagrees with the record. */
+function sourceLine(cost, source) {
+  const line = el('div', 'rate-source');
+  const parts = [source ?? 'published'];
+  if (cost.rates?.checkedAt) parts.push(cost.rates.checkedAt);
+  const models = Array.isArray(cost.models) ? cost.models : null;
+  if (models && models.length > 1) parts.push(`+${models.length - 1} model${models.length === 2 ? '' : 's'}`);
+  line.textContent = parts.join(' · ');
+  if (cost.drift) line.append(el('span', 'rate-flag', ' price drift'));
+  return line;
+}
+
+function ratesTitle(cost, source) {
+  const parts = [];
+  if (source) parts.push(source);
+  if (cost.rates?.checkedAt) parts.push(`snapshot ${cost.rates.checkedAt}`);
+  if (cost.rates?.match) parts.push(`matched by ${cost.rates.match}`);
+  if (cost.rates?.tier) parts.push(`above ${compact(cost.rates.tier.minContext)} tokens the context tier applies`);
+  if (cost.drift) {
+    parts.push(
+      `API value $${cost.total.toFixed(4)} against $${(cost.billed?.total ?? 0).toFixed(4)} recorded (${(cost.drift.relative * 100).toFixed(1)}%)`,
+    );
+  }
+  const models = Array.isArray(cost.models) ? cost.models : null;
+  if (models && models.length > 1) {
+    parts.push(
+      `this total covers ${models
+        .map((entry) => `${entry.name ?? entry.model} ${moneyValue(entry.apiValue)}`)
+        .join(', ')}`,
+    );
+  }
+  return parts.join(' · ');
+}
+
+/**
+ * What this session and its subagents would cost at list rates, the turn that is
+ * running (or the last one), the model behind it and its effective rate.
+ *
+ * The headline is API value, a counterfactual: it is never called spend. The
+ * recorded cost stays beside it, in the tooltip and in the billed row, and
+ * `mode` says which one the service sent.
  */
 function paintCost(data) {
   const cost = data.cost ?? {};
-  const totals = data.totals ?? {};
   const turn = data.turn ?? {};
-  const total = typeof cost.total === 'number' ? cost.total : (totals.cost ?? 0);
-  ui.costTotal.textContent = money4(total);
-  ui.costTotal.title = cost.tariff
-    ? 'OpenCode’s recorded cost; the active side of the rate table is what the provider charges'
-    : 'this session and its subagents, as OpenCode recorded it';
-  ui.costTurn.textContent = typeof cost.lastTurn === 'number' ? money4(cost.lastTurn) : '—';
+  const api = cost.mode === 'api';
+  const priced = typeof cost.total === 'number';
+  const floor = cost.lowerBound ? '≥ ' : '';
+  const source = cost.rates?.source ?? null;
+  const money = api ? moneyValue : money4;
+
+  ui.apiBadge.hidden = !api;
+  ui.costTotal.textContent = priced ? `${floor}${money(cost.total)}` : '—';
+  ui.costTotal.title = api
+    ? [
+        `API value at ${source ?? 'published'} rates`,
+        `billed ${moneyValue(cost.billed?.total ?? 0)}`,
+        cost.lowerBound
+          ? `${Math.round((cost.coverage ?? 0) * 100)}% of these tokens have a published rate, so this is a lower bound`
+          : '',
+        cost.drift ? 'the rate table disagrees with the recorded cost; open the rates line for both numbers' : '',
+      ]
+        .filter(Boolean)
+        .join(' · ')
+    : cost.tariff
+      ? 'OpenCode’s recorded cost; the active side of the rate table is what the provider charges'
+      : 'this session and its subagents, as OpenCode recorded it';
+
+  ui.costTurn.textContent = priced ? `${floor}${money(cost.lastTurn)}` : '—';
   ui.costTurn.title =
     (data.subagents?.loading ?? 0) > 0 || (data.subagents?.partial ?? 0) > 0 || data.historyPartial
       ? 'history is partial; the last turn can grow'
       : turn.steps > 0
-        ? `${turn.steps} step${turn.steps === 1 ? '' : 's'} · ${compact(turn.tokens)} generated tokens`
+        ? `${turn.steps} step${turn.steps === 1 ? '' : 's'} · ${compact(turn.tokens)} generated tokens${
+            api ? ' · API value, not the bill' : ''
+          }`
         : '';
-  ui.costModel.textContent = modelLabel || cost.rates?.model || '—';
-  ui.costModel.title = modelLabel || cost.rates?.model || '';
+
+  // The card's own display name, or the session's model when nothing is priced.
+  ui.costModel.textContent = cost.rates?.name || modelLabel || cost.rates?.model || '—';
+  ui.costModel.title = cost.rates
+    ? `${cost.rates.provider}/${cost.rates.model}${cost.rates.source ? ` · ${cost.rates.source}` : ''}`
+    : modelLabel || '';
+
   ui.costRate.textContent = typeof cost.perMillion === 'number' ? `${rateMoney(cost.perMillion)} / 1M` : '—';
-  ui.costRate.title = 'effective: this session’s cost divided by every token it processed';
-  // The model's own list rates, recovered from OpenCode's step costs. They are
-  // what the provider charged per million, not the blended rate above. A model
-  // switch mid-session shows a dash until the new model has its own steps.
-  //
-  // A model with a published time-of-day tariff shows both sides, the active
-  // one first and in its own colour: peak at 2× is the number that matters
-  // while a peak window is open, and the off-peak line stays visible so the
-  // pair can be read without a tooltip.
-  // A stale recovered rate means the session has moved model; the tariff came
-  // from the same model and must go with it. With no recovered rate yet the
-  // tariff still stands on its own card.
+  ui.costRate.title = api
+    ? `API value divided by every token this tree processed · billed ${rateMoney(cost.billed?.perMillion ?? 0)} / 1M`
+    : 'effective: this session’s cost divided by every token it processed';
+
+  // A card is resolved for the current model, so it is never stale. Recovered
+  // rates are keyed by the model id the session ran, and a switch leaves them
+  // behind; the tariff is keyed the same way.
   const sameModel = !cost.rates || !modelLabel || cost.rates.model === modelLabel;
-  const tariff = cost.tariff && sameModel && (!modelLabel || cost.tariff.model === modelLabel) ? cost.tariff : null;
-  const rates = cost.rates && sameModel ? cost.rates : null;
+  const cardIsCurrent = Boolean(api && cost.rates && cost.rates.match !== 'recovered');
+  const tariff = cost.tariff && (cardIsCurrent || sameModel) && (!modelLabel || cost.tariff.model === modelLabel) ? cost.tariff : null;
+  const rates = cost.rates && (cardIsCurrent || sameModel) ? cost.rates : null;
+  const steps = data.stepsKnown ?? data.totals?.steps ?? 0;
+
+  // Without a book the service sends the recorded cost and rates recovered from
+  // its steps. That path keeps its own drawing: an older service must read
+  // exactly as it did.
+  if (!api) {
+    paintRecoveredRates(cost, rates, tariff);
+    return;
+  }
+
+  const waitline = steps === 0;
+
+  if (!rates && !tariff) {
+    const line = el('div', 'rate-source');
+    line.textContent = waitline ? 'waiting for the first step' : 'no published rate';
+    ui.costRates.replaceChildren(line);
+    ui.costRates.title = waitline
+      ? 'no step has finished yet; the first one brings this session’s rates'
+      : 'this model has no published rate, and the meter does not guess one from a neighbour';
+    return;
+  }
+
+  if (cost.priceNote === 'free' && rates) {
+    const line = el('div', 'rate-source');
+    line.textContent = `free · in ${listRate(0)} · out ${listRate(0)} · read ${listRate(0)} · write ${listRate(0)}`;
+    ui.costRates.replaceChildren(line);
+    ui.costRates.title = `${rates.provider}/${rates.model} is published at zero; these tokens would cost nothing at list price`;
+    return;
+  }
+
+  if (tariff?.tiers) {
+    const peak = Boolean(tariff.peak);
+    const active = peak ? tariff.tiers.peak : tariff.tiers.offPeak;
+    const other = peak ? tariff.tiers.offPeak : tariff.tiers.peak;
+    const from = tariff.source === 'recovered' ? 'billed rates' : (rates?.source ?? 'published card');
+    ui.costRates.replaceChildren(
+      rateHead(),
+      rateRow(peak ? 'peak now' : 'off-peak now', active, { active: true, tier: peak ? 'peak' : 'off-peak' }),
+      rateRow(peak ? 'off-peak' : 'peak', other, { active: false, tier: peak ? 'off-peak' : 'peak' }),
+      sourceLine({ ...cost, rates: rates ?? cost.rates }, from),
+    );
+    ui.costRates.title = `${from} · ${tariff.provider === 'opencode-go' ? 'OpenCode Go' : tariff.provider} peak: ${tariff.window}; peak is ${tariff.multiplier}× off-peak. ${
+      tariff.holidayYear
+        ? `Chinese public holidays are off-peak (${tariff.holidayYear} calendar${tariff.holidayStale ? '; update it for the current year' : ''}). `
+        : ''
+    }${tariff.source === 'recovered' ? 'rates recovered from this session’s step costs' : 'rates from the published price card'}.`;
+    return;
+  }
+
+  const label =
+    rates.match === 'recovered'
+      ? 'billed'
+      : rates.match === 'override'
+        ? 'manual'
+        : rates.tier
+          ? `context >${compact(rates.tier.minContext)}`
+          : 'list';
+  ui.costRates.replaceChildren(rateHead(), rateRow(label, rates), sourceLine(cost, rates.source));
+  ui.costRates.title = ratesTitle(cost, rates.source);
+}
+
+/** The no-book drawing: recovered rates only, exactly as the meter always drew them. */
+function paintRecoveredRates(cost, rates, tariff) {
   if (tariff?.tiers) {
     const peak = Boolean(tariff.peak);
     const active = peak ? tariff.tiers.peak : tariff.tiers.offPeak;
@@ -283,11 +445,7 @@ function paintCost(data) {
       tariff.holidayYear
         ? `Chinese public holidays are off-peak (${tariff.holidayYear} calendar${tariff.holidayStale ? '; update it for the current year' : ''}). `
         : ''
-    }${
-      tariff.source === 'recovered'
-        ? 'rates recovered from this session’s step costs'
-        : 'rates from the published price card'
-    }.`;
+    }${tariff.source === 'recovered' ? 'rates recovered from this session’s step costs' : 'rates from the published price card'}.`;
     return;
   }
   ui.costRates.replaceChildren(

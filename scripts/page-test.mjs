@@ -227,6 +227,25 @@ const harness = `<!doctype html><meta charset="utf-8"><title>page test</title>
         color: getComputedStyle(node).color,
         cells: [...node.querySelectorAll('.rate-num')].map((cell) => cell.textContent),
       })),
+      costRows: [...doc.querySelectorAll('.cost-rates .rate-row:not(.rate-head)')].map((node) => ({
+        label: (node.querySelector('.rate-name') || {}).textContent ?? '',
+        cells: [...node.querySelectorAll('.rate-num')].map((cell) => cell.textContent),
+        active: node.getAttribute('data-active'),
+        tier: node.getAttribute('data-tier'),
+        color: getComputedStyle(node).color,
+      })),
+      costTotal: (doc.querySelector('.cost-total') || {}).textContent,
+      costTotalTitle: (doc.querySelector('.cost-total') || {}).title ?? null,
+      costTurn: (doc.querySelector('.cost-turn') || {}).textContent,
+      costModel: (doc.querySelector('.cost-model') || {}).textContent,
+      costRate: (doc.querySelector('.cost-rate') || {}).textContent,
+      apiBadge: doc.querySelector('.api-badge') ? !doc.querySelector('.api-badge').hidden : null,
+      costSource: (doc.querySelector('.cost-rates .rate-source') || {}).textContent ?? null,
+      costFlag: (doc.querySelector('.cost-rates .rate-flag') || {}).textContent ?? null,
+      costOverflow: (() => {
+        const node = doc.querySelector('.cost-rates');
+        return node ? node.scrollWidth - node.clientWidth : null;
+      })(),
       costRatesTitle: (doc.querySelector('.cost-rates') || {}).title,
       ttftFont: (() => {
         const cell = [...doc.querySelectorAll('.totals-grid .cell')].find((node) => node.querySelector('.cell-label')?.textContent === 'TTFT');
@@ -593,6 +612,221 @@ try {
     String(noCache.costRatesTitle),
   );
 
+  // ------------------------------------------------------------ API value
+  // The same block when the service sends a booked price: API value as the
+  // headline, billed beside it, four published rates and their source.
+  const CLAUDE_CARD = {
+    cacheRead: 0.2,
+    cacheWrite: 5,
+    checkedAt: '2026-11-14',
+    input: 4,
+    match: 'alias',
+    model: 'claude-opus-5-5',
+    name: 'Claude Opus 5.5',
+    output: 20,
+    provider: 'anthropic',
+    source: 'Anthropic list',
+    tier: null,
+    timeTier: null,
+  };
+  const priced = (cost = {}) => ({
+    ...state(),
+    cost: {
+      billed: { lastTurn: 0, perMillion: 0, total: 0 },
+      coverage: 1,
+      drift: null,
+      lastTurn: 0.42,
+      lowerBound: false,
+      mode: 'api',
+      perMillion: 0.081,
+      priceNote: 'noBilledCost',
+      rates: CLAUDE_CARD,
+      ratesNote: null,
+      tariff: null,
+      total: 1180,
+      ...cost,
+    },
+  });
+
+  await panel.set(priced());
+  const claudeUi = await panel.read();
+  check(
+    'UI-01 the total is API value with a badge',
+    claudeUi.costTotal === '$1,180.00' && claudeUi.apiBadge === true,
+    `${claudeUi.costTotal}, badge ${claudeUi.apiBadge}`,
+  );
+  check(
+    'UI-02 four published rates and the card source',
+    claudeUi.costRows.length === 1 &&
+      claudeUi.costRows[0].cells.length === 4 &&
+      claudeUi.costRows[0].cells.join('|') === '$4.00|$20.00|$0.20|$5.00' &&
+      /Anthropic list · 2026-11-14/.test(claudeUi.costSource ?? ''),
+    `${claudeUi.costSource} · ${JSON.stringify(claudeUi.costRows)}`,
+  );
+  check('UI-02 the model cell names the card', claudeUi.costModel === 'Claude Opus 5.5', String(claudeUi.costModel));
+  check(
+    'UI-02 the last turn is API value too',
+    claudeUi.costTurn === '$0.4200',
+    String(claudeUi.costTurn),
+  );
+
+  const gptCard = { ...CLAUDE_CARD, cacheRead: 0.05, cacheWrite: 1.25, input: 1, match: 'exact', model: 'gpt-6.1-terra', name: 'GPT-6.1 Terra', output: 5, provider: 'openai', source: 'OpenAI list' };
+  await panel.set(priced({ lastTurn: 0.11, rates: gptCard, total: 31.43 }));
+  const gptUi = await panel.read();
+  check(
+    'UI-03 an OpenAI session shows its own card',
+    gptUi.costTotal === '$31.43' && gptUi.costModel === 'GPT-6.1 Terra' && /OpenAI list/.test(gptUi.costSource ?? ''),
+    `${gptUi.costTotal} ${gptUi.costModel} ${gptUi.costSource}`,
+  );
+
+  const ccCard = { ...CLAUDE_CARD, model: 'deepseek/deepseek-v4.1-flash', name: 'DeepSeek V4.1 Flash', provider: 'commandcode', source: 'Command Code list' };
+  await panel.set(priced({ rates: ccCard, total: 12.4 }));
+  const ccUi = await panel.read();
+  check(
+    'UI-04 a Command Code session shows its own card',
+    ccUi.costTotal === '$12.40' && /Command Code list/.test(ccUi.costSource ?? ''),
+    `${ccUi.costTotal} ${ccUi.costSource}`,
+  );
+
+  const goCard = { ...CLAUDE_CARD, cacheRead: 0.003, cacheWrite: 0, input: 0.15, match: 'exact', model: 'deepseek-v4.1-flash', name: 'DeepSeek V4.1 Flash', output: 0.6, provider: 'opencode-go', source: 'OpenCode Go card', timeTier: 'peak' };
+  const goTariff = { ...state().cost.tariff, source: 'card' };
+  await panel.set(priced({ rates: goCard, tariff: goTariff, total: 1.5 }));
+  const goPeakUi = await panel.read();
+  check(
+    'UI-05 the active peak row comes first, four cells',
+    goPeakUi.costRows.length === 2 &&
+      goPeakUi.costRows[0].label === 'peak now' &&
+      goPeakUi.costRows[0].active === 'true' &&
+      goPeakUi.costRows[0].cells.length === 4 &&
+      goPeakUi.costRows[0].cells.join('|') === '$0.30|$1.20|$0.006|$0' &&
+      goPeakUi.costRows[1].active === 'false',
+    JSON.stringify(goPeakUi.costRows),
+  );
+  check(
+    'UI-05 the active peak row keeps its colour',
+    goPeakUi.costRows[0].color === 'rgb(245, 158, 11)',
+    String(goPeakUi.costRows[0].color),
+  );
+
+  await panel.set(priced({ rates: { ...goCard, timeTier: 'off-peak' }, tariff: { ...goTariff, peak: false }, total: 0.75 }));
+  const goOffUi = await panel.read();
+  check(
+    'UI-06 the active off-peak row comes first',
+    goOffUi.costRows[0].label === 'off-peak now' &&
+      goOffUi.costRows[0].cells.join('|') === '$0.15|$0.60|$0.003|$0' &&
+      goOffUi.costRows[1].label === 'peak',
+    JSON.stringify(goOffUi.costRows),
+  );
+
+  await panel.set(priced({ total: 4 }));
+  const flatUi = await panel.read();
+  check(
+    'UI-07 a flat card is one list row',
+    flatUi.costRows.length === 1 && flatUi.costRows[0].label === 'list' && flatUi.costRows[0].cells.length === 4,
+    JSON.stringify(flatUi.costRows),
+  );
+
+  await panel.set(priced({ rates: { ...CLAUDE_CARD, checkedAt: null, match: 'recovered', name: null, model: 'deepseek-v4.1-flash', provider: 'requesty', source: 'billed rates' }, total: 0.44 }));
+  const billedUi = await panel.read();
+  check(
+    'UI-08 recovered rates are labeled as billed',
+    billedUi.costRows.length === 1 && billedUi.costRows[0].label === 'billed' && /billed rates/.test(billedUi.costSource ?? ''),
+    `${billedUi.costRows[0]?.label} ${billedUi.costSource}`,
+  );
+
+  await panel.set(priced({ lastTurn: null, perMillion: null, priceNote: 'noPrice', rates: null, total: null }));
+  const noPriceUi = await panel.read();
+  check(
+    'UI-09 no card reads as no published rate',
+    noPriceUi.costTotal === '—' && noPriceUi.costSource === 'no published rate',
+    `${noPriceUi.costTotal} ${noPriceUi.costSource}`,
+  );
+
+  await panel.set(priced({ coverage: 0.5, lowerBound: true, priceNote: 'partial', total: 12 }));
+  const partialUi = await panel.read();
+  check(
+    'UI-10 a partial tree carries the floor mark',
+    partialUi.costTotal === '≥ $12.00' && /lower bound/.test(partialUi.costTotalTitle ?? ''),
+    `${partialUi.costTotal} ${String(partialUi.costTotalTitle).slice(0, 60)}`,
+  );
+
+  await panel.set(
+    priced({
+      models: [
+        { apiValue: 1180, billed: 0, model: 'claude-opus-5-5', name: 'Claude Opus 5.5', provider: 'anthropic', rates: CLAUDE_CARD },
+        { apiValue: 31.43, billed: 0, model: 'gpt-6.1-terra', name: 'GPT-6.1 Terra', provider: 'openai', rates: gptCard },
+      ],
+    }),
+  );
+  const multiUi = await panel.read();
+  check(
+    'UI-11 a multi-model tree says so',
+    /\+1 model\b/.test(multiUi.costSource ?? '') && /Claude Opus 5\.5/.test(multiUi.costRatesTitle ?? ''),
+    `${multiUi.costSource} · ${String(multiUi.costRatesTitle).slice(0, 80)}`,
+  );
+
+  await panel.set(priced({ billed: { lastTurn: 0, perMillion: 0, total: 1156.86 }, drift: { model: 'claude-opus-5-5', relative: 0.02 }, priceNote: 'drift' }));
+  const driftUi = await panel.read();
+  check(
+    'UI-12 drift is a flag, never a prefix',
+    driftUi.costFlag === ' price drift' &&
+      driftUi.costTotal === '$1,180.00' &&
+      !/≈/.test(driftUi.costTotal ?? '') &&
+      /1156\.8600/.test(driftUi.costRatesTitle ?? ''),
+    `${driftUi.costTotal} ${driftUi.costFlag} ${String(driftUi.costRatesTitle).slice(0, 90)}`,
+  );
+
+  await panel.set(priced({ rates: ccCard, total: 12.4 }));
+  const switchedUi = await panel.read();
+  check(
+    'UI-13 a new model leaves no stale card',
+    switchedUi.costModel === 'DeepSeek V4.1 Flash' && /Command Code/.test(switchedUi.costSource ?? '') && !/Anthropic/.test(switchedUi.costSource ?? ''),
+    `${switchedUi.costModel} ${switchedUi.costSource}`,
+  );
+
+  await panel.set(priced({ total: 0.0842 }));
+  const tinyUi = await panel.read();
+  check('UI-14 small money keeps four decimals', tinyUi.costTotal === '$0.0842', String(tinyUi.costTotal));
+  check(
+    'UI-15 the rates tooltip names source, date and match',
+    /Anthropic list/.test(claudeUi.costRatesTitle ?? '') &&
+      /2026-11-14/.test(claudeUi.costRatesTitle ?? '') &&
+      /matched by alias/.test(claudeUi.costRatesTitle ?? ''),
+    String(claudeUi.costRatesTitle),
+  );
+
+  await panel.set({ ...priced({ lastTurn: null, perMillion: null, priceNote: 'noPrice', rates: null, total: null }), stepsKnown: 0 });
+  const emptyUi = await panel.read();
+  check(
+    'UI-16 an empty session waits for its first step',
+    emptyUi.costTotal === '—' && emptyUi.costSource === 'waiting for the first step',
+    `${emptyUi.costTotal} ${emptyUi.costSource}`,
+  );
+
+  const freeCard = { ...CLAUDE_CARD, cacheRead: 0, cacheWrite: 0, input: 0, model: 'muse-spark-1.3-contributor-free', name: 'Muse Spark 1.3 Free', output: 0, provider: 'opencode', source: 'OpenCode Zen list' };
+  await panel.set(priced({ lastTurn: 0, priceNote: 'free', rates: freeCard, total: 0 }));
+  const freeUi = await panel.read();
+  check(
+    'UI-17 a free model reads as free, not as a dash',
+    freeUi.costTotal === '$0.0000' && /^free · in \$0 · out \$0 · read \$0 · write \$0$/.test(freeUi.costSource ?? ''),
+    `${freeUi.costTotal} ${freeUi.costSource}`,
+  );
+
+  await panel.set(priced());
+  const fitUi = await panel.read();
+  check('UI-18 the rates row does not overflow the rail', fitUi.costOverflow === 0, `${fitUi.costOverflow}px`);
+
+  await panel.set(state());
+  const legacyUi = await panel.read();
+  check(
+    'UI-19 a service without a book claims nothing',
+    legacyUi.apiBadge === false &&
+      legacyUi.costTotal === '$0.3100' &&
+      legacyUi.costRows.length === 2 &&
+      legacyUi.costRows[0].label === 'peak now',
+    `${legacyUi.costTotal} badge ${legacyUi.apiBadge}, ${legacyUi.costRows.length} rows`,
+  );
+
   await panel.set({ ...state(), stepsKnown: 5 });
   const totalCount = await panel.read();
   check('panel counts steps older than the drawn list', /5 steps/.test(totalCount.text), totalCount.text.slice(0, 120));
@@ -926,6 +1160,11 @@ try {
     sIdle.text.slice(-80),
   );
   check('status shows the last measured step', /last 33 t\/s/.test(sIdle.text), sIdle.text.slice(0, 60));
+  check(
+    'UI-20 the status frame keeps its own drawing',
+    /IN/.test(sIdle.text) && !/API/.test(sIdle.text) && !/\$/.test(sIdle.text),
+    sIdle.text.slice(0, 60),
+  );
   check(
     'status colours the last measured step by its tier',
     sIdle.lastRateTier === 'steady' && sIdle.lastRateColor === 'rgb(118, 172, 79)' && sIdle.lastRateShadow === 'none',
