@@ -290,6 +290,14 @@ const harness = `<!doctype html><meta charset="utf-8"><title>page test</title>
         return svg ? svg.clientWidth : null;
       })(),
       gridLabels: [...doc.querySelectorAll('[data-chart="live"] [data-role="grid-label"]')].map((n) => n.textContent),
+      peakLineY: (() => {
+        const line = doc.querySelector('[data-chart="live"] line[data-role="live-peak"]');
+        return line ? Number(line.getAttribute('y1')) : null;
+      })(),
+      avgLineY: (() => {
+        const line = doc.querySelector('[data-chart="live"] line[data-role="live-avg"]');
+        return line ? Number(line.getAttribute('y1')) : null;
+      })(),
       timeGrid: doc.querySelectorAll('[data-chart="live"] line[data-role="time-grid"]').length,
       peakText: (doc.querySelector('.axis-peak') || {}).textContent,
       stepsPeakTop: (() => {
@@ -460,7 +468,11 @@ try {
   check('panel draws the consumed total', idle.values.some((v) => v.startsWith('49.2M')), idle.values.join(' | '));
   check('panel draws the measured ttft', idle.values.some((v) => v.includes('6.5 s')), idle.values.join(' | '));
   check('panel labels the average and the peak', idle.labels.some((l) => l.startsWith('avg 79')) && idle.labels.some((l) => l.startsWith('peak 334')), idle.labels.join(' | '));
-  check('panel makes the live curve use the full chart height', idle.liveTopY === 8, String(idle.liveTopY));
+  check(
+    'panel draws the curve under the peak line, not over it',
+    idle.livePolyline && idle.liveTopY > idle.peakLineY && idle.liveTopY > 8,
+    `curve ${idle.liveTopY}, peak line ${idle.peakLineY}`,
+  );
   check(
     'panel labels the live scale at half and full height',
     idle.gridLabels.length === 2 &&
@@ -987,9 +999,8 @@ try {
     switched.tps === '0' &&
       switched.tpsTier === null &&
       switched.lastRateTier === null &&
-      switched.lastRateText === '' &&
-      switched.liveTopY === 8,
-    `${switched.tps} ${switched.tpsTier} ${switched.lastRateTier} ${JSON.stringify(switched.lastRateText)} ${switched.liveTopY}`,
+      switched.lastRateText === '',
+    `${switched.tps} ${switched.tpsTier} ${switched.lastRateTier} ${JSON.stringify(switched.lastRateText)}`,
   );
 
   // A slow service must not leave the old session's numbers under the new
@@ -1180,7 +1191,36 @@ try {
 
   const low = await run('panel-low');
   const lowRate = await low.read();
-  check('panel fills the chart for a low rate too', lowRate.liveTopY === 8, `${lowRate.liveTopY} at ${lowRate.tps} t/s`);
+  check(
+    'panel scales the plot to the session peak, not the window',
+    lowRate.liveTopY > 8 && lowRate.peakLineY === 8 && lowRate.gridLabels[0] === '334',
+    `curve ${lowRate.liveTopY}, peak line ${lowRate.peakLineY}, axis ${lowRate.gridLabels[0]}`,
+  );
+
+  // The red line is the plot's ceiling: it sits on the top edge and stays there
+  // between reads, instead of drifting down while an old scale eased away.
+  const steady = await panel.read();
+  check(
+    'panel pins the peak line to the top of the plot',
+    steady.peakLineY === 8 && steady.gridLabels[0] === '334',
+    `y ${steady.peakLineY}, axis ${steady.gridLabels[0]}`,
+  );
+  // A sustained burst, not one sample: the curve is smoothed, so a single
+  // 250 ms spike never reaches the peak and must not move the line.
+  await panel.set(state({ series: { d: [0, 250, 500, 750, 1000, 1250], step: 250, t0: Date.now() - 6_000, v: [30, 900, 900, 900, 900, 900] } }));
+  const burst = await panel.read();
+  check(
+    'panel dips the peak line only for a live sample above the peak',
+    burst.peakLineY > 8,
+    `y ${burst.peakLineY} with a sustained 900 t/s burst`,
+  );
+  await panel.set(state());
+  const settled = await panel.read();
+  check(
+    'panel returns the peak line to the top as soon as the burst passes',
+    settled.peakLineY === 8,
+    `y ${settled.peakLineY}`,
+  );
 
   // --- the Work Status section --------------------------------------------
   const status = await run('status');

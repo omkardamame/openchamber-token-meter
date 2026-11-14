@@ -1,7 +1,7 @@
 import { HostRequestError, connectHost } from '@openchamber/sdk';
 import { applyHostReady, mountBanner, mountEmpty } from '@openchamber/sdk/ui';
 import { compact, duration, seconds } from '../../shared/summary.js';
-import { easeToward, nextScale, seriesPoints, smoothPath } from '../../shared/chart.js';
+import { easeToward, seriesPoints, smoothPath } from '../../shared/chart.js';
 import { dotState, mountCells, paintCells } from '../../shared/cells.js';
 import { el } from '../../shared/dom.js';
 import { speedTier } from '../../shared/speed-color.js';
@@ -22,7 +22,6 @@ let ui = null;
 let current = null;
 let rowNodes = new Map();
 let receivedAt = 0;
-let liveScale = 1;
 let lastSteps = [];
 let lastStepsSeq = -1;
 let targetTps = 0;
@@ -508,10 +507,8 @@ function drawLive(data) {
   // Draw a smoothed curve first: the samples are a 250 ms average already, and
   // the providers arrive in bursts, so a short exponential pass keeps the shape
   // without inventing points the service did not measure. The scale follows the
-  // smoothed peak, so the highest point the chart draws touches the top and the
-  // rail spends its height on the curve instead of reserving headroom nobody
-  // uses. Growing is immediate; a peak leaving the window lowers the scale
-  // slowly, which only ever adds temporary headroom, never clips.
+  // session's peak, so the plot's top is the number on the red line and the
+  // line cannot drift; only a live estimate above that peak raises the ceiling.
   const smooth = [];
   for (const point of visible) {
     const previous = smooth[smooth.length - 1];
@@ -519,10 +516,14 @@ function drawLive(data) {
     smooth.push(value);
   }
   const liveTop = smooth.reduce((best, value) => Math.max(best, value), 0);
-  // Follow the peak, however low: a 3 t/s stream should fill the plot too. Only
-  // an empty window keeps the 8 t/s floor, where the value is 0 anyway.
-  liveScale = nextScale(liveScale, [liveTop > 0 ? liveTop : 8]);
-  const max = Math.max(1, liveScale);
+  // The top of the plot is the session's peak: its fastest finished step. The
+  // red line sits on that edge and the curve scales under it, so the line means
+  // what its label says instead of sliding as the window's own maximum moved.
+  // The window's smoothed top still sets the scale when it beats the peak — a
+  // live estimate is allowed to exceed the best finished step, and that sample
+  // must not be drawn above the plot. The 8 t/s floor is for an empty window,
+  // where every value on the axis would otherwise be zero.
+  const max = Math.max(8, rates.peak, liveTop);
   // References above the visible peak sit on the top edge rather than leaving
   // the plot; the drawn curve itself can never exceed `max`.
   const share = (value) => Math.min(1, Math.max(0, value) / max);
@@ -571,7 +572,7 @@ function drawLive(data) {
     const y = lineY(rates.avg);
     avgLabelY = y < pad + 10 ? y + 11 : y - 4;
     pieces.push(
-      `<line x1="0" y1="${y.toFixed(1)}" x2="${width}" y2="${y.toFixed(1)}" stroke="var(--oc-success)" stroke-width="1" stroke-dasharray="3 3" opacity="0.7" />`,
+      `<line x1="0" y1="${y.toFixed(1)}" x2="${width}" y2="${y.toFixed(1)}" stroke="var(--oc-success)" stroke-width="1" stroke-dasharray="3 3" opacity="0.7" data-role="live-avg" />`,
       `<text x="${width - 2}" y="${avgLabelY.toFixed(1)}" text-anchor="end" fill="var(--oc-success)" font-size="9.5" opacity="0.85">avg ${Math.round(rates.avg)} t/s</text>`,
     );
   }
@@ -587,7 +588,7 @@ function drawLive(data) {
     }
     if (labelY > height - 2) labelY = (avgLabelY ?? labelY) - 13;
     pieces.push(
-      `<line x1="0" y1="${y.toFixed(1)}" x2="${width}" y2="${y.toFixed(1)}" stroke="var(--oc-error)" stroke-width="1" stroke-dasharray="6 3 2 3" opacity="0.65" />`,
+      `<line x1="0" y1="${y.toFixed(1)}" x2="${width}" y2="${y.toFixed(1)}" stroke="var(--oc-error)" stroke-width="1" stroke-dasharray="6 3 2 3" opacity="0.65" data-role="live-peak" />`,
       `<text x="${width - 2}" y="${labelY.toFixed(1)}" text-anchor="end" fill="var(--oc-error)" font-size="9.5" opacity="0.95">peak ${Math.round(rates.peak)} t/s</text>`,
     );
   }
@@ -1093,7 +1094,6 @@ host.onReady((ctx) => {
   lastRounded = 0;
   streamingNow = false;
   lastTier = '';
-  liveScale = 1;
   ui.tpsValue.textContent = '0';
   delete ui.tpsValue.dataset.tier;
   ui.lastRate.textContent = '';
@@ -1116,9 +1116,6 @@ host.onReady((ctx) => {
   paintSubagents([], 0, 0);
   drawSteps({ steps: [], stepsKnown: 0 });
   drawLive({ points: [], rates: { avg: 0, peak: 0 } });
-  // An empty window raises the curve's floor to 8 t/s; the session that follows
-  // must be free to choose its own scale from the first sample.
-  liveScale = 1;
   ui.source.textContent = '';
   if (!sessionId) {
     ui.app.style.display = 'none';
