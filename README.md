@@ -32,16 +32,61 @@ https://github.com/omkardamame/openchamber-token-meter.git
 - **Subagents** — each subagent still working, its own live rate, and how many
   of the tree are running.
 - **Totals** — In, Out, Think, Total out, Cache, Cache hit, TTFT, Consumed.
-- **Cost** — the session's total, the last turn, the model, its blended cost
-  per million and its actual input, output and cache-hit rates. A model with
-  published peak and off-peak pricing shows both, with the tier active now
-  marked. The last turn's cost also sits at the end of the last measured step's
+- **Cost** — the session's **API value**: what its tokens would cost at the
+  model's published list rates, for the session and its subagents. The recorded
+  charge sits beside it as `billed`, which is `$0` on a subscription. The model's
+  own four rates (in, out, cache read, cache write) and where they came from are
+  written underneath; a time-tiered model shows both sides with the active one
+  first. The last turn's value also sits at the end of the last measured step's
   line.
 - **Per step** — the session's step count and its last 1,000 steps, with a
   start/now time axis, orange for the session and blue for a subagent, the green
   average and the red best step.
 - **Work Status** — the same speed and totals as a compact strip in the chat
   panel, so the speed sits next to the conversation.
+
+## API value, and what is billed
+
+Most OpenCode users are on a subscription or a plan, and OpenCode records
+`cost: 0` for those sessions. A meter that shows the recorded cost therefore
+shows `$0.0000` for a Claude or ChatGPT plan that is doing real work. **API
+value** answers the other question: what would these tokens cost at the model's
+published list price? It is a counterfactual, and it is never called spend — the
+recorded charge stays visible as `billed`.
+
+Prices come from a committed snapshot, `shared/price-book.js`, generated from
+[models.dev](https://models.dev) (MIT) by `scripts/sync-prices.mjs` and covering
+Anthropic, OpenAI, OpenCode Go, Command Code, OpenCode Zen and DeepSeek. The
+service makes **no pricing request at runtime**: a price change arrives with a
+release, and the source line under the rates carries the snapshot's date.
+
+A model is matched in this order, and the exact match is recorded:
+
+| Match | Meaning |
+|---|---|
+| `exact` | the provider and model id are in the book (a case difference still counts) |
+| `alias` | a short name the vendor's own client uses, such as `opus` or `haiku` |
+| `bare` | the id without its first path segment (`deepseek/deepseek-v4.1-flash`) |
+| `family` | a known family name, resolved to its newest release |
+| `lab` | a Command Code model priced from the lab that makes it |
+| `override` | a rate you wrote into `price-overrides.json` |
+
+An unknown model shows `no published rate`. The meter does not borrow a
+neighbour's price, and a partially priced tree is prefixed `≥`, because the rest
+of it has no published rate.
+
+Context tiers apply per step, so the same session can price its large requests
+at the higher band; time-of-day tariffs apply per step's own timestamp.
+
+**Reconciliation.** For a metered provider, API value is compared with what
+OpenCode recorded, per model. More than 1% apart shows a `price drift` flag and
+the tooltip names both numbers. That check is what keeps the snapshot honest:
+over 1,805 real OpenCode Go messages the two agree within 0.6–0.9%, and a model
+whose card disagrees is flagged rather than trusted.
+
+**Overrides.** `$OPENCHAMBER_SERVICE_DATA_DIR/price-overrides.json` takes four
+rates per `provider/model` key. All four are required, and a malformed entry is
+logged and ignored instead of half-applied. It is read once at start.
 
 ## Where the numbers come from
 
@@ -64,7 +109,8 @@ from OpenCode's per-step costs: each step gives one equation in input, generated
 and cache-read tokens, so a least-squares fit returns the provider's real linear
 price. It needs a few differently shaped steps; when a tier or a cache-write
 charge makes the cost non-linear, the rates are withheld instead of guessed.
-The blended effective rate sits beside them.
+Those recovered rates are the fallback when the book has no card for a model, and
+they are labelled `billed`. The blended effective rate sits beside them.
 
 For a provider/model pair with a published time-of-day tariff, both sides are
 named and the one active now is marked. The current cards are OpenCode Go's
@@ -73,9 +119,7 @@ DeepSeek models and DeepSeek's own API: peak is 2× off-peak, 01:00–04:00 and
 off-peak. DeepSeek's own API also treats Chinese public holidays as off-peak.
 The table is keyed by provider and model, so a different API keeps its own
 recovered rates; if that API has time tiers but no known schedule, the line
-says "multiple rates; no schedule" instead of applying the wrong card. The cards come from the provider's
-published rates, while the recovered rates still win whenever they match a
-side, so a price change shows up without a new version.
+says "multiple rates; no schedule" instead of applying the wrong card.
 
 Totals, per-step speed and TTFT are measured. The live `N t/s` is an estimate:
 streamed characters × a ratio learned from finished steps, kept per session so
@@ -87,6 +131,9 @@ two models in one tree do not share a ratio.
 - Needs OpenChamber 2.7.0 or newer.
 - A collapsed Work Status section shows only its title; OpenChamber's extension
   API has no slot for a value there, so leave it expanded.
+- The price book is a snapshot, not a live feed. Its date is under the rates, and
+  a model missing from it reads `no published rate` until a release adds it
+  (or you write an override).
 
 ## Changelog
 
