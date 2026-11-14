@@ -770,16 +770,16 @@ const claudeRun = withPrices('ses_price_book', 'claude-agent', 'claude-opus-5-5'
 const claudeSnap = priced(claudeRun, bookAt);
 check(
   'SN-01 the book prices the total as API value',
-  claudeSnap.cost.total === 4 && claudeSnap.cost.billed.total === 0,
-  `$${claudeSnap.cost.total} API, $${claudeSnap.cost.billed.total} billed`,
+  claudeSnap.cost.mode === 'api' && claudeSnap.cost.total === 4 && claudeSnap.cost.billed.total === 0,
+  `${claudeSnap.cost.mode}, $${claudeSnap.cost.total} API, $${claudeSnap.cost.billed.total} billed`,
 );
 const firstApi = claudeRun.derived.api;
 
 const legacySnap = snapshot(claudeRun, bookAt);
 check(
   'SN-02 without a book the total is still the billed cost',
-  legacySnap.cost.total === 0 && legacySnap.cost.priceNote === null && legacySnap.cost.lowerBound === false,
-  `$${legacySnap.cost.total}, priceNote ${legacySnap.cost.priceNote}`,
+  legacySnap.cost.mode === 'billed' && legacySnap.cost.total === 0 && legacySnap.cost.priceNote === null && legacySnap.cost.lowerBound === false,
+  `${legacySnap.cost.mode}, $${legacySnap.cost.total}, priceNote ${legacySnap.cost.priceNote}`,
 );
 
 check(

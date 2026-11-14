@@ -1250,6 +1250,7 @@ function snapshot(collector, now = Date.now(), tree = [collector], priceBook = n
       source: collector.totalsFrom
     },
     cost: priceBook ? {
+      mode: "api",
       total: round6(api.total),
       lastTurn: api.total === null ? null : round6(collector.turnStartedAt ? apiTurn : 0),
       perMillion: round6(api.perMillion),
@@ -1298,6 +1299,7 @@ function snapshot(collector, now = Date.now(), tree = [collector], priceBook = n
       } : {},
       tariff: tariffWire
     } : {
+      mode: "billed",
       total: totalCost,
       lastTurn: lastTurnCost,
       perMillion: consumed > 0 ? Math.round(totalCost / consumed * 1e6 * 1e4) / 1e4 : null,

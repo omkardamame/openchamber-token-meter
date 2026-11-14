@@ -991,6 +991,9 @@ export function snapshot(collector, now = Date.now(), tree = [collector], priceB
     },
     cost: priceBook
       ? {
+          // Which number the headline is. The panel must not paint a billed
+          // total as API value, and only the service knows which it sent.
+          mode: 'api',
           // Headline: the API value. What these tokens would cost at the
           // model's own published list rates, never what was billed.
           total: round6(api.total),
@@ -1051,6 +1054,7 @@ export function snapshot(collector, now = Date.now(), tree = [collector], priceB
       : {
           // No book: the recorded cost is the total, exactly as before. The
           // shape stays for anything that still asks for it.
+          mode: 'billed',
           total: totalCost,
           lastTurn: lastTurnCost,
           // Effective, not list price: every token and cache read in the cost.

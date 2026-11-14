@@ -356,6 +356,9 @@ New/updated `cost` object:
 
 ```js
 cost: {
+  // which number the headline is; the panel must never paint a billed total
+  // as API value. `billed` keeps the old shape for an older caller.
+  mode: 'api',                   // 'api' with a book, 'billed' without
   // headline: API value
   total: 1180.0,                 // null when no step is priced
   lastTurn: 0.42,                // null when no step is priced
