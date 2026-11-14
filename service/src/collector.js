@@ -1143,7 +1143,13 @@ export function snapshot(collector, now = Date.now(), tree = [collector], priceB
     // Every step the session and its subagents ran, not only the 1000 drawn.
     stepsKnown,
     // Worked out over every step, so the drawn average stays the session's.
-    rates: { avg: Math.round(rates.avg * 10) / 10, peak: Math.round(rates.peak * 10) / 10 },
+    rates: {
+      avg: Math.round(rates.avg * 10) / 10,
+      peak: Math.round(rates.peak * 10) / 10,
+      // When the best step ran. The chart pins its scale to that number, so the
+      // frame can say how old it is.
+      ...(rates.peakAt ? { peakAt: rates.peakAt } : {}),
+    },
     generatedAt: now,
   };
 }

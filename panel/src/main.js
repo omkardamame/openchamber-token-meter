@@ -265,10 +265,18 @@ function sourceLine(cost, source) {
   return line;
 }
 
+/** How old a price snapshot is, when it is old enough to say so (spec §9.3). */
+function snapshotAge(cost) {
+  const at = Date.parse(`${cost.rates?.checkedAt ?? ''}T00:00:00Z`);
+  if (!Number.isFinite(at)) return '';
+  const days = Math.floor((Date.now() - at) / 86_400_000);
+  return days > 30 ? `, ${days} days old` : '';
+}
+
 function ratesTitle(cost, source) {
   const parts = [];
   if (source) parts.push(source);
-  if (cost.rates?.checkedAt) parts.push(`snapshot ${cost.rates.checkedAt}`);
+  if (cost.rates?.checkedAt) parts.push(`snapshot ${cost.rates.checkedAt}${snapshotAge(cost)}`);
   if (cost.rates?.match) parts.push(`matched by ${cost.rates.match}`);
   if (cost.rates?.tier) parts.push(`above ${compact(cost.rates.tier.minContext)} tokens the context tier applies`);
   if (cost.drift) {
@@ -346,9 +354,14 @@ function paintCost(data) {
     ? `${cost.rates.provider}/${cost.rates.model}${cost.rates.source ? ` · ${cost.rates.source}` : ''}`
     : modelLabel || '';
 
-  ui.costRate.textContent = typeof cost.perMillion === 'number' ? `${rateMoney(cost.perMillion)} / 1M` : '—';
+  // A lower bound's effective rate is computed over the priced tokens only, so
+  // it wears the same `~` as the total (spec D13).
+  const effective = typeof cost.perMillion === 'number' ? `${rateMoney(cost.perMillion)} / 1M` : '—';
+  ui.costRate.textContent = cost.lowerBound && typeof cost.perMillion === 'number' ? `~${effective}` : effective;
   ui.costRate.title = api
-    ? `API value divided by every token this tree processed · billed ${rateMoney(cost.billed?.perMillion ?? 0)} / 1M`
+    ? `API value divided by ${
+        cost.lowerBound ? 'the tokens that have a published rate' : 'every token this tree processed'
+      } · billed ${rateMoney(cost.billed?.perMillion ?? 0)} / 1M`
     : 'effective: this session’s cost divided by every token it processed';
 
   // A card is resolved for the current model, so it is never stale. Recovered
@@ -409,7 +422,9 @@ function paintCost(data) {
       tariff.holidayYear
         ? `Chinese public holidays are off-peak (${tariff.holidayYear} calendar${tariff.holidayStale ? '; update it for the current year' : ''}). `
         : ''
-    }${tariff.source === 'recovered' ? 'rates recovered from this session’s step costs' : 'rates from the published price card'}.`;
+    }${tariff.source === 'recovered' ? 'rates recovered from this session’s step costs' : 'rates from the published price card'}.${
+      rates?.checkedAt ? ` Snapshot ${rates.checkedAt}${snapshotAge({ rates })}.` : ''
+    }`;
     return;
   }
 
@@ -578,6 +593,10 @@ function drawLive(data) {
   }
   if (rates.peak > 0) {
     const y = lineY(rates.peak);
+    // How old the best step is: the scale is pinned to it, so "peak 337" beside
+    // a 20 t/s stream needs the date to make sense.
+    const age = rates.peakAt ? duration(now - rates.peakAt) : '';
+    const peakLabel = `peak ${Math.round(rates.peak)} t/s${age ? ` · ${age} ago` : ''}`;
     // Keep the labels apart when the lines are close. Above the average label
     // when there is room, so the peak label stays beside its own (higher) line;
     // on the top edge, stack it below instead of clipping it.
@@ -589,7 +608,7 @@ function drawLive(data) {
     if (labelY > height - 2) labelY = (avgLabelY ?? labelY) - 13;
     pieces.push(
       `<line x1="0" y1="${y.toFixed(1)}" x2="${width}" y2="${y.toFixed(1)}" stroke="var(--oc-error)" stroke-width="1" stroke-dasharray="6 3 2 3" opacity="0.65" data-role="live-peak" />`,
-      `<text x="${width - 2}" y="${labelY.toFixed(1)}" text-anchor="end" fill="var(--oc-error)" font-size="9.5" opacity="0.95">peak ${Math.round(rates.peak)} t/s</text>`,
+      `<text x="${width - 2}" y="${labelY.toFixed(1)}" text-anchor="end" fill="var(--oc-error)" font-size="9.5" opacity="0.95">${peakLabel}</text>`,
     );
   }
 

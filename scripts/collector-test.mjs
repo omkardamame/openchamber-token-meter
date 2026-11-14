@@ -951,6 +951,22 @@ check(
   `${overrideFirst.cost.total} → ${overrideSecond.cost.total}`,
 );
 
+// The chart pins its scale to `rates.peak`; the frame needs that step's time to
+// say how old the number is. The explicit wire object is where fields get lost.
+const peakAgeRun = createCollector('ses_peak_age');
+peakAgeRun.steps = [
+  { aborted: false, at: 1_000, cacheRead: 0, cacheWrite: 0, cost: 0, model: 'm', ms: 1_000, tokens: 10, total: 10, tps: 10 },
+  { aborted: false, at: 9_000, cacheRead: 0, cacheWrite: 0, cost: 0, model: 'm', ms: 1_000, tokens: 50, total: 50, tps: 50 },
+  { aborted: false, at: 5_000, cacheRead: 0, cacheWrite: 0, cost: 0, model: 'm', ms: 1_000, tokens: 30, total: 30, tps: 30 },
+];
+peakAgeRun.stepsSeq = 1;
+const peakAgeSnap = snapshot(peakAgeRun, 10_000);
+check(
+  'SN-20 the wire says when the peak step ran',
+  peakAgeSnap.rates.peak === 50 && peakAgeSnap.rates.peakAt === 9_000,
+  JSON.stringify(peakAgeSnap.rates),
+);
+
 // A subagent whose history is longer than the kept list still counts in full.
 const knownRun = createCollector('ses_known_test');
 knownRun.knownSteps = 450;

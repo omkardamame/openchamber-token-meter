@@ -7,15 +7,18 @@ function ratesOf(steps) {
   let tokens = 0;
   let ms = 0;
   let peak = 0;
+  let peakAt = null;
   for (const step of steps ?? []) {
     if (!step?.tps || step.tps <= 0 || step.aborted)
       continue;
     tokens += step.tokens;
     ms += step.ms;
-    if (step.tps > peak)
+    if (step.tps > peak) {
       peak = step.tps;
+      peakAt = typeof step.at === "number" ? step.at : null;
+    }
   }
-  return { avg: ms > 0 ? tokens / ms * 1000 : 0, peak };
+  return { avg: ms > 0 ? tokens / ms * 1000 : 0, peak, peakAt };
 }
 
 // shared/pricing.js
@@ -1351,7 +1354,11 @@ function snapshot(collector, now = Date.now(), tree = [collector], priceBook = n
     steps: wire,
     stepsFrom: shownSteps[0]?.at ?? null,
     stepsKnown,
-    rates: { avg: Math.round(rates.avg * 10) / 10, peak: Math.round(rates.peak * 10) / 10 },
+    rates: {
+      avg: Math.round(rates.avg * 10) / 10,
+      peak: Math.round(rates.peak * 10) / 10,
+      ...rates.peakAt ? { peakAt: rates.peakAt } : {}
+    },
     generatedAt: now
   };
 }

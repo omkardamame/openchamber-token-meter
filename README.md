@@ -28,7 +28,9 @@ https://github.com/omkardamame/openchamber-token-meter.git
 - **Live `t/s`** — the sum of the session and every streaming subagent, coloured
   by speed tier (matte red, green, blue, golden, violet); the last measured step sits
   underneath in the same tier colours.
-- **Graph** — the last 60 seconds, with the session's average and best step marked.
+- **Graph** — the last 60 seconds. The plot is scaled to the session's peak
+  step, so the red `peak` line is the ceiling and carries the age of the step
+  that set it; the green `avg` line sits below. Above both is the live estimate.
 - **Subagents** — each subagent still working, its own live rate, and how many
   of the tree are running.
 - **Totals** — In, Out, Think, Total out, Cache, Cache hit, TTFT, Consumed.

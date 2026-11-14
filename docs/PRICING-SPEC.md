@@ -695,6 +695,7 @@ With the fixture book:
 | SN-17 | a second book, same steps | re-priced; the cache is keyed by the book |
 | SN-18 | a second override map, same steps | re-priced; the cache is keyed by the overrides |
 | SN-19 | partial tree | `cost.unpriced` names the models the `≥` leaves out |
+| SN-20 | `rates.peakAt` | the wire carries the peak step's own time |
 
 ### 11.6 Page
 
@@ -723,6 +724,9 @@ With the fixture book:
 | UI-21 | zero steps, known card | `waiting for the first step`, not a table of zeroes |
 | UI-22 | override / active tier | `manual` row; `context >Nk` row with that band's four rates |
 | UI-23 | partial total | the tooltip names the model the `≥` leaves out |
+| UI-24 | partial `Effective` | prefixed `~`, title says it covers priced tokens |
+| UI-25 | snapshot > 30 days | the tooltip appends how many days old it is |
+| UI-26 | peak label | says how long ago the peak step ran |
 
 ### 11.7 Live / integration
 
@@ -752,8 +756,8 @@ machine has `claude-agent` (16 messages) and `openai` (213) history but **no
 |---|---|---|
 | 0 | This spec, owner review | **approved 2026-11-14** — six providers, `≥` wins |
 | 1 | `shared/price-book.js`, resolver, fixtures, `price-test.mjs` | PR-01..36, CV-01..20 |
-| 2 | `snapshot` + service wiring + collector tests; key the recovered fit and its cache by `provider/model` | SN-01..19 |
-| 3 | Panel rendering + CSS + page tests | UI-01..23 |
+| 2 | `snapshot` + service wiring + collector tests; key the recovered fit and its cache by `provider/model` | SN-01..20 |
+| 3 | Panel rendering + CSS + page tests | UI-01..26 |
 | 4 | Reconciliation + live tests + browser proof | INT-01..12 |
 | 5 | README, CHANGELOG, release | `bun run verify`, secret scan, screenshot |
 

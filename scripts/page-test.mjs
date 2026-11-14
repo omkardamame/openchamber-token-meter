@@ -75,7 +75,7 @@ const state = (over = {}) =>
       { tokens: 900, ms: 5000, tps: 180, aborted: false, at: Date.now() - 30_000, cost: 0.0034 },
     ],
     turn: { active: false, startedAt: Date.now() - 90_000, tokens: 2000, steps: 2 },
-    rates: { avg: 79, peak: 334 },
+    rates: { avg: 79, peak: 334, peakAt: Date.now() - 8 * 60_000 },
     stream: { state: 'open' },
     loading: false,
     historyPartial: false,
@@ -239,6 +239,7 @@ const harness = `<!doctype html><meta charset="utf-8"><title>page test</title>
       costTurn: (doc.querySelector('.cost-turn') || {}).textContent,
       costModel: (doc.querySelector('.cost-model') || {}).textContent,
       costRate: (doc.querySelector('.cost-rate') || {}).textContent,
+      costRateTitle: (doc.querySelector('.cost-rate') || {}).title ?? null,
       apiBadge: doc.querySelector('.api-badge') ? !doc.querySelector('.api-badge').hidden : null,
       costSource: (doc.querySelector('.cost-rates .rate-source') || {}).textContent ?? null,
       costFlag: (doc.querySelector('.cost-rates .rate-flag') || {}).textContent ?? null,
@@ -766,6 +767,23 @@ try {
     /no rate for unknown\/model/.test(partialUi.costTotalTitle ?? ''),
     String(partialUi.costTotalTitle).slice(-80),
   );
+  check(
+    'UI-24 a lower bound marks the effective rate too',
+    /^~\$/.test(partialUi.costRate ?? '') && /published rate/.test(partialUi.costRateTitle ?? ''),
+    `${partialUi.costRate} · ${String(partialUi.costRateTitle).slice(0, 60)}`,
+  );
+
+  const staleCard = {
+    ...CLAUDE_CARD,
+    checkedAt: new Date(Date.now() - 61 * 86_400_000).toISOString().slice(0, 10),
+  };
+  await panel.set(priced({ rates: staleCard }));
+  const staleUi = await panel.read();
+  check(
+    'UI-25 a stale snapshot says how old it is',
+    /\d+ days old/.test(staleUi.costRatesTitle ?? ''),
+    String(staleUi.costRatesTitle).slice(0, 90),
+  );
 
   await panel.set(
     priced({
@@ -1204,6 +1222,11 @@ try {
     'panel pins the peak line to the top of the plot',
     steady.peakLineY === 8 && steady.gridLabels[0] === '334',
     `y ${steady.peakLineY}, axis ${steady.gridLabels[0]}`,
+  );
+  check(
+    'UI-26 the peak says how old it is',
+    /peak 334 t\/s · 8m 00s ago/.test(steady.text),
+    String(steady.text).slice(0, 90),
   );
   // A sustained burst, not one sample: the curve is smoothed, so a single
   // 250 ms spike never reaches the peak and must not move the line.

@@ -29,13 +29,19 @@ export function ratesOf(steps) {
   let tokens = 0;
   let ms = 0;
   let peak = 0;
+  let peakAt = null;
   for (const step of steps ?? []) {
     if (!step?.tps || step.tps <= 0 || step.aborted) continue;
     tokens += step.tokens;
     ms += step.ms;
-    if (step.tps > peak) peak = step.tps;
+    if (step.tps > peak) {
+      peak = step.tps;
+      // When the best step ran: the chart pins its scale to this number, so the
+      // frame has to be able to say how old it is.
+      peakAt = typeof step.at === 'number' ? step.at : null;
+    }
   }
-  return { avg: ms > 0 ? (tokens / ms) * 1000 : 0, peak };
+  return { avg: ms > 0 ? (tokens / ms) * 1000 : 0, peak, peakAt };
 }
 
 /**
