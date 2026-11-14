@@ -2,6 +2,7 @@
 // No DOM, no host: the server in ./main.js hands it an `apiGet` function.
 import { ratesOf } from '../../shared/chart.js';
 import { isPeakAt, tariffTiers, timeTariff } from '../../shared/pricing.js';
+import { computeApiValue, resolvePrice } from '../../shared/price-resolve.js';
 
 const HISTORY_PAGES = 20;
 const HISTORY_PAGE_SIZE = 100;
@@ -670,11 +671,15 @@ function treeStatus(collector, tree) {
  * instead of guessed. Costs are exact in OpenCode's records (measured: the
  * recovered rates matched the model card to the cent).
  */
-function modelRates(steps, model) {
+function modelRates(steps, model, provider = null) {
   if (!model) return null;
   const rows = [];
   for (const step of steps) {
     if (step.model !== model || !(step.cost > 0)) continue;
+    // Two providers can run the same model id at different prices, so the fit
+    // belongs to one provider. A step that recorded no provider came from the
+    // collector it is read under, so it counts.
+    if (provider && step.provider && step.provider !== provider) continue;
     const input = step.total - step.tokens;
     if (!(input >= 0) || !(step.cacheRead >= 0)) continue;
     rows.push([input, step.tokens, step.cacheRead, step.cost * 1e6]);
@@ -728,7 +733,7 @@ function modelRates(steps, model) {
   return { model, input: round(x[0]), output: round(x[1]), cacheRead: round(x[2]) };
 }
 
-export function snapshot(collector, now = Date.now(), tree = [collector]) {
+export function snapshot(collector, now = Date.now(), tree = [collector], priceBook = null, overrides = null) {
   const members = tree.length ? tree : [collector];
   const totals = emptyTotals();
   for (const member of members) {
@@ -820,12 +825,14 @@ export function snapshot(collector, now = Date.now(), tree = [collector]) {
   const model = collector.model ?? lastStepRaw?.model ?? null;
   // A least-squares solve over every step is the most expensive thing here, and
   // its inputs are the steps plus the model name, both already keyed above.
-  const modelKey = model ?? '';
+  // The key carries the provider too: the same model id can be priced by two
+  // providers, and one provider's steps must not price the other's.
+  const modelKey = `${collector.provider ?? ''}|${model ?? ''}`;
   let modelCostRates;
   if (derived.ratesByModel.has(modelKey)) {
     modelCostRates = derived.ratesByModel.get(modelKey);
   } else {
-    modelCostRates = modelRates(steps, model);
+    modelCostRates = modelRates(steps, model, collector.provider ?? null);
     derived.ratesByModel.set(modelKey, modelCostRates);
   }
   // A model with a published time-of-day tariff gets both sides drawn, with
@@ -842,6 +849,88 @@ export function snapshot(collector, now = Date.now(), tree = [collector]) {
       : pricedSteps.some((step) => step.cacheRead > 0)
         ? 'nonLinear'
         : 'noCache';
+  // API value: what these tokens would cost at list rates. Cached with the step
+  // list, because it depends on the steps, the book and the recovered fit, and
+  // never on the clock: the six-per-second snapshot only filters the turn.
+  let api = null;
+  let ratesCard = null;
+  if (priceBook) {
+    const apiKey = `${collector.provider ?? ''}|${model ?? ''}|${overrides ? 'override' : ''}`;
+    if (!derived.api || derived.apiKey !== apiKey) {
+      const recovered = modelCostRates
+        ? { model, provider: collector.provider ?? null, rates: modelCostRates }
+        : null;
+      derived.api = computeApiValue(priceBook, steps, {
+        model,
+        overrides,
+        provider: collector.provider ?? null,
+        recovered,
+      });
+      derived.apiKey = apiKey;
+    }
+    api = derived.api;
+    // The rates line is the current model's card, resolved at the prompt the
+    // last step carried so an active context tier shows what it really is.
+    const lastOfModel = [...steps].reverse().find((item) => item.model === model) ?? null;
+    const promptTokens = lastOfModel
+      ? Math.max(0, (lastOfModel.total ?? 0) - (lastOfModel.tokens ?? 0)) +
+        (lastOfModel.cacheRead ?? 0) +
+        (lastOfModel.cacheWrite ?? 0)
+      : 0;
+    ratesCard = resolvePrice(priceBook, {
+      at: now,
+      model,
+      overrides,
+      promptTokens,
+      provider: lastOfModel?.provider ?? collector.provider ?? null,
+    });
+    // No published card: the rates recovered from this provider's own recorded
+    // costs are the honest answer, and they say so.
+    if (!ratesCard && modelCostRates) {
+      ratesCard = {
+        checkedAt: null,
+        match: 'recovered',
+        model,
+        name: null,
+        provider: collector.provider ?? null,
+        rates: {
+          cacheRead: modelCostRates.cacheRead ?? 0,
+          cacheWrite: modelCostRates.cacheWrite ?? 0,
+          input: modelCostRates.input,
+          output: modelCostRates.output,
+        },
+        source: 'billed rates',
+        tier: null,
+        timeTier: null,
+      };
+    }
+  }
+  // The turn is a filter over the cached rows, never a second pass.
+  let apiTurn = 0;
+  let billedTurn = 0;
+  if (api && collector.turnStartedAt) {
+    for (const row of api.rows) {
+      if (!((row.at ?? 0) >= collector.turnStartedAt)) continue;
+      billedTurn += row.billed;
+      if (row.apiCost != null) apiTurn += row.apiCost;
+    }
+  }
+  const round6 = (value) => (typeof value === 'number' && Number.isFinite(value) ? Math.round(value * 1e6) / 1e6 : null);
+  const tariffWire = tariff
+    ? {
+        provider: collector.provider,
+        model,
+        peak: isPeakAt(now, tariff.schedule),
+        multiplier: tariff.peakMultiplier,
+        window: tariff.schedule.label,
+        holidayYear: tariff.schedule.holidayYear ?? null,
+        holidayStale: tariff.schedule.holidayYear
+          ? new Date(now).getUTCFullYear() > tariff.schedule.holidayYear
+          : false,
+        source: tiers.source,
+        tiers: { offPeak: tiers.offPeak, peak: tiers.peak },
+      }
+    : null;
   const status = treeStatus(collector, members);
   // Every subagent still working, with its own rate: the headline adds them up,
   // the list says what makes it. Eight is enough to draw; `running` keeps the
@@ -900,33 +989,89 @@ export function snapshot(collector, now = Date.now(), tree = [collector]) {
       cacheHitRate: prompt > 0 ? totals.cacheRead / prompt : 0,
       source: collector.totalsFrom,
     },
-    cost: {
-      total: totalCost,
-      lastTurn: lastTurnCost,
-      // Effective, not list price: every token and cache read in the cost.
-      perMillion: consumed > 0 ? Math.round((totalCost / consumed) * 1e6 * 1e4) / 1e4 : null,
-      // The model's own rates, recovered from its step costs; null when the
-      // steps cannot pin them down. `ratesNote` says why when they are null.
-      rates: modelCostRates,
-      ratesNote,
-      // Both sides of a published time-of-day tariff, and which one is active
-      // now. Null for the flat-priced models, which keep `rates` alone.
-      tariff: tariff
-        ? {
-            provider: collector.provider,
-            model,
-            peak: isPeakAt(now, tariff.schedule),
-            multiplier: tariff.peakMultiplier,
-            window: tariff.schedule.label,
-            holidayYear: tariff.schedule.holidayYear ?? null,
-            holidayStale: tariff.schedule.holidayYear
-              ? new Date(now).getUTCFullYear() > tariff.schedule.holidayYear
-              : false,
-            source: tiers.source,
-            tiers: { offPeak: tiers.offPeak, peak: tiers.peak },
-          }
-        : null,
-    },
+    cost: priceBook
+      ? {
+          // Headline: the API value. What these tokens would cost at the
+          // model's own published list rates, never what was billed.
+          total: round6(api.total),
+          lastTurn: api.total === null ? null : round6(collector.turnStartedAt ? apiTurn : 0),
+          perMillion: round6(api.perMillion),
+          // Secondary: what OpenCode recorded as charged. Zero on a plan.
+          billed: {
+            lastTurn: round6(collector.turnStartedAt ? billedTurn : 0),
+            perMillion: round6(api.billed.perMillion),
+            total: round6(api.billed.total),
+          },
+          // The current model's card, for the rates line.
+          rates: ratesCard
+            ? {
+                provider: ratesCard.provider,
+                model: ratesCard.model,
+                name: ratesCard.name,
+                input: ratesCard.rates.input,
+                output: ratesCard.rates.output,
+                cacheRead: ratesCard.rates.cacheRead,
+                cacheWrite: ratesCard.rates.cacheWrite,
+                source: ratesCard.source,
+                match: ratesCard.match,
+                checkedAt: ratesCard.checkedAt,
+                tier: ratesCard.tier,
+                timeTier: ratesCard.timeTier,
+              }
+            : null,
+          ratesNote,
+          priceNote: api.priceNote,
+          drift: api.drift,
+          coverage: Math.round(api.coverage * 1e6) / 1e6,
+          lowerBound: api.lowerBound,
+          // One model needs no list: `rates` above already is its card.
+          ...(api.models.length > 1
+            ? {
+                models: api.models.map((entry) => ({
+                  apiValue: round6(entry.apiValue),
+                  billed: round6(entry.billed),
+                  consumed: entry.consumed,
+                  coverage: Math.round(entry.coverage * 1e6) / 1e6,
+                  drift: entry.drift,
+                  match: entry.match,
+                  model: entry.model,
+                  name: entry.name,
+                  provider: entry.provider,
+                  rates: entry.rates,
+                  source: entry.source,
+                  steps: entry.steps,
+                  tier: entry.tier,
+                  timeTier: entry.timeTier,
+                  tokens: entry.tokens,
+                })),
+              }
+            : {}),
+          tariff: tariffWire,
+        }
+      : {
+          // No book: the recorded cost is the total, exactly as before. The
+          // shape stays for anything that still asks for it.
+          total: totalCost,
+          lastTurn: lastTurnCost,
+          // Effective, not list price: every token and cache read in the cost.
+          perMillion: consumed > 0 ? Math.round((totalCost / consumed) * 1e6 * 1e4) / 1e4 : null,
+          billed: {
+            lastTurn: lastTurnCost,
+            perMillion: consumed > 0 ? Math.round((totalCost / consumed) * 1e6 * 1e4) / 1e4 : null,
+            total: totalCost,
+          },
+          // The model's own rates, recovered from its step costs; null when the
+          // steps cannot pin them down. `ratesNote` says why when they are null.
+          rates: modelCostRates,
+          ratesNote,
+          priceNote: null,
+          drift: null,
+          coverage: 1,
+          lowerBound: false,
+          // Both sides of a published time-of-day tariff, and which one is active
+          // now. Null for the flat-priced models, which keep `rates` alone.
+          tariff: tariffWire,
+        },
     // What the running turn has used so far, counted from the same list the
     // chart draws: the frames say "this turn" without a second read.
     turn: {

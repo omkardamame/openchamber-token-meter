@@ -14,6 +14,8 @@ import {
   tick,
   wantsEvent,
 } from './collector.js';
+import { PRICE_BOOK } from '../../shared/price-book.js';
+import { loadPriceOverrides, priceOverrideFile } from './prices.js';
 
 const PORT = Number(process.env.OPENCHAMBER_SERVICE_PORT);
 const TOKEN = process.env.OPENCHAMBER_SERVICE_TOKEN ?? '';
@@ -46,9 +48,12 @@ if (!PORT || !TOKEN) {
   process.exit(1);
 }
 
-export function createService({ fetchImpl = fetch, log = () => {}, base = BASE, token = TOKEN, port = PORT } = {}) {
+export function createService({ fetchImpl = fetch, log = () => {}, base = BASE, token = TOKEN, port = PORT, priceBook = PRICE_BOOK, overrides = null, dataDir = process.env.OPENCHAMBER_SERVICE_DATA_DIR ?? null } = {}) {
   const collectors = new Map();
   const state = { stream: 'idle', streamError: null, stopping: false, controller: null, since: Date.now() };
+  // Prices are a committed snapshot plus an optional hand-written correction.
+  // Both are read once, here: no watcher, no per-poll file read.
+  const priceOverrides = overrides ?? loadPriceOverrides({ file: priceOverrideFile(dataDir), log });
 
   const upstreamIsLoopback = (() => {
     try {
@@ -463,7 +468,7 @@ export function createService({ fetchImpl = fetch, log = () => {}, base = BASE, 
       const first = collector.historyAt === 0;
       if (!base || !upstreamIsLoopback) {
         json(res, 200, {
-          ...snapshot(collector),
+          ...snapshot(collector, Date.now(), [collector], priceBook, priceOverrides),
           ok: false,
           error: !base
             ? 'OpenCode access is not available. Approve the extension in Settings → Extensions.'
@@ -497,7 +502,7 @@ export function createService({ fetchImpl = fetch, log = () => {}, base = BASE, 
       }
       const tree = treeOf(collector);
       tick(collector, now, tree);
-      const answer = snapshot(collector, now, tree);
+      const answer = snapshot(collector, now, tree, priceBook, priceOverrides);
       // The step list changes once per step; a client that already has this
       // sequence keeps its copy instead of receiving the same rows again.
       if (url.searchParams.get('steps') === String(answer.stepsSeq)) delete answer.steps;

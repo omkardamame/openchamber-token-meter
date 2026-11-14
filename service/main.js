@@ -119,6 +119,318 @@ function tariffTiers(tariff, rates = null) {
   return card;
 }
 
+// shared/price-resolve.js
+var FAMILIES = ["opus", "sonnet", "haiku", "fable"];
+var LAB_PREFIX = { "claude-": "anthropic", "gpt-": "openai" };
+var EIGHT = 0.000000001;
+function tierRate(cost, minContext) {
+  return { cacheRead: cost.cacheRead ?? 0, cacheWrite: cost.cacheWrite ?? 0, input: cost.input, minContext, output: cost.output };
+}
+function usableOverride(entry) {
+  if (!entry)
+    return null;
+  for (const key of ["input", "output", "cacheRead", "cacheWrite"]) {
+    const value = entry[key];
+    if (!Number.isFinite(value) || value < 0)
+      return null;
+  }
+  return entry;
+}
+function activeTier(card, promptTokens) {
+  if (!card?.tiers?.length)
+    return null;
+  let active = null;
+  for (const tier of card.tiers) {
+    if (tier.minContext <= promptTokens)
+      active = tier;
+  }
+  return active;
+}
+function bareId(model) {
+  const cut = model.indexOf("/");
+  return cut === -1 ? model : model.slice(cut + 1);
+}
+function resolvePrice(book, { provider, model, promptTokens = 0, at = Date.now(), overrides = null } = {}) {
+  if (!book?.providers || !provider || !model)
+    return null;
+  const aliases = book.aliases ?? {};
+  const priceProvider = aliases.providers?.[provider] ?? provider;
+  const cards = book.providers[priceProvider]?.models;
+  if (cards && cards[model])
+    return finish(book, priceProvider, model, cards[model], "exact", promptTokens, at, overrides);
+  if (cards) {
+    const lower = model.toLowerCase();
+    const sameModel = Object.keys(cards).filter((id) => id.toLowerCase() === lower);
+    if (sameModel.length === 1) {
+      return finish(book, priceProvider, sameModel[0], cards[sameModel[0]], "exact", promptTokens, at, overrides);
+    }
+  }
+  const aliasId = aliases.models?.[provider]?.[model];
+  if (aliasId && cards?.[aliasId]) {
+    return finish(book, priceProvider, aliasId, cards[aliasId], "alias", promptTokens, at, overrides);
+  }
+  if (cards) {
+    const bare = bareId(model);
+    const matches = Object.keys(cards).filter((id) => id === bare || bareId(id) === bare);
+    if (matches.length === 1) {
+      return finish(book, priceProvider, matches[0], cards[matches[0]], "bare", promptTokens, at, overrides);
+    }
+    if (matches.length > 1)
+      return null;
+    if (FAMILIES.includes(model)) {
+      const family = Object.keys(cards).filter((id) => id.startsWith(`claude-${model}-`)).sort((a, b) => (cards[a].release ?? "").localeCompare(cards[b].release ?? "") || a.localeCompare(b));
+      const latest = family[family.length - 1];
+      if (latest)
+        return finish(book, priceProvider, latest, cards[latest], "family", promptTokens, at, overrides);
+    }
+  }
+  if (priceProvider === "commandcode") {
+    for (const [prefix, lab] of Object.entries(LAB_PREFIX)) {
+      if (!model.startsWith(prefix))
+        continue;
+      const labCards = book.providers[lab]?.models;
+      const target = labCards && (labCards[model] ? model : bareId(model));
+      if (labCards?.[target]) {
+        const resolved = finish(book, lab, target, labCards[target], "lab", promptTokens, at, overrides);
+        resolved.source = `Command Code via ${book.providers[lab].source}`;
+        return resolved;
+      }
+    }
+  }
+  return null;
+}
+function finish(book, priceProvider, model, card, match, promptTokens, at, overrides) {
+  const base = card.cost ?? {};
+  const tier = activeTier(card, promptTokens);
+  let rates = {
+    cacheRead: base.cacheRead ?? 0,
+    cacheWrite: base.cacheWrite ?? 0,
+    input: base.input,
+    output: base.output,
+    ...tier ? tier.cost : {}
+  };
+  let timeTier = null;
+  let timeHours = null;
+  const override = usableOverride(overrides?.[`${priceProvider}/${model}`]);
+  let finalMatch = match;
+  let finalSource = book.providers[priceProvider]?.source ?? null;
+  let finalTier = tier ? { minContext: tier.minContext, rates: tierRate(tier.cost, tier.minContext) } : null;
+  if (override) {
+    rates = { cacheRead: override.cacheRead, cacheWrite: override.cacheWrite, input: override.input, output: override.output };
+    finalMatch = "override";
+    finalSource = "manual override";
+    finalTier = null;
+  } else {
+    const tariff = timeTariff(priceProvider, model);
+    if (tariff) {
+      const onPeak = isPeakAt(at, tariff.schedule);
+      timeTier = onPeak ? "peak" : "off-peak";
+      timeHours = tariff.schedule.label;
+      const side = onPeak ? tariff.peak : tariff.offPeak;
+      rates = { cacheRead: side.cacheRead ?? 0, cacheWrite: 0, input: side.input, output: side.output };
+      finalTier = null;
+    }
+  }
+  return {
+    checkedAt: book.checkedAt ?? null,
+    match: finalMatch,
+    model,
+    name: card.name ?? model,
+    provider: priceProvider,
+    rates: { ...rates },
+    release: card.release ?? null,
+    source: finalSource,
+    tier: finalTier,
+    timeHours,
+    timeTier
+  };
+}
+function isFree(price) {
+  return Boolean(price) && ["input", "output", "cacheRead", "cacheWrite"].every((key) => price.rates[key] === 0);
+}
+function priceStep(book, step, { provider = null, model = null, overrides = null, recovered = null } = {}) {
+  const stepProvider = step.provider ?? provider;
+  const stepModel = step.model ?? model;
+  const generated = step.tokens ?? 0;
+  const freshInput = Math.max(0, (step.total ?? 0) - generated);
+  const cacheRead = step.cacheRead ?? 0;
+  const cacheWrite = step.cacheWrite ?? 0;
+  const prompt = freshInput + cacheRead + cacheWrite;
+  const consumed = prompt + generated;
+  let price = resolvePrice(book, { at: step.at, model: stepModel, overrides, promptTokens: prompt, provider: stepProvider });
+  if (!price && recovered && recovered.model === stepModel && (!recovered.provider || recovered.provider === stepProvider)) {
+    price = {
+      match: "recovered",
+      model: stepModel,
+      name: null,
+      provider: stepProvider,
+      rates: { cacheRead: recovered.rates.cacheRead ?? 0, cacheWrite: recovered.rates.cacheWrite ?? 0, input: recovered.rates.input, output: recovered.rates.output },
+      release: null,
+      source: "billed rates",
+      tier: null,
+      timeHours: null,
+      timeTier: null
+    };
+  }
+  const apiCost = price ? (freshInput * price.rates.input + generated * price.rates.output + cacheRead * price.rates.cacheRead + cacheWrite * price.rates.cacheWrite) / 1e6 : null;
+  return {
+    apiCost,
+    at: step.at ?? null,
+    billed: step.cost ?? 0,
+    cacheRead,
+    cacheWrite,
+    consumed,
+    freshInput,
+    generated,
+    group: price ? `${price.provider}/${price.model}` : `${stepProvider ?? "?"}/${stepModel ?? "?"}`,
+    model: stepModel,
+    price,
+    provider: stepProvider,
+    unpriced: price === null
+  };
+}
+function computeApiValue(book, steps, { turnStartedAt = null, provider = null, model = null, overrides = null, recovered = null } = {}) {
+  const rows = [];
+  const groups = new Map;
+  let total = 0;
+  let lastTurn = 0;
+  let billedTotal = 0;
+  let billedLastTurn = 0;
+  let pricedConsumed = 0;
+  let totalConsumed = 0;
+  let pricedSteps = 0;
+  let freeSteps = 0;
+  for (const step of steps) {
+    const row = priceStep(book, step, { model, overrides, provider, recovered });
+    rows.push(row);
+    totalConsumed += row.consumed;
+    billedTotal += row.billed;
+    if (!row.unpriced) {
+      pricedSteps += 1;
+      total += row.apiCost;
+      pricedConsumed += row.consumed;
+      if (isFree(row.price))
+        freeSteps += 1;
+    }
+    if (turnStartedAt != null && (step.at ?? 0) >= turnStartedAt) {
+      billedLastTurn += row.billed;
+      if (!row.unpriced)
+        lastTurn += row.apiCost;
+    }
+    let group = groups.get(row.group);
+    if (!group) {
+      group = {
+        apiValue: 0,
+        billed: 0,
+        cacheRead: 0,
+        cacheWrite: 0,
+        consumed: 0,
+        freshInput: 0,
+        generated: 0,
+        match: row.price?.match ?? null,
+        model: row.price?.model ?? row.model,
+        name: row.price?.name ?? null,
+        price: row.price,
+        priced: 0,
+        pricedConsumed: 0,
+        provider: row.price?.provider ?? row.provider,
+        source: row.price?.source ?? null,
+        steps: 0
+      };
+      groups.set(row.group, group);
+    }
+    group.steps += 1;
+    group.billed += row.billed;
+    group.consumed += row.consumed;
+    group.freshInput += row.freshInput;
+    group.generated += row.generated;
+    group.cacheRead += row.cacheRead;
+    group.cacheWrite += row.cacheWrite;
+    if (!row.unpriced) {
+      group.priced += 1;
+      group.pricedConsumed += row.consumed;
+      group.apiValue += row.apiCost;
+      group.match = row.price.match;
+      group.price = row.price;
+      group.name = row.price.name ?? row.price.model;
+      group.source = row.price.source;
+    }
+  }
+  const coverage = totalConsumed > 0 ? pricedConsumed / totalConsumed : pricedSteps > 0 ? 1 : 0;
+  const lowerBound = coverage < 1 - EIGHT;
+  const drifted = [];
+  for (const group of groups.values()) {
+    if (group.priced === 0)
+      continue;
+    group.coverage = group.consumed > 0 ? group.pricedConsumed / group.consumed : 0;
+    group.rates = group.price?.rates ?? null;
+    group.timeTier = group.price?.timeTier ?? null;
+    group.tier = group.price?.tier ?? null;
+    group.drift = null;
+    if (group.billed > 0 && group.apiValue > 0) {
+      const relative = (group.apiValue - group.billed) / group.billed;
+      if (Math.abs(relative) > 0.01) {
+        group.drift = relative;
+        drifted.push({ model: group.model, relative });
+      }
+    }
+  }
+  const models = [...groups.values()].filter((group) => group.priced > 0).map((group) => ({
+    apiValue: group.apiValue,
+    billed: group.billed,
+    consumed: group.consumed,
+    coverage: group.coverage,
+    drift: group.drift,
+    match: group.match,
+    model: group.model,
+    name: group.name,
+    provider: group.provider,
+    rates: group.rates,
+    source: group.source,
+    steps: group.steps,
+    tier: group.tier,
+    timeTier: group.timeTier,
+    tokens: { cacheRead: group.cacheRead, cacheWrite: group.cacheWrite, generated: group.generated, input: group.freshInput }
+  })).sort((a, b) => b.apiValue - a.apiValue || a.model.localeCompare(b.model));
+  const unpriced = [...groups.values()].filter((group) => group.priced === 0).map((group) => ({ consumed: group.consumed, model: group.model, provider: group.provider }));
+  drifted.sort((a, b) => Math.abs(b.relative) - Math.abs(a.relative));
+  const billedTouched = billedTotal > 0;
+  const allFree = pricedSteps > 0 && freeSteps === pricedSteps;
+  let priceNote = null;
+  if (pricedSteps === 0)
+    priceNote = "noPrice";
+  else if (lowerBound)
+    priceNote = "partial";
+  else if (drifted.length)
+    priceNote = "drift";
+  else if (allFree)
+    priceNote = "free";
+  else if (!billedTouched && total > 0)
+    priceNote = "noBilledCost";
+  return {
+    billed: {
+      effective: totalConsumed > 0 ? billedTotal / totalConsumed : null,
+      lastTurn: billedLastTurn,
+      perMillion: totalConsumed > 0 ? billedTotal / totalConsumed * 1e6 : null,
+      total: billedTotal
+    },
+    coverage,
+    drift: drifted[0] ?? null,
+    effective: total > 0 && (coverage === 1 ? totalConsumed : pricedConsumed) > 0 ? total / (coverage === 1 ? totalConsumed : pricedConsumed) : null,
+    lastTurn: pricedSteps === 0 ? null : lastTurn,
+    lowerBound,
+    models,
+    perMillion: total > 0 && (coverage === 1 ? totalConsumed : pricedConsumed) > 0 ? total / (coverage === 1 ? totalConsumed : pricedConsumed) * 1e6 : null,
+    priceNote,
+    pricedSteps,
+    pricedTokens: pricedConsumed,
+    rows,
+    total: pricedSteps === 0 ? null : total,
+    totalTokens: totalConsumed,
+    unpriced
+  };
+}
+
 // service/src/collector.js
 var HISTORY_PAGES = 20;
 var HISTORY_PAGE_SIZE = 100;
@@ -673,12 +985,14 @@ function treeStatus(collector, tree) {
     return { status: "tool", subagent: true };
   return { status: collector.status, subagent: false };
 }
-function modelRates(steps, model) {
+function modelRates(steps, model, provider = null) {
   if (!model)
     return null;
   const rows = [];
   for (const step of steps) {
     if (step.model !== model || !(step.cost > 0))
+      continue;
+    if (provider && step.provider && step.provider !== provider)
       continue;
     const input = step.total - step.tokens;
     if (!(input >= 0) || !(step.cacheRead >= 0))
@@ -739,7 +1053,7 @@ function modelRates(steps, model) {
   const round = (value) => Math.round(value * 1e6) / 1e6;
   return { model, input: round(x[0]), output: round(x[1]), cacheRead: round(x[2]) };
 }
-function snapshot(collector, now = Date.now(), tree = [collector]) {
+function snapshot(collector, now = Date.now(), tree = [collector], priceBook = null, overrides = null) {
   const members = tree.length ? tree : [collector];
   const totals = emptyTotals();
   for (const member of members) {
@@ -807,18 +1121,84 @@ function snapshot(collector, now = Date.now(), tree = [collector]) {
   const streamer = members.find((member) => member.status === "streaming" && member.ttftMs != null);
   const lastStepRaw = members.reduce((best, member) => member.lastStep && (!best || member.lastStep.at > best.at) ? member.lastStep : best, null);
   const model = collector.model ?? lastStepRaw?.model ?? null;
-  const modelKey = model ?? "";
+  const modelKey = `${collector.provider ?? ""}|${model ?? ""}`;
   let modelCostRates;
   if (derived.ratesByModel.has(modelKey)) {
     modelCostRates = derived.ratesByModel.get(modelKey);
   } else {
-    modelCostRates = modelRates(steps, model);
+    modelCostRates = modelRates(steps, model, collector.provider ?? null);
     derived.ratesByModel.set(modelKey, modelCostRates);
   }
   const tariff = timeTariff(collector.provider, model);
   const tiers = tariff ? tariffTiers(tariff, modelCostRates) : null;
   const pricedSteps = steps.filter((step) => step.model === model && step.cost > 0);
   const ratesNote = modelCostRates ? null : pricedSteps.length < 8 ? "fewSteps" : pricedSteps.some((step) => step.cacheRead > 0) ? "nonLinear" : "noCache";
+  let api = null;
+  let ratesCard = null;
+  if (priceBook) {
+    const apiKey = `${collector.provider ?? ""}|${model ?? ""}|${overrides ? "override" : ""}`;
+    if (!derived.api || derived.apiKey !== apiKey) {
+      const recovered = modelCostRates ? { model, provider: collector.provider ?? null, rates: modelCostRates } : null;
+      derived.api = computeApiValue(priceBook, steps, {
+        model,
+        overrides,
+        provider: collector.provider ?? null,
+        recovered
+      });
+      derived.apiKey = apiKey;
+    }
+    api = derived.api;
+    const lastOfModel = [...steps].reverse().find((item) => item.model === model) ?? null;
+    const promptTokens = lastOfModel ? Math.max(0, (lastOfModel.total ?? 0) - (lastOfModel.tokens ?? 0)) + (lastOfModel.cacheRead ?? 0) + (lastOfModel.cacheWrite ?? 0) : 0;
+    ratesCard = resolvePrice(priceBook, {
+      at: now,
+      model,
+      overrides,
+      promptTokens,
+      provider: lastOfModel?.provider ?? collector.provider ?? null
+    });
+    if (!ratesCard && modelCostRates) {
+      ratesCard = {
+        checkedAt: null,
+        match: "recovered",
+        model,
+        name: null,
+        provider: collector.provider ?? null,
+        rates: {
+          cacheRead: modelCostRates.cacheRead ?? 0,
+          cacheWrite: modelCostRates.cacheWrite ?? 0,
+          input: modelCostRates.input,
+          output: modelCostRates.output
+        },
+        source: "billed rates",
+        tier: null,
+        timeTier: null
+      };
+    }
+  }
+  let apiTurn = 0;
+  let billedTurn = 0;
+  if (api && collector.turnStartedAt) {
+    for (const row of api.rows) {
+      if (!((row.at ?? 0) >= collector.turnStartedAt))
+        continue;
+      billedTurn += row.billed;
+      if (row.apiCost != null)
+        apiTurn += row.apiCost;
+    }
+  }
+  const round6 = (value) => typeof value === "number" && Number.isFinite(value) ? Math.round(value * 1e6) / 1e6 : null;
+  const tariffWire = tariff ? {
+    provider: collector.provider,
+    model,
+    peak: isPeakAt(now, tariff.schedule),
+    multiplier: tariff.peakMultiplier,
+    window: tariff.schedule.label,
+    holidayYear: tariff.schedule.holidayYear ?? null,
+    holidayStale: tariff.schedule.holidayYear ? new Date(now).getUTCFullYear() > tariff.schedule.holidayYear : false,
+    source: tiers.source,
+    tiers: { offPeak: tiers.offPeak, peak: tiers.peak }
+  } : null;
   const status = treeStatus(collector, members);
   const active = [];
   for (const member of members) {
@@ -869,23 +1249,70 @@ function snapshot(collector, now = Date.now(), tree = [collector]) {
       cacheHitRate: prompt > 0 ? totals.cacheRead / prompt : 0,
       source: collector.totalsFrom
     },
-    cost: {
+    cost: priceBook ? {
+      total: round6(api.total),
+      lastTurn: api.total === null ? null : round6(collector.turnStartedAt ? apiTurn : 0),
+      perMillion: round6(api.perMillion),
+      billed: {
+        lastTurn: round6(collector.turnStartedAt ? billedTurn : 0),
+        perMillion: round6(api.billed.perMillion),
+        total: round6(api.billed.total)
+      },
+      rates: ratesCard ? {
+        provider: ratesCard.provider,
+        model: ratesCard.model,
+        name: ratesCard.name,
+        input: ratesCard.rates.input,
+        output: ratesCard.rates.output,
+        cacheRead: ratesCard.rates.cacheRead,
+        cacheWrite: ratesCard.rates.cacheWrite,
+        source: ratesCard.source,
+        match: ratesCard.match,
+        checkedAt: ratesCard.checkedAt,
+        tier: ratesCard.tier,
+        timeTier: ratesCard.timeTier
+      } : null,
+      ratesNote,
+      priceNote: api.priceNote,
+      drift: api.drift,
+      coverage: Math.round(api.coverage * 1e6) / 1e6,
+      lowerBound: api.lowerBound,
+      ...api.models.length > 1 ? {
+        models: api.models.map((entry) => ({
+          apiValue: round6(entry.apiValue),
+          billed: round6(entry.billed),
+          consumed: entry.consumed,
+          coverage: Math.round(entry.coverage * 1e6) / 1e6,
+          drift: entry.drift,
+          match: entry.match,
+          model: entry.model,
+          name: entry.name,
+          provider: entry.provider,
+          rates: entry.rates,
+          source: entry.source,
+          steps: entry.steps,
+          tier: entry.tier,
+          timeTier: entry.timeTier,
+          tokens: entry.tokens
+        }))
+      } : {},
+      tariff: tariffWire
+    } : {
       total: totalCost,
       lastTurn: lastTurnCost,
       perMillion: consumed > 0 ? Math.round(totalCost / consumed * 1e6 * 1e4) / 1e4 : null,
+      billed: {
+        lastTurn: lastTurnCost,
+        perMillion: consumed > 0 ? Math.round(totalCost / consumed * 1e6 * 1e4) / 1e4 : null,
+        total: totalCost
+      },
       rates: modelCostRates,
       ratesNote,
-      tariff: tariff ? {
-        provider: collector.provider,
-        model,
-        peak: isPeakAt(now, tariff.schedule),
-        multiplier: tariff.peakMultiplier,
-        window: tariff.schedule.label,
-        holidayYear: tariff.schedule.holidayYear ?? null,
-        holidayStale: tariff.schedule.holidayYear ? new Date(now).getUTCFullYear() > tariff.schedule.holidayYear : false,
-        source: tiers.source,
-        tiers: { offPeak: tiers.offPeak, peak: tiers.peak }
-      } : null
+      priceNote: null,
+      drift: null,
+      coverage: 1,
+      lowerBound: false,
+      tariff: tariffWire
     },
     turn: {
       active: Boolean(collector.turnActive),
@@ -918,6 +1345,4182 @@ function snapshot(collector, now = Date.now(), tree = [collector]) {
   };
 }
 
+// shared/price-book.js
+var PRICE_BOOK = {
+  aliases: {
+    providers: {
+      "claude-agent": "anthropic",
+      "command-code": "commandcode",
+      commandcode: "commandcode",
+      deepseek: "deepseek",
+      openai: "openai",
+      opencode: "opencode",
+      "opencode-go": "opencode-go"
+    },
+    models: {
+      "claude-agent": {
+        fable: "claude-fable-5-2",
+        haiku: "claude-haiku-5-5",
+        opus: "claude-opus-5-5",
+        sonnet: "claude-sonnet-5-5"
+      }
+    },
+    labs: {
+      commandcode: {
+        "claude-": "anthropic",
+        "gpt-": "openai"
+      }
+    }
+  },
+  checkedAt: "2026-11-14",
+  currency: "USD",
+  providers: {
+    anthropic: {
+      name: "Anthropic",
+      source: "Anthropic list",
+      models: {
+        "claude-fable-5": {
+          cost: {
+            cacheRead: 1,
+            cacheWrite: 12.5,
+            input: 10,
+            output: 50
+          },
+          name: "Claude Fable 5",
+          tiers: [],
+          release: "2026-06-07"
+        },
+        "claude-fable-5-1": {
+          cost: {
+            cacheRead: 0.25,
+            cacheWrite: 12.5,
+            input: 10,
+            output: 50
+          },
+          name: "Claude Fable 5.1",
+          tiers: [],
+          release: "2026-09-01"
+        },
+        "claude-fable-5-2": {
+          cost: {
+            cacheRead: 0.2,
+            cacheWrite: 10,
+            input: 8,
+            output: 40
+          },
+          name: "Claude Fable 5.2",
+          tiers: [],
+          release: "2026-11-09"
+        },
+        "claude-haiku-4-5": {
+          cost: {
+            cacheRead: 0.1,
+            cacheWrite: 1.25,
+            input: 1,
+            output: 5
+          },
+          name: "Claude Haiku 4.5 (latest)",
+          tiers: [],
+          release: "2025-10-15"
+        },
+        "claude-haiku-4-5-20251001": {
+          cost: {
+            cacheRead: 0.1,
+            cacheWrite: 1.25,
+            input: 1,
+            output: 5
+          },
+          name: "Claude Haiku 4.5",
+          tiers: [],
+          release: "2025-10-15"
+        },
+        "claude-haiku-5-5": {
+          cost: {
+            cacheRead: 0.01,
+            cacheWrite: 0.125,
+            input: 0.1,
+            output: 0.5
+          },
+          name: "Claude Haiku 5.5",
+          tiers: [
+            {
+              cost: {
+                cacheRead: 0.05,
+                cacheWrite: 0.625,
+                input: 0.5,
+                output: 2.5
+              },
+              minContext: 1e5
+            }
+          ],
+          release: "2026-10-07"
+        },
+        "claude-opus-4-5": {
+          cost: {
+            cacheRead: 0.5,
+            cacheWrite: 6.25,
+            input: 5,
+            output: 25
+          },
+          name: "Claude Opus 4.5 (latest)",
+          tiers: [],
+          release: "2025-11-24"
+        },
+        "claude-opus-4-5-20251101": {
+          cost: {
+            cacheRead: 0.5,
+            cacheWrite: 6.25,
+            input: 5,
+            output: 25
+          },
+          name: "Claude Opus 4.5",
+          tiers: [],
+          release: "2025-11-24"
+        },
+        "claude-opus-4-6": {
+          cost: {
+            cacheRead: 0.5,
+            cacheWrite: 6.25,
+            input: 5,
+            output: 25
+          },
+          name: "Claude Opus 4.6",
+          tiers: [],
+          release: "2026-02-04"
+        },
+        "claude-opus-4-7": {
+          cost: {
+            cacheRead: 0.5,
+            cacheWrite: 6.25,
+            input: 5,
+            output: 25
+          },
+          name: "Claude Opus 4.7",
+          tiers: [],
+          release: "2026-04-14"
+        },
+        "claude-opus-4-8": {
+          cost: {
+            cacheRead: 0.5,
+            cacheWrite: 6.25,
+            input: 5,
+            output: 25
+          },
+          name: "Claude Opus 4.8",
+          tiers: [],
+          release: "2026-05-28"
+        },
+        "claude-opus-5": {
+          cost: {
+            cacheRead: 0.5,
+            cacheWrite: 6.25,
+            input: 5,
+            output: 25
+          },
+          name: "Claude Opus 5",
+          tiers: [],
+          release: "2026-07-24"
+        },
+        "claude-opus-5-5": {
+          cost: {
+            cacheRead: 0.2,
+            cacheWrite: 5,
+            input: 4,
+            output: 20
+          },
+          name: "Claude Opus 5.5",
+          tiers: [],
+          release: "2026-09-22"
+        },
+        "claude-sonnet-4-5": {
+          cost: {
+            cacheRead: 0.3,
+            cacheWrite: 3.75,
+            input: 3,
+            output: 15
+          },
+          name: "Claude Sonnet 4.5 (latest)",
+          tiers: [],
+          release: "2025-09-29"
+        },
+        "claude-sonnet-4-5-20250929": {
+          cost: {
+            cacheRead: 0.3,
+            cacheWrite: 3.75,
+            input: 3,
+            output: 15
+          },
+          name: "Claude Sonnet 4.5",
+          tiers: [],
+          release: "2025-09-29"
+        },
+        "claude-sonnet-4-6": {
+          cost: {
+            cacheRead: 0.3,
+            cacheWrite: 3.75,
+            input: 3,
+            output: 15
+          },
+          name: "Claude Sonnet 4.6",
+          tiers: [],
+          release: "2026-02-17"
+        },
+        "claude-sonnet-5": {
+          cost: {
+            cacheRead: 0.2,
+            cacheWrite: 2.5,
+            input: 2,
+            output: 10
+          },
+          name: "Claude Sonnet 5",
+          tiers: [],
+          release: "2026-06-29"
+        },
+        "claude-sonnet-5-5": {
+          cost: {
+            cacheRead: 0.1,
+            cacheWrite: 2.5,
+            input: 2,
+            output: 10
+          },
+          name: "Claude Sonnet 5.5",
+          tiers: [],
+          release: "2026-09-28"
+        }
+      }
+    },
+    commandcode: {
+      name: "Command Code",
+      source: "Command Code list",
+      models: {
+        "MiniMaxAI/MiniMax-M2.5": {
+          cost: {
+            cacheRead: 0.03,
+            cacheWrite: 0,
+            input: 0.3,
+            output: 1.2
+          },
+          name: "MiniMax-M2.5",
+          tiers: [],
+          release: "2026-02-12"
+        },
+        "MiniMaxAI/MiniMax-M2.7": {
+          cost: {
+            cacheRead: 0.06,
+            cacheWrite: 0,
+            input: 0.3,
+            output: 1.2
+          },
+          name: "MiniMax-M2.7",
+          tiers: [],
+          release: "2026-03-18"
+        },
+        "MiniMaxAI/MiniMax-M3": {
+          cost: {
+            cacheRead: 0.06,
+            cacheWrite: 0,
+            input: 0.3,
+            output: 1.2
+          },
+          name: "MiniMax-M3",
+          tiers: [],
+          release: "2026-06-01"
+        },
+        "Qwen/Qwen3.8-27B": {
+          cost: {
+            cacheRead: 0.04,
+            cacheWrite: 0,
+            input: 0.4,
+            output: 3
+          },
+          name: "Qwen3.8 27B",
+          tiers: [],
+          release: "2026-08-14"
+        },
+        "Qwen/Qwen3.8-Flash": {
+          cost: {
+            cacheRead: 0.016,
+            cacheWrite: 0,
+            input: 0.16,
+            output: 0.47
+          },
+          name: "Qwen3.8 Flash",
+          tiers: [],
+          release: "2026-08-26"
+        },
+        "Qwen/Qwen3.8-Max": {
+          cost: {
+            cacheRead: 0.25,
+            cacheWrite: 2.5,
+            input: 2,
+            output: 6
+          },
+          name: "Qwen3.8 Max",
+          tiers: [],
+          release: "2026-08-03"
+        },
+        "Qwen/Qwen3.8-Max-0902": {
+          cost: {
+            cacheRead: 0.25,
+            cacheWrite: 0,
+            input: 2,
+            output: 6
+          },
+          name: "Qwen3.8 Max 0902",
+          tiers: [],
+          release: "2026-09-02"
+        },
+        "Qwen/Qwen3.8-Omni-Flash": {
+          cost: {
+            cacheRead: 0.016,
+            cacheWrite: 0,
+            input: 0.15,
+            output: 0.47
+          },
+          name: "Qwen3.8 Omni Flash",
+          tiers: [],
+          release: "2026-09-17"
+        },
+        "claude-fable-5": {
+          cost: {
+            cacheRead: 1,
+            cacheWrite: 12.5,
+            input: 10,
+            output: 50
+          },
+          name: "Claude Fable 5",
+          tiers: [],
+          release: "2026-06-09"
+        },
+        "claude-fable-5-1": {
+          cost: {
+            cacheRead: 0.25,
+            cacheWrite: 12.5,
+            input: 10,
+            output: 50
+          },
+          name: "Claude Fable 5.1",
+          tiers: [],
+          release: "2026-09-01"
+        },
+        "claude-haiku-4-5-20251001": {
+          cost: {
+            cacheRead: 0.1,
+            cacheWrite: 1.25,
+            input: 1,
+            output: 5
+          },
+          name: "Claude Haiku 4.5",
+          tiers: [],
+          release: "2025-10-15"
+        },
+        "claude-haiku-5-5": {
+          cost: {
+            cacheRead: 0.01,
+            cacheWrite: 0.125,
+            input: 0.1,
+            output: 0.5
+          },
+          name: "Claude Haiku 5.5",
+          tiers: [
+            {
+              cost: {
+                cacheRead: 0.05,
+                cacheWrite: 0.625,
+                input: 0.5,
+                output: 2.5
+              },
+              minContext: 1e5
+            }
+          ],
+          release: "2026-10-07"
+        },
+        "claude-opus-4-7": {
+          cost: {
+            cacheRead: 0.5,
+            cacheWrite: 6.25,
+            input: 5,
+            output: 25
+          },
+          name: "Claude Opus 4.7",
+          tiers: [],
+          release: "2026-04-16"
+        },
+        "claude-opus-4-8": {
+          cost: {
+            cacheRead: 0.5,
+            cacheWrite: 6.25,
+            input: 5,
+            output: 25
+          },
+          name: "Claude Opus 4.8",
+          tiers: [],
+          release: "2026-05-28"
+        },
+        "claude-opus-5": {
+          cost: {
+            cacheRead: 0.5,
+            cacheWrite: 6.25,
+            input: 5,
+            output: 25
+          },
+          name: "Claude Opus 5",
+          tiers: [],
+          release: "2026-07-24"
+        },
+        "claude-opus-5-5": {
+          cost: {
+            cacheRead: 0.2,
+            cacheWrite: 5,
+            input: 4,
+            output: 20
+          },
+          name: "Claude Opus 5.5",
+          tiers: [],
+          release: "2026-09-22"
+        },
+        "claude-sonnet-4-6": {
+          cost: {
+            cacheRead: 0.3,
+            cacheWrite: 3.75,
+            input: 3,
+            output: 15
+          },
+          name: "Claude Sonnet 4.6",
+          tiers: [],
+          release: "2026-02-17"
+        },
+        "claude-sonnet-5": {
+          cost: {
+            cacheRead: 0.2,
+            cacheWrite: 2.5,
+            input: 2,
+            output: 10
+          },
+          name: "Claude Sonnet 5",
+          tiers: [],
+          release: "2026-06-30"
+        },
+        "claude-sonnet-5-5": {
+          cost: {
+            cacheRead: 0.1,
+            cacheWrite: 2.5,
+            input: 2,
+            output: 10
+          },
+          name: "Claude Sonnet 5.5",
+          tiers: [],
+          release: "2026-09-28"
+        },
+        "deepseek/deepseek-v4-flash": {
+          cost: {
+            cacheRead: 0.003,
+            cacheWrite: 0,
+            input: 0.15,
+            output: 0.6
+          },
+          name: "DeepSeek V4 Flash",
+          tiers: [],
+          release: "2026-04-24"
+        },
+        "deepseek/deepseek-v4-flash-fast": {
+          cost: {
+            cacheRead: 0.07,
+            cacheWrite: 0,
+            input: 0.28,
+            output: 0.56
+          },
+          name: "DeepSeek V4 Flash Fast",
+          tiers: [],
+          release: "2026-04-24"
+        },
+        "deepseek/deepseek-v4-flash-vision-exp": {
+          cost: {
+            cacheRead: 0.003,
+            cacheWrite: 0,
+            input: 0.15,
+            output: 0.6
+          },
+          name: "DeepSeek V4 Flash Vision Exp",
+          tiers: [],
+          release: "2026-08-21"
+        },
+        "deepseek/deepseek-v4-pro": {
+          cost: {
+            cacheRead: 0.022,
+            cacheWrite: 0,
+            input: 0.66,
+            output: 1.98
+          },
+          name: "DeepSeek V4 Pro",
+          tiers: [],
+          release: "2026-04-24"
+        },
+        "deepseek/deepseek-v4.1-flash": {
+          cost: {
+            cacheRead: 0.003,
+            cacheWrite: 0,
+            input: 0.15,
+            output: 0.6
+          },
+          name: "DeepSeek V4.1 Flash",
+          tiers: [],
+          release: "2026-09-10"
+        },
+        "deepseek/deepseek-v4.1-flash-fast": {
+          cost: {
+            cacheRead: 0.016,
+            cacheWrite: 0,
+            input: 0.16,
+            output: 0.58
+          },
+          name: "DeepSeek V4.1 Flash Fast",
+          tiers: [],
+          release: "2026-09-10"
+        },
+        "google/gemini-3.1-flash-lite": {
+          cost: {
+            cacheRead: 0.03,
+            cacheWrite: 0,
+            input: 0.25,
+            output: 1.5
+          },
+          name: "Gemini 3.1 Flash Lite",
+          tiers: [],
+          release: "2026-05-07"
+        },
+        "google/gemini-3.5-flash": {
+          cost: {
+            cacheRead: 0.15,
+            cacheWrite: 0,
+            input: 1.5,
+            output: 9
+          },
+          name: "Gemini 3.5 Flash",
+          tiers: [],
+          release: "2026-05-19"
+        },
+        "google/gemini-3.5-flash-lite": {
+          cost: {
+            cacheRead: 0.03,
+            cacheWrite: 0,
+            input: 0.3,
+            output: 2.5
+          },
+          name: "Gemini 3.5 Flash Lite",
+          tiers: [],
+          release: "2026-07-21"
+        },
+        "google/gemini-3.6-flash": {
+          cost: {
+            cacheRead: 0.15,
+            cacheWrite: 0,
+            input: 1.5,
+            output: 7.5
+          },
+          name: "Gemini 3.6 Flash",
+          tiers: [],
+          release: "2026-07-21"
+        },
+        "google/gemini-3.7-flash": {
+          cost: {
+            cacheRead: 0.15,
+            cacheWrite: 0.08334,
+            input: 1.5,
+            output: 7.5
+          },
+          name: "Gemini 3.7 Flash",
+          tiers: [],
+          release: "2026-08-13"
+        },
+        "google/gemini-3.8-flash": {
+          cost: {
+            cacheRead: 0.15,
+            cacheWrite: 0,
+            input: 1.5,
+            output: 7.5
+          },
+          name: "Gemini 3.8 Flash",
+          tiers: [],
+          release: "2026-09-02"
+        },
+        "google/gemini-4-argon": {
+          cost: {
+            cacheRead: 0.1,
+            cacheWrite: 0,
+            input: 2,
+            output: 10
+          },
+          name: "Gemini 4 Argon",
+          tiers: [],
+          release: "2026-10-13"
+        },
+        "gpt-5.3-codex": {
+          cost: {
+            cacheRead: 0.5,
+            cacheWrite: 0,
+            input: 2,
+            output: 8
+          },
+          name: "GPT-5.3 Codex",
+          tiers: [],
+          release: "2026-02-05"
+        },
+        "gpt-5.4": {
+          cost: {
+            cacheRead: 0.25,
+            cacheWrite: 0,
+            input: 2.5,
+            output: 15
+          },
+          name: "GPT-5.4",
+          tiers: [],
+          release: "2026-03-05"
+        },
+        "gpt-5.4-mini": {
+          cost: {
+            cacheRead: 0.075,
+            cacheWrite: 0,
+            input: 0.75,
+            output: 4.5
+          },
+          name: "GPT-5.4 mini",
+          tiers: [],
+          release: "2026-03-17"
+        },
+        "gpt-5.5": {
+          cost: {
+            cacheRead: 0.5,
+            cacheWrite: 0,
+            input: 5,
+            output: 30
+          },
+          name: "GPT-5.5",
+          tiers: [],
+          release: "2026-04-23"
+        },
+        "gpt-5.6-luna": {
+          cost: {
+            cacheRead: 0.02,
+            cacheWrite: 0.25,
+            input: 0.2,
+            output: 1.2
+          },
+          name: "GPT-5.6 Luna",
+          tiers: [
+            {
+              cost: {
+                cacheRead: 0.04,
+                cacheWrite: 0.5,
+                input: 0.4,
+                output: 1.8
+              },
+              minContext: 272000
+            }
+          ],
+          release: "2026-07-09"
+        },
+        "gpt-5.6-sol": {
+          cost: {
+            cacheRead: 0.5,
+            cacheWrite: 6.25,
+            input: 5,
+            output: 30
+          },
+          name: "GPT-5.6 Sol",
+          tiers: [
+            {
+              cost: {
+                cacheRead: 1,
+                cacheWrite: 12.5,
+                input: 10,
+                output: 45
+              },
+              minContext: 272000
+            }
+          ],
+          release: "2026-07-09"
+        },
+        "gpt-5.6-terra": {
+          cost: {
+            cacheRead: 0.2,
+            cacheWrite: 2.5,
+            input: 2,
+            output: 12
+          },
+          name: "GPT-5.6 Terra",
+          tiers: [
+            {
+              cost: {
+                cacheRead: 0.4,
+                cacheWrite: 5,
+                input: 4,
+                output: 18
+              },
+              minContext: 272000
+            }
+          ],
+          release: "2026-07-09"
+        },
+        "gpt-6-astra": {
+          cost: {
+            cacheRead: 1,
+            cacheWrite: 12.5,
+            input: 10,
+            output: 50
+          },
+          name: "GPT-6 Astra",
+          tiers: [
+            {
+              cost: {
+                cacheRead: 2,
+                cacheWrite: 25,
+                input: 20,
+                output: 75
+              },
+              minContext: 272000
+            }
+          ],
+          release: "2026-09-04"
+        },
+        "gpt-6-luna": {
+          cost: {
+            cacheRead: 0.01,
+            cacheWrite: 0.125,
+            input: 0.1,
+            output: 0.5
+          },
+          name: "GPT-6 Luna",
+          tiers: [
+            {
+              cost: {
+                cacheRead: 0.02,
+                cacheWrite: 0.25,
+                input: 0.2,
+                output: 0.75
+              },
+              minContext: 272000
+            }
+          ],
+          release: "2026-09-22"
+        },
+        "gpt-6-sol": {
+          cost: {
+            cacheRead: 0.2,
+            cacheWrite: 2.5,
+            input: 2,
+            output: 10
+          },
+          name: "GPT-6 Sol",
+          tiers: [
+            {
+              cost: {
+                cacheRead: 0.4,
+                cacheWrite: 5,
+                input: 4,
+                output: 15
+              },
+              minContext: 272000
+            }
+          ],
+          release: "2026-09-22"
+        },
+        "gpt-6.1-sol": {
+          cost: {
+            cacheRead: 0.1,
+            cacheWrite: 2.5,
+            input: 2,
+            output: 10
+          },
+          name: "GPT-6.1 Sol",
+          tiers: [
+            {
+              cost: {
+                cacheRead: 0.2,
+                cacheWrite: 5,
+                input: 4,
+                output: 15
+              },
+              minContext: 272000
+            }
+          ],
+          release: "2026-09-29"
+        },
+        "gpt-6.1-terra": {
+          cost: {
+            cacheRead: 0.05,
+            cacheWrite: 1.25,
+            input: 1,
+            output: 5
+          },
+          name: "GPT-6.1 Terra",
+          tiers: [
+            {
+              cost: {
+                cacheRead: 0.1,
+                cacheWrite: 2.5,
+                input: 2,
+                output: 7.5
+              },
+              minContext: 272000
+            }
+          ],
+          release: "2026-10-26"
+        },
+        "inclusionai/ling-3.1-flash:free": {
+          cost: {
+            cacheRead: 0,
+            cacheWrite: 0,
+            input: 0,
+            output: 0
+          },
+          name: "Ling 3.1 Flash",
+          tiers: [],
+          release: "2026-09-29"
+        },
+        "meta/muse-spark-1.1": {
+          cost: {
+            cacheRead: 0.15,
+            cacheWrite: 0,
+            input: 1.25,
+            output: 4.25
+          },
+          name: "Muse Spark 1.1",
+          tiers: [],
+          release: "2026-04-08"
+        },
+        "meta/muse-spark-1.2": {
+          cost: {
+            cacheRead: 0.15,
+            cacheWrite: 0,
+            input: 1.25,
+            output: 4.25
+          },
+          name: "Muse Spark 1.2",
+          tiers: [],
+          release: "2026-08-05"
+        },
+        "meta/muse-spark-1.2-contributor": {
+          cost: {
+            cacheRead: 0.002,
+            cacheWrite: 0,
+            input: 0.1,
+            output: 0.2
+          },
+          name: "Muse Spark 1.2 (Contributor)",
+          tiers: [],
+          release: "2026-08-05"
+        },
+        "meta/muse-spark-1.3": {
+          cost: {
+            cacheRead: 0.15,
+            cacheWrite: 0,
+            input: 1.25,
+            output: 4.25
+          },
+          name: "Muse Spark 1.3",
+          tiers: [],
+          release: "2026-09-02"
+        },
+        "meta/muse-spark-1.3-contributor": {
+          cost: {
+            cacheRead: 0.002,
+            cacheWrite: 0,
+            input: 0.1,
+            output: 0.2
+          },
+          name: "Muse Spark 1.3 (Contributor)",
+          tiers: [],
+          release: "2026-09-02"
+        },
+        "meta/muse-wonder-1.0": {
+          cost: {
+            cacheRead: 0.2,
+            cacheWrite: 0,
+            input: 4,
+            output: 20
+          },
+          name: "Muse Wonder",
+          tiers: [],
+          release: "2026-10-12"
+        },
+        "mistral/mistral-large-4": {
+          cost: {
+            cacheRead: 0.14,
+            cacheWrite: 0,
+            input: 1.36,
+            output: 4.18
+          },
+          name: "Mistral Large 4",
+          tiers: [],
+          release: "2026-10-06"
+        },
+        "moonshotai/Kimi-K2.7-Code": {
+          cost: {
+            cacheRead: 0.19,
+            cacheWrite: 0,
+            input: 0.95,
+            output: 4
+          },
+          name: "Kimi K2.7 Code",
+          tiers: [],
+          release: "2026-06-12"
+        },
+        "moonshotai/Kimi-K2.7-Code-Highspeed": {
+          cost: {
+            cacheRead: 0.38,
+            cacheWrite: 0,
+            input: 1.9,
+            output: 8
+          },
+          name: "Kimi K2.7 Code Highspeed",
+          tiers: [],
+          release: "2026-06-12"
+        },
+        "moonshotai/Kimi-K3": {
+          cost: {
+            cacheRead: 0.3,
+            cacheWrite: 0,
+            input: 3,
+            output: 15
+          },
+          name: "Kimi K3",
+          tiers: [],
+          release: "2026-07-16"
+        },
+        "nvidia/nemotron-3-ultra-550b-a55b": {
+          cost: {
+            cacheRead: 0.12,
+            cacheWrite: 0,
+            input: 0.6,
+            output: 2.4
+          },
+          name: "Nemotron 3 Ultra 550B A55B",
+          tiers: [],
+          release: "2026-06-04"
+        },
+        "sakana/fugu-ultra": {
+          cost: {
+            cacheRead: 0.5,
+            cacheWrite: 0,
+            input: 5,
+            output: 30
+          },
+          name: "Fugu Ultra",
+          tiers: [],
+          release: "2026-06-15"
+        },
+        "stepfun/Step-3.5-Flash": {
+          cost: {
+            cacheRead: 0.02,
+            cacheWrite: 0,
+            input: 0.09,
+            output: 0.3
+          },
+          name: "Step 3.5 Flash",
+          tiers: [],
+          release: "2026-01-29"
+        },
+        "stepfun/Step-3.7-Flash": {
+          cost: {
+            cacheRead: 0.04,
+            cacheWrite: 0,
+            input: 0.2,
+            output: 1.15
+          },
+          name: "Step 3.7 Flash",
+          tiers: [],
+          release: "2026-05-29"
+        },
+        "stepfun/Step-5-Preview": {
+          cost: {
+            cacheRead: 0.05,
+            cacheWrite: 0,
+            input: 1,
+            output: 2.7
+          },
+          name: "Step 5 Preview",
+          tiers: [],
+          release: "2026-09-16"
+        },
+        "tencent/hy3-paid": {
+          cost: {
+            cacheRead: 0.035,
+            cacheWrite: 0,
+            input: 0.14,
+            output: 0.58
+          },
+          name: "Hy3",
+          tiers: [],
+          release: "2026-07-06"
+        },
+        "tencent/hy4-preview": {
+          cost: {
+            cacheRead: 0.042,
+            cacheWrite: 0,
+            input: 0.834,
+            output: 2.501
+          },
+          name: "Hy4 preview",
+          tiers: [],
+          release: "2026-08-28"
+        },
+        "thinkingmachines/inkling": {
+          cost: {
+            cacheRead: 0.17,
+            cacheWrite: 0,
+            input: 1,
+            output: 4.05
+          },
+          name: "Inkling",
+          tiers: [],
+          release: "2026-07-15"
+        },
+        "thinkingmachines/inkling-small": {
+          cost: {
+            cacheRead: 0.1,
+            cacheWrite: 0,
+            input: 0.5,
+            output: 1.2
+          },
+          name: "Inkling Small",
+          tiers: [],
+          release: "2026-07-30"
+        },
+        "xai/grok-4.5": {
+          cost: {
+            cacheRead: 0.5,
+            cacheWrite: 0,
+            input: 2,
+            output: 6
+          },
+          name: "Grok 4.5",
+          tiers: [],
+          release: "2026-07-08"
+        },
+        "xai/grok-4.6": {
+          cost: {
+            cacheRead: 0.5,
+            cacheWrite: 0,
+            input: 2,
+            output: 6
+          },
+          name: "Grok 4.6",
+          tiers: [
+            {
+              cost: {
+                cacheRead: 1,
+                cacheWrite: 0,
+                input: 4,
+                output: 12
+              },
+              minContext: 200000
+            }
+          ],
+          release: "2026-08-12"
+        },
+        "xai/grok-4.7": {
+          cost: {
+            cacheRead: 0.5,
+            cacheWrite: 0,
+            input: 2,
+            output: 6
+          },
+          name: "Grok 4.7",
+          tiers: [
+            {
+              cost: {
+                cacheRead: 1,
+                cacheWrite: 0,
+                input: 4,
+                output: 12
+              },
+              minContext: 200000
+            }
+          ],
+          release: "2026-09-21"
+        },
+        "z-ai/glm-5.3-flash": {
+          cost: {
+            cacheRead: 0.03,
+            cacheWrite: 0,
+            input: 0.15,
+            output: 0.5
+          },
+          name: "GLM-5.3-Flash",
+          tiers: [],
+          release: "2026-08-26"
+        },
+        "z-ai/glm-5.3-flashx": {
+          cost: {
+            cacheRead: 0.075,
+            cacheWrite: 0,
+            input: 0.37,
+            output: 1.25
+          },
+          name: "GLM-5.3-FlashX",
+          tiers: [],
+          release: "2026-08-26"
+        },
+        "zai-org/GLM-5.2": {
+          cost: {
+            cacheRead: 0.26,
+            cacheWrite: 0,
+            input: 1.4,
+            output: 4.4
+          },
+          name: "GLM-5.2",
+          tiers: [],
+          release: "2026-06-13"
+        },
+        "zai-org/GLM-5.2-Fast": {
+          cost: {
+            cacheRead: 0.5,
+            cacheWrite: 0,
+            input: 3,
+            output: 10.25
+          },
+          name: "GLM-5.2-Fast",
+          tiers: [],
+          release: "2026-06-13"
+        },
+        "zai-org/GLM-5.3": {
+          cost: {
+            cacheRead: 0.26,
+            cacheWrite: 0,
+            input: 1.4,
+            output: 4.4
+          },
+          name: "GLM-5.3",
+          tiers: [],
+          release: "2026-08-14"
+        }
+      }
+    },
+    deepseek: {
+      name: "DeepSeek",
+      source: "DeepSeek list",
+      models: {
+        "deepseek-flash": {
+          cost: {
+            cacheRead: 0.003,
+            cacheWrite: 0,
+            input: 0.15,
+            output: 0.6
+          },
+          name: "DeepSeek V4.1 Flash 1017",
+          tiers: [],
+          release: "2026-10-17"
+        },
+        "deepseek-v4-flash": {
+          cost: {
+            cacheRead: 0.003,
+            cacheWrite: 0,
+            input: 0.15,
+            output: 0.6
+          },
+          name: "DeepSeek V4 Flash",
+          tiers: [],
+          release: "2026-10-17"
+        },
+        "deepseek-v4-flash-vision-exp": {
+          cost: {
+            cacheRead: 0.003,
+            cacheWrite: 0,
+            input: 0.15,
+            output: 0.6
+          },
+          name: "DeepSeek V4 Flash Vision Exp",
+          tiers: [],
+          release: "2026-10-17"
+        },
+        "deepseek-v4-pro": {
+          cost: {
+            cacheRead: 0.022,
+            cacheWrite: 0,
+            input: 0.66,
+            output: 1.98
+          },
+          name: "DeepSeek V4 Pro",
+          tiers: [],
+          release: "2026-08-13"
+        }
+      }
+    },
+    openai: {
+      name: "OpenAI",
+      source: "OpenAI list",
+      models: {
+        "chatgpt-image-latest": {
+          cost: {
+            cacheRead: 1.25,
+            cacheWrite: 0,
+            input: 5,
+            output: 10
+          },
+          name: "chatgpt-image-latest",
+          tiers: [],
+          release: "2025-12-16"
+        },
+        "gpt-3.5-turbo": {
+          cost: {
+            cacheRead: 0,
+            cacheWrite: 0,
+            input: 0.5,
+            output: 1.5
+          },
+          name: "GPT-3.5-turbo",
+          tiers: [],
+          release: "2023-03-01"
+        },
+        "gpt-4": {
+          cost: {
+            cacheRead: 0,
+            cacheWrite: 0,
+            input: 30,
+            output: 60
+          },
+          name: "GPT-4",
+          tiers: [],
+          release: "2023-11-06"
+        },
+        "gpt-4-turbo": {
+          cost: {
+            cacheRead: 0,
+            cacheWrite: 0,
+            input: 10,
+            output: 30
+          },
+          name: "GPT-4 Turbo",
+          tiers: [],
+          release: "2023-11-06"
+        },
+        "gpt-4.1": {
+          cost: {
+            cacheRead: 0.5,
+            cacheWrite: 0,
+            input: 2,
+            output: 8
+          },
+          name: "GPT-4.1",
+          tiers: [],
+          release: "2025-04-14"
+        },
+        "gpt-4.1-mini": {
+          cost: {
+            cacheRead: 0.1,
+            cacheWrite: 0,
+            input: 0.4,
+            output: 1.6
+          },
+          name: "GPT-4.1 mini",
+          tiers: [],
+          release: "2025-04-14"
+        },
+        "gpt-4.1-nano": {
+          cost: {
+            cacheRead: 0.025,
+            cacheWrite: 0,
+            input: 0.1,
+            output: 0.4
+          },
+          name: "GPT-4.1 nano",
+          tiers: [],
+          release: "2025-04-14"
+        },
+        "gpt-4o": {
+          cost: {
+            cacheRead: 1.25,
+            cacheWrite: 0,
+            input: 2.5,
+            output: 10
+          },
+          name: "GPT-4o",
+          tiers: [],
+          release: "2024-05-13"
+        },
+        "gpt-4o-2024-05-13": {
+          cost: {
+            cacheRead: 0,
+            cacheWrite: 0,
+            input: 5,
+            output: 15
+          },
+          name: "GPT-4o (2024-05-13)",
+          tiers: [],
+          release: "2024-05-13"
+        },
+        "gpt-4o-2024-08-06": {
+          cost: {
+            cacheRead: 1.25,
+            cacheWrite: 0,
+            input: 2.5,
+            output: 10
+          },
+          name: "GPT-4o (2024-08-06)",
+          tiers: [],
+          release: "2024-08-06"
+        },
+        "gpt-4o-2024-11-20": {
+          cost: {
+            cacheRead: 1.25,
+            cacheWrite: 0,
+            input: 2.5,
+            output: 10
+          },
+          name: "GPT-4o (2024-11-20)",
+          tiers: [],
+          release: "2024-11-20"
+        },
+        "gpt-4o-mini": {
+          cost: {
+            cacheRead: 0.075,
+            cacheWrite: 0,
+            input: 0.15,
+            output: 0.6
+          },
+          name: "GPT-4o mini",
+          tiers: [],
+          release: "2024-07-18"
+        },
+        "gpt-5": {
+          cost: {
+            cacheRead: 0.125,
+            cacheWrite: 0,
+            input: 1.25,
+            output: 10
+          },
+          name: "GPT-5",
+          tiers: [],
+          release: "2025-08-07"
+        },
+        "gpt-5-mini": {
+          cost: {
+            cacheRead: 0.025,
+            cacheWrite: 0,
+            input: 0.25,
+            output: 2
+          },
+          name: "GPT-5 Mini",
+          tiers: [],
+          release: "2025-08-07"
+        },
+        "gpt-5-nano": {
+          cost: {
+            cacheRead: 0.005,
+            cacheWrite: 0,
+            input: 0.05,
+            output: 0.4
+          },
+          name: "GPT-5 Nano",
+          tiers: [],
+          release: "2025-08-07"
+        },
+        "gpt-5-pro": {
+          cost: {
+            cacheRead: 0,
+            cacheWrite: 0,
+            input: 15,
+            output: 120
+          },
+          name: "GPT-5 Pro",
+          tiers: [],
+          release: "2025-10-06"
+        },
+        "gpt-5.1": {
+          cost: {
+            cacheRead: 0.125,
+            cacheWrite: 0,
+            input: 1.25,
+            output: 10
+          },
+          name: "GPT-5.1",
+          tiers: [],
+          release: "2025-11-13"
+        },
+        "gpt-5.2": {
+          cost: {
+            cacheRead: 0.175,
+            cacheWrite: 0,
+            input: 1.75,
+            output: 14
+          },
+          name: "GPT-5.2",
+          tiers: [],
+          release: "2025-12-11"
+        },
+        "gpt-5.2-pro": {
+          cost: {
+            cacheRead: 0,
+            cacheWrite: 0,
+            input: 21,
+            output: 168
+          },
+          name: "GPT-5.2 Pro",
+          tiers: [],
+          release: "2025-12-11"
+        },
+        "gpt-5.3-codex": {
+          cost: {
+            cacheRead: 0.175,
+            cacheWrite: 0,
+            input: 1.75,
+            output: 14
+          },
+          name: "GPT-5.3 Codex",
+          tiers: [],
+          release: "2026-02-05"
+        },
+        "gpt-5.3-codex-spark": {
+          cost: {
+            cacheRead: 0.175,
+            cacheWrite: 0,
+            input: 1.75,
+            output: 14
+          },
+          name: "GPT-5.3 Codex Spark",
+          tiers: [],
+          release: "2026-02-05"
+        },
+        "gpt-5.4": {
+          cost: {
+            cacheRead: 0.25,
+            cacheWrite: 0,
+            input: 2.5,
+            output: 15
+          },
+          name: "GPT-5.4",
+          tiers: [
+            {
+              cost: {
+                cacheRead: 0.5,
+                cacheWrite: 0,
+                input: 5,
+                output: 22.5
+              },
+              minContext: 272000
+            }
+          ],
+          release: "2026-03-05"
+        },
+        "gpt-5.4-mini": {
+          cost: {
+            cacheRead: 0.075,
+            cacheWrite: 0,
+            input: 0.75,
+            output: 4.5
+          },
+          name: "GPT-5.4 mini",
+          tiers: [],
+          release: "2026-03-17"
+        },
+        "gpt-5.4-nano": {
+          cost: {
+            cacheRead: 0.02,
+            cacheWrite: 0,
+            input: 0.2,
+            output: 1.25
+          },
+          name: "GPT-5.4 nano",
+          tiers: [],
+          release: "2026-03-17"
+        },
+        "gpt-5.4-pro": {
+          cost: {
+            cacheRead: 0,
+            cacheWrite: 0,
+            input: 30,
+            output: 180
+          },
+          name: "GPT-5.4 Pro",
+          tiers: [
+            {
+              cost: {
+                cacheRead: 0,
+                cacheWrite: 0,
+                input: 60,
+                output: 270
+              },
+              minContext: 272000
+            }
+          ],
+          release: "2026-03-05"
+        },
+        "gpt-5.5": {
+          cost: {
+            cacheRead: 0.5,
+            cacheWrite: 0,
+            input: 5,
+            output: 30
+          },
+          name: "GPT-5.5",
+          tiers: [
+            {
+              cost: {
+                cacheRead: 1,
+                cacheWrite: 0,
+                input: 10,
+                output: 45
+              },
+              minContext: 272000
+            }
+          ],
+          release: "2026-04-23"
+        },
+        "gpt-5.5-pro": {
+          cost: {
+            cacheRead: 0,
+            cacheWrite: 0,
+            input: 30,
+            output: 180
+          },
+          name: "GPT-5.5 Pro",
+          tiers: [
+            {
+              cost: {
+                cacheRead: 0,
+                cacheWrite: 0,
+                input: 60,
+                output: 270
+              },
+              minContext: 272000
+            }
+          ],
+          release: "2026-04-23"
+        },
+        "gpt-5.6": {
+          cost: {
+            cacheRead: 0.4,
+            cacheWrite: 5,
+            input: 4,
+            output: 20
+          },
+          name: "GPT-5.6",
+          tiers: [
+            {
+              cost: {
+                cacheRead: 0.8,
+                cacheWrite: 10,
+                input: 8,
+                output: 30
+              },
+              minContext: 272000
+            }
+          ],
+          release: "2026-07-09"
+        },
+        "gpt-5.6-luna": {
+          cost: {
+            cacheRead: 0.02,
+            cacheWrite: 0.25,
+            input: 0.2,
+            output: 1.2
+          },
+          name: "GPT-5.6 Luna",
+          tiers: [
+            {
+              cost: {
+                cacheRead: 0.04,
+                cacheWrite: 0.5,
+                input: 0.4,
+                output: 1.8
+              },
+              minContext: 272000
+            }
+          ],
+          release: "2026-07-09"
+        },
+        "gpt-5.6-sol": {
+          cost: {
+            cacheRead: 0.4,
+            cacheWrite: 5,
+            input: 4,
+            output: 20
+          },
+          name: "GPT-5.6 Sol",
+          tiers: [
+            {
+              cost: {
+                cacheRead: 0.8,
+                cacheWrite: 10,
+                input: 8,
+                output: 30
+              },
+              minContext: 272000
+            }
+          ],
+          release: "2026-07-09"
+        },
+        "gpt-5.6-terra": {
+          cost: {
+            cacheRead: 0.2,
+            cacheWrite: 2.5,
+            input: 2,
+            output: 12
+          },
+          name: "GPT-5.6 Terra",
+          tiers: [
+            {
+              cost: {
+                cacheRead: 0.4,
+                cacheWrite: 5,
+                input: 4,
+                output: 18
+              },
+              minContext: 272000
+            }
+          ],
+          release: "2026-07-09"
+        },
+        "gpt-6-astra": {
+          cost: {
+            cacheRead: 1,
+            cacheWrite: 12.5,
+            input: 10,
+            output: 50
+          },
+          name: "GPT-6 Astra",
+          tiers: [
+            {
+              cost: {
+                cacheRead: 2,
+                cacheWrite: 25,
+                input: 20,
+                output: 75
+              },
+              minContext: 272000
+            }
+          ],
+          release: "2026-09-04"
+        },
+        "gpt-6-luna": {
+          cost: {
+            cacheRead: 0.01,
+            cacheWrite: 0.125,
+            input: 0.1,
+            output: 0.5
+          },
+          name: "GPT-6 Luna",
+          tiers: [
+            {
+              cost: {
+                cacheRead: 0.02,
+                cacheWrite: 0.25,
+                input: 0.2,
+                output: 0.75
+              },
+              minContext: 272000
+            }
+          ],
+          release: "2026-09-22"
+        },
+        "gpt-6-sol": {
+          cost: {
+            cacheRead: 0.2,
+            cacheWrite: 2.5,
+            input: 2,
+            output: 10
+          },
+          name: "GPT-6 Sol",
+          tiers: [
+            {
+              cost: {
+                cacheRead: 0.4,
+                cacheWrite: 5,
+                input: 4,
+                output: 15
+              },
+              minContext: 272000
+            }
+          ],
+          release: "2026-09-22"
+        },
+        "gpt-6.1-sol": {
+          cost: {
+            cacheRead: 0.1,
+            cacheWrite: 2.5,
+            input: 2,
+            output: 10
+          },
+          name: "GPT-6.1 Sol",
+          tiers: [
+            {
+              cost: {
+                cacheRead: 0.2,
+                cacheWrite: 5,
+                input: 4,
+                output: 15
+              },
+              minContext: 272000
+            }
+          ],
+          release: "2026-09-29"
+        },
+        "gpt-6.1-terra": {
+          cost: {
+            cacheRead: 0.05,
+            cacheWrite: 1.25,
+            input: 1,
+            output: 5
+          },
+          name: "GPT-6.1 Terra",
+          tiers: [
+            {
+              cost: {
+                cacheRead: 0.1,
+                cacheWrite: 2.5,
+                input: 2,
+                output: 7.5
+              },
+              minContext: 272000
+            }
+          ],
+          release: "2026-10-26"
+        },
+        "gpt-daybreak-blue-latest": {
+          cost: {
+            cacheRead: 0.4,
+            cacheWrite: 5,
+            input: 4,
+            output: 20
+          },
+          name: "Daybreak Blue",
+          tiers: [
+            {
+              cost: {
+                cacheRead: 0.8,
+                cacheWrite: 10,
+                input: 8,
+                output: 30
+              },
+              minContext: 272000
+            }
+          ],
+          release: "2026-08-07"
+        },
+        "gpt-daybreak-red-latest": {
+          cost: {
+            cacheRead: 1.25,
+            cacheWrite: 15.625,
+            input: 12.5,
+            output: 75
+          },
+          name: "Daybreak Red",
+          tiers: [],
+          release: "2026-08-07"
+        },
+        "gpt-image-1.5": {
+          cost: {
+            cacheRead: 1.25,
+            cacheWrite: 0,
+            input: 5,
+            output: 10
+          },
+          name: "gpt-image-1.5",
+          tiers: [],
+          release: "2025-11-25"
+        },
+        "gpt-image-2": {
+          cost: {
+            cacheRead: 1.25,
+            cacheWrite: 0,
+            input: 5,
+            output: 30
+          },
+          name: "gpt-image-2",
+          tiers: [],
+          release: "2026-04-21"
+        },
+        "gpt-realtime-2.1": {
+          cost: {
+            cacheRead: 0.4,
+            cacheWrite: 0,
+            input: 4,
+            output: 24
+          },
+          name: "GPT-Realtime-2.1",
+          tiers: [],
+          release: "2026-07-06"
+        },
+        o1: {
+          cost: {
+            cacheRead: 7.5,
+            cacheWrite: 0,
+            input: 15,
+            output: 60
+          },
+          name: "o1",
+          tiers: [],
+          release: "2024-12-05"
+        },
+        "o1-pro": {
+          cost: {
+            cacheRead: 0,
+            cacheWrite: 0,
+            input: 150,
+            output: 600
+          },
+          name: "o1-pro",
+          tiers: [],
+          release: "2025-03-19"
+        },
+        o3: {
+          cost: {
+            cacheRead: 0.5,
+            cacheWrite: 0,
+            input: 2,
+            output: 8
+          },
+          name: "o3",
+          tiers: [],
+          release: "2025-04-16"
+        },
+        "o3-mini": {
+          cost: {
+            cacheRead: 0.55,
+            cacheWrite: 0,
+            input: 1.1,
+            output: 4.4
+          },
+          name: "o3-mini",
+          tiers: [],
+          release: "2024-12-20"
+        },
+        "o3-pro": {
+          cost: {
+            cacheRead: 0,
+            cacheWrite: 0,
+            input: 20,
+            output: 80
+          },
+          name: "o3-pro",
+          tiers: [],
+          release: "2025-06-10"
+        },
+        "o4-mini": {
+          cost: {
+            cacheRead: 0.275,
+            cacheWrite: 0,
+            input: 1.1,
+            output: 4.4
+          },
+          name: "o4-mini",
+          tiers: [],
+          release: "2025-04-16"
+        },
+        "text-embedding-3-large": {
+          cost: {
+            cacheRead: 0,
+            cacheWrite: 0,
+            input: 0.13,
+            output: 0
+          },
+          name: "text-embedding-3-large",
+          tiers: [],
+          release: "2024-01-25"
+        },
+        "text-embedding-3-small": {
+          cost: {
+            cacheRead: 0,
+            cacheWrite: 0,
+            input: 0.02,
+            output: 0
+          },
+          name: "text-embedding-3-small",
+          tiers: [],
+          release: "2024-01-25"
+        },
+        "text-embedding-ada-002": {
+          cost: {
+            cacheRead: 0,
+            cacheWrite: 0,
+            input: 0.1,
+            output: 0
+          },
+          name: "text-embedding-ada-002",
+          tiers: [],
+          release: "2022-12-15"
+        }
+      }
+    },
+    opencode: {
+      name: "OpenCode Zen",
+      source: "OpenCode Zen list",
+      models: {
+        "beam-free": {
+          cost: {
+            cacheRead: 0,
+            cacheWrite: 0,
+            input: 0,
+            output: 0
+          },
+          name: "Beam Free",
+          tiers: [],
+          release: "2026-10-05"
+        },
+        "big-pickle": {
+          cost: {
+            cacheRead: 0,
+            cacheWrite: 0,
+            input: 0,
+            output: 0
+          },
+          name: "Big Pickle",
+          tiers: [],
+          release: "2025-10-17"
+        },
+        "cat-jam-free": {
+          cost: {
+            cacheRead: 0,
+            cacheWrite: 0,
+            input: 0,
+            output: 0
+          },
+          name: "Cat Jam Free",
+          tiers: [],
+          release: "2026-10-12"
+        },
+        "claude-3-5-haiku": {
+          cost: {
+            cacheRead: 0.08,
+            cacheWrite: 1,
+            input: 0.8,
+            output: 4
+          },
+          name: "Claude Haiku 3.5",
+          tiers: [],
+          release: "2024-10-22"
+        },
+        "claude-fable-5": {
+          cost: {
+            cacheRead: 1,
+            cacheWrite: 12.5,
+            input: 10,
+            output: 50
+          },
+          name: "Claude Fable 5",
+          tiers: [],
+          release: "2026-06-09"
+        },
+        "claude-fable-5-1": {
+          cost: {
+            cacheRead: 0.25,
+            cacheWrite: 12.5,
+            input: 10,
+            output: 50
+          },
+          name: "Claude Fable 5.1",
+          tiers: [],
+          release: "2026-09-01"
+        },
+        "claude-fable-5-2": {
+          cost: {
+            cacheRead: 0.2,
+            cacheWrite: 10,
+            input: 8,
+            output: 40
+          },
+          name: "Claude Fable 5.2",
+          tiers: [],
+          release: "2026-11-09"
+        },
+        "claude-haiku-4-5": {
+          cost: {
+            cacheRead: 0.1,
+            cacheWrite: 1.25,
+            input: 1,
+            output: 5
+          },
+          name: "Claude Haiku 4.5",
+          tiers: [],
+          release: "2025-10-15"
+        },
+        "claude-haiku-5-5": {
+          cost: {
+            cacheRead: 0.01,
+            cacheWrite: 0.125,
+            input: 0.1,
+            output: 0.5
+          },
+          name: "Claude Haiku 5.5",
+          tiers: [
+            {
+              cost: {
+                cacheRead: 0.05,
+                cacheWrite: 0.625,
+                input: 0.5,
+                output: 2.5
+              },
+              minContext: 1e5
+            }
+          ],
+          release: "2026-10-07"
+        },
+        "claude-opus-4-1": {
+          cost: {
+            cacheRead: 1.5,
+            cacheWrite: 18.75,
+            input: 15,
+            output: 75
+          },
+          name: "Claude Opus 4.1",
+          tiers: [],
+          release: "2025-08-05"
+        },
+        "claude-opus-4-5": {
+          cost: {
+            cacheRead: 0.5,
+            cacheWrite: 6.25,
+            input: 5,
+            output: 25
+          },
+          name: "Claude Opus 4.5",
+          tiers: [],
+          release: "2025-11-24"
+        },
+        "claude-opus-4-6": {
+          cost: {
+            cacheRead: 0.5,
+            cacheWrite: 6.25,
+            input: 5,
+            output: 25
+          },
+          name: "Claude Opus 4.6",
+          tiers: [],
+          release: "2026-02-05"
+        },
+        "claude-opus-4-7": {
+          cost: {
+            cacheRead: 0.5,
+            cacheWrite: 6.25,
+            input: 5,
+            output: 25
+          },
+          name: "Claude Opus 4.7",
+          tiers: [],
+          release: "2026-04-16"
+        },
+        "claude-opus-4-8": {
+          cost: {
+            cacheRead: 0.5,
+            cacheWrite: 6.25,
+            input: 5,
+            output: 25
+          },
+          name: "Claude Opus 4.8",
+          tiers: [],
+          release: "2026-05-28"
+        },
+        "claude-opus-5": {
+          cost: {
+            cacheRead: 0.5,
+            cacheWrite: 6.25,
+            input: 5,
+            output: 25
+          },
+          name: "Claude Opus 5",
+          tiers: [],
+          release: "2026-07-24"
+        },
+        "claude-opus-5-5": {
+          cost: {
+            cacheRead: 0.2,
+            cacheWrite: 5,
+            input: 4,
+            output: 20
+          },
+          name: "Claude Opus 5.5",
+          tiers: [],
+          release: "2026-09-22"
+        },
+        "claude-sonnet-4": {
+          cost: {
+            cacheRead: 0.3,
+            cacheWrite: 3.75,
+            input: 3,
+            output: 15
+          },
+          name: "Claude Sonnet 4",
+          tiers: [
+            {
+              cost: {
+                cacheRead: 0.6,
+                cacheWrite: 7.5,
+                input: 6,
+                output: 22.5
+              },
+              minContext: 200000
+            }
+          ],
+          release: "2025-05-22"
+        },
+        "claude-sonnet-4-5": {
+          cost: {
+            cacheRead: 0.3,
+            cacheWrite: 3.75,
+            input: 3,
+            output: 15
+          },
+          name: "Claude Sonnet 4.5",
+          tiers: [
+            {
+              cost: {
+                cacheRead: 0.6,
+                cacheWrite: 7.5,
+                input: 6,
+                output: 22.5
+              },
+              minContext: 200000
+            }
+          ],
+          release: "2025-09-29"
+        },
+        "claude-sonnet-4-6": {
+          cost: {
+            cacheRead: 0.3,
+            cacheWrite: 3.75,
+            input: 3,
+            output: 15
+          },
+          name: "Claude Sonnet 4.6",
+          tiers: [],
+          release: "2026-02-17"
+        },
+        "claude-sonnet-5": {
+          cost: {
+            cacheRead: 0.2,
+            cacheWrite: 2.5,
+            input: 2,
+            output: 10
+          },
+          name: "Claude Sonnet 5",
+          tiers: [],
+          release: "2026-06-30"
+        },
+        "claude-sonnet-5-5": {
+          cost: {
+            cacheRead: 0.1,
+            cacheWrite: 2.5,
+            input: 2,
+            output: 10
+          },
+          name: "Claude Sonnet 5.5",
+          tiers: [],
+          release: "2026-09-28"
+        },
+        "crouton-alpha-free": {
+          cost: {
+            cacheRead: 0,
+            cacheWrite: 0,
+            input: 0,
+            output: 0
+          },
+          name: "Crouton Alpha Free",
+          tiers: [],
+          release: "2026-11-03"
+        },
+        "deepseek-v4-flash": {
+          cost: {
+            cacheRead: 0.028,
+            cacheWrite: 0,
+            input: 0.14,
+            output: 0.28
+          },
+          name: "DeepSeek V4 Flash",
+          tiers: [],
+          release: "2026-07-31"
+        },
+        "deepseek-v4-flash-free": {
+          cost: {
+            cacheRead: 0,
+            cacheWrite: 0,
+            input: 0,
+            output: 0
+          },
+          name: "DeepSeek V4 Flash Free",
+          tiers: [],
+          release: "2026-07-31"
+        },
+        "deepseek-v4-flash-vision-exp": {
+          cost: {
+            cacheRead: 0.028,
+            cacheWrite: 0,
+            input: 0.14,
+            output: 0.28
+          },
+          name: "DeepSeek V4 Flash Vision Exp",
+          tiers: [],
+          release: "2026-08-21"
+        },
+        "deepseek-v4-pro": {
+          cost: {
+            cacheRead: 0.145,
+            cacheWrite: 0,
+            input: 1.74,
+            output: 3.48
+          },
+          name: "DeepSeek V4 Pro",
+          tiers: [],
+          release: "2026-04-24"
+        },
+        "deepseek-v4.1-flash": {
+          cost: {
+            cacheRead: 0.006,
+            cacheWrite: 0,
+            input: 0.3,
+            output: 1.2
+          },
+          name: "DeepSeek V4.1 Flash 1017",
+          tiers: [],
+          release: "2026-10-17"
+        },
+        "deepseek-v4.1-flash-free": {
+          cost: {
+            cacheRead: 0,
+            cacheWrite: 0,
+            input: 0,
+            output: 0
+          },
+          name: "DeepSeek V4.1 Flash Free",
+          tiers: [],
+          release: "2026-10-17"
+        },
+        "exo-free": {
+          cost: {
+            cacheRead: 0,
+            cacheWrite: 0,
+            input: 0,
+            output: 0
+          },
+          name: "Exo Free",
+          tiers: [],
+          release: "2026-10-06"
+        },
+        "fledge-alpha-free": {
+          cost: {
+            cacheRead: 0,
+            cacheWrite: 0,
+            input: 0,
+            output: 0
+          },
+          name: "Fledge Alpha Free",
+          tiers: [],
+          release: "2026-10-01"
+        },
+        "flint-40b-free": {
+          cost: {
+            cacheRead: 0,
+            cacheWrite: 0,
+            input: 0,
+            output: 0
+          },
+          name: "Flint 40B Free",
+          tiers: [],
+          release: "2026-10-21"
+        },
+        "gemini-3-flash": {
+          cost: {
+            cacheRead: 0.05,
+            cacheWrite: 0,
+            input: 0.5,
+            output: 3
+          },
+          name: "Gemini 3 Flash",
+          tiers: [],
+          release: "2025-12-17"
+        },
+        "gemini-3-pro": {
+          cost: {
+            cacheRead: 0.2,
+            cacheWrite: 0,
+            input: 2,
+            output: 12
+          },
+          name: "Gemini 3 Pro",
+          tiers: [
+            {
+              cost: {
+                cacheRead: 0.4,
+                cacheWrite: 0,
+                input: 4,
+                output: 18
+              },
+              minContext: 200000
+            }
+          ],
+          release: "2025-11-18"
+        },
+        "gemini-3.1-pro": {
+          cost: {
+            cacheRead: 0.2,
+            cacheWrite: 0,
+            input: 2,
+            output: 12
+          },
+          name: "Gemini 3.1 Pro Preview",
+          tiers: [
+            {
+              cost: {
+                cacheRead: 0.4,
+                cacheWrite: 0,
+                input: 4,
+                output: 18
+              },
+              minContext: 200000
+            }
+          ],
+          release: "2026-02-19"
+        },
+        "gemini-3.5-flash": {
+          cost: {
+            cacheRead: 0.15,
+            cacheWrite: 0,
+            input: 1.5,
+            output: 9
+          },
+          name: "Gemini 3.5 Flash",
+          tiers: [],
+          release: "2026-05-19"
+        },
+        "gemini-3.5-flash-lite": {
+          cost: {
+            cacheRead: 0.03,
+            cacheWrite: 0,
+            input: 0.3,
+            output: 2.5
+          },
+          name: "Gemini 3.5 Flash Lite",
+          tiers: [],
+          release: "2026-07-21"
+        },
+        "gemini-3.6-flash": {
+          cost: {
+            cacheRead: 0.075,
+            cacheWrite: 0,
+            input: 0.75,
+            output: 3.75
+          },
+          name: "Gemini 3.6 Flash",
+          tiers: [],
+          release: "2026-07-21"
+        },
+        "gemini-3.7-flash": {
+          cost: {
+            cacheRead: 0.075,
+            cacheWrite: 0,
+            input: 0.75,
+            output: 3.75
+          },
+          name: "Gemini 3.7 Flash",
+          tiers: [],
+          release: "2026-08-13"
+        },
+        "gemini-3.8-flash": {
+          cost: {
+            cacheRead: 0.075,
+            cacheWrite: 0,
+            input: 0.75,
+            output: 3.75
+          },
+          name: "Gemini 3.8 Flash",
+          tiers: [],
+          release: "2026-09-02"
+        },
+        "gemini-4-argon": {
+          cost: {
+            cacheRead: 0.1,
+            cacheWrite: 0,
+            input: 2,
+            output: 10
+          },
+          name: "Gemini 4 Argon",
+          tiers: [],
+          release: "2026-10-13"
+        },
+        "gemini-4-carbon": {
+          cost: {
+            cacheRead: 0.1,
+            cacheWrite: 0,
+            input: 2,
+            output: 10
+          },
+          name: "Gemini 4 Carbon",
+          tiers: [],
+          release: "2026-11-10"
+        },
+        "gemini-4-hydrogen": {
+          cost: {
+            cacheRead: 0.075,
+            cacheWrite: 0,
+            input: 1.5,
+            output: 7.5
+          },
+          name: "Gemini 4 Hydrogen",
+          tiers: [],
+          release: "2026-11-12"
+        },
+        "glm-4.6": {
+          cost: {
+            cacheRead: 0.1,
+            cacheWrite: 0,
+            input: 0.6,
+            output: 2.2
+          },
+          name: "GLM-4.6",
+          tiers: [],
+          release: "2025-09-30"
+        },
+        "glm-4.7": {
+          cost: {
+            cacheRead: 0.1,
+            cacheWrite: 0,
+            input: 0.6,
+            output: 2.2
+          },
+          name: "GLM-4.7",
+          tiers: [],
+          release: "2025-12-22"
+        },
+        "glm-4.7-free": {
+          cost: {
+            cacheRead: 0,
+            cacheWrite: 0,
+            input: 0,
+            output: 0
+          },
+          name: "GLM-4.7 Free",
+          tiers: [],
+          release: "2025-12-22"
+        },
+        "glm-5": {
+          cost: {
+            cacheRead: 0.2,
+            cacheWrite: 0,
+            input: 1,
+            output: 3.2
+          },
+          name: "GLM-5",
+          tiers: [],
+          release: "2026-02-12"
+        },
+        "glm-5-free": {
+          cost: {
+            cacheRead: 0,
+            cacheWrite: 0,
+            input: 0,
+            output: 0
+          },
+          name: "GLM-5 Free",
+          tiers: [],
+          release: "2026-02-12"
+        },
+        "glm-5.1": {
+          cost: {
+            cacheRead: 0.26,
+            cacheWrite: 0,
+            input: 1.4,
+            output: 4.4
+          },
+          name: "GLM-5.1",
+          tiers: [],
+          release: "2026-04-07"
+        },
+        "glm-5.2": {
+          cost: {
+            cacheRead: 0.26,
+            cacheWrite: 0,
+            input: 1.4,
+            output: 4.4
+          },
+          name: "GLM-5.2",
+          tiers: [],
+          release: "2026-06-13"
+        },
+        "glm-5.3": {
+          cost: {
+            cacheRead: 0.26,
+            cacheWrite: 0,
+            input: 1.4,
+            output: 4.4
+          },
+          name: "GLM-5.3",
+          tiers: [],
+          release: "2026-08-14"
+        },
+        "glm-5.3-flash": {
+          cost: {
+            cacheRead: 0.03,
+            cacheWrite: 0,
+            input: 0.15,
+            output: 0.5
+          },
+          name: "GLM-5.3-Flash",
+          tiers: [],
+          release: "2026-08-26"
+        },
+        "glm-5.3-flash-free": {
+          cost: {
+            cacheRead: 0,
+            cacheWrite: 0,
+            input: 0,
+            output: 0
+          },
+          name: "GLM-5.3-Flash Free",
+          tiers: [],
+          release: "2026-08-26"
+        },
+        "gpt-5": {
+          cost: {
+            cacheRead: 0.107,
+            cacheWrite: 0,
+            input: 1.07,
+            output: 8.5
+          },
+          name: "GPT-5",
+          tiers: [],
+          release: "2025-08-07"
+        },
+        "gpt-5-codex": {
+          cost: {
+            cacheRead: 0.107,
+            cacheWrite: 0,
+            input: 1.07,
+            output: 8.5
+          },
+          name: "GPT-5 Codex",
+          tiers: [],
+          release: "2025-09-15"
+        },
+        "gpt-5-nano": {
+          cost: {
+            cacheRead: 0.005,
+            cacheWrite: 0,
+            input: 0.05,
+            output: 0.4
+          },
+          name: "GPT-5 Nano",
+          tiers: [],
+          release: "2025-08-07"
+        },
+        "gpt-5.1": {
+          cost: {
+            cacheRead: 0.107,
+            cacheWrite: 0,
+            input: 1.07,
+            output: 8.5
+          },
+          name: "GPT-5.1",
+          tiers: [],
+          release: "2025-11-13"
+        },
+        "gpt-5.1-codex": {
+          cost: {
+            cacheRead: 0.107,
+            cacheWrite: 0,
+            input: 1.07,
+            output: 8.5
+          },
+          name: "GPT-5.1 Codex",
+          tiers: [],
+          release: "2025-11-13"
+        },
+        "gpt-5.1-codex-max": {
+          cost: {
+            cacheRead: 0.125,
+            cacheWrite: 0,
+            input: 1.25,
+            output: 10
+          },
+          name: "GPT-5.1 Codex Max",
+          tiers: [],
+          release: "2025-11-13"
+        },
+        "gpt-5.1-codex-mini": {
+          cost: {
+            cacheRead: 0.025,
+            cacheWrite: 0,
+            input: 0.25,
+            output: 2
+          },
+          name: "GPT-5.1 Codex Mini",
+          tiers: [],
+          release: "2025-11-13"
+        },
+        "gpt-5.2": {
+          cost: {
+            cacheRead: 0.175,
+            cacheWrite: 0,
+            input: 1.75,
+            output: 14
+          },
+          name: "GPT-5.2",
+          tiers: [],
+          release: "2025-12-11"
+        },
+        "gpt-5.2-codex": {
+          cost: {
+            cacheRead: 0.175,
+            cacheWrite: 0,
+            input: 1.75,
+            output: 14
+          },
+          name: "GPT-5.2 Codex",
+          tiers: [],
+          release: "2025-12-11"
+        },
+        "gpt-5.3-codex": {
+          cost: {
+            cacheRead: 0.175,
+            cacheWrite: 0,
+            input: 1.75,
+            output: 14
+          },
+          name: "GPT-5.3 Codex",
+          tiers: [],
+          release: "2026-02-05"
+        },
+        "gpt-5.3-codex-spark": {
+          cost: {
+            cacheRead: 0.175,
+            cacheWrite: 0,
+            input: 1.75,
+            output: 14
+          },
+          name: "GPT-5.3 Codex Spark",
+          tiers: [],
+          release: "2026-02-05"
+        },
+        "gpt-5.4": {
+          cost: {
+            cacheRead: 0.25,
+            cacheWrite: 0,
+            input: 2.5,
+            output: 15
+          },
+          name: "GPT-5.4",
+          tiers: [
+            {
+              cost: {
+                cacheRead: 0.5,
+                cacheWrite: 0,
+                input: 5,
+                output: 22.5
+              },
+              minContext: 272000
+            }
+          ],
+          release: "2026-03-05"
+        },
+        "gpt-5.4-mini": {
+          cost: {
+            cacheRead: 0.075,
+            cacheWrite: 0,
+            input: 0.75,
+            output: 4.5
+          },
+          name: "GPT-5.4 Mini",
+          tiers: [],
+          release: "2026-03-17"
+        },
+        "gpt-5.4-nano": {
+          cost: {
+            cacheRead: 0.02,
+            cacheWrite: 0,
+            input: 0.2,
+            output: 1.25
+          },
+          name: "GPT-5.4 Nano",
+          tiers: [],
+          release: "2026-03-17"
+        },
+        "gpt-5.4-pro": {
+          cost: {
+            cacheRead: 30,
+            cacheWrite: 0,
+            input: 30,
+            output: 180
+          },
+          name: "GPT-5.4 Pro",
+          tiers: [],
+          release: "2026-03-05"
+        },
+        "gpt-5.5": {
+          cost: {
+            cacheRead: 0.5,
+            cacheWrite: 0,
+            input: 5,
+            output: 30
+          },
+          name: "GPT-5.5",
+          tiers: [
+            {
+              cost: {
+                cacheRead: 1,
+                cacheWrite: 0,
+                input: 10,
+                output: 45
+              },
+              minContext: 272000
+            }
+          ],
+          release: "2026-04-23"
+        },
+        "gpt-5.5-pro": {
+          cost: {
+            cacheRead: 30,
+            cacheWrite: 0,
+            input: 30,
+            output: 180
+          },
+          name: "GPT-5.5 Pro",
+          tiers: [],
+          release: "2026-04-23"
+        },
+        "gpt-5.6-luna": {
+          cost: {
+            cacheRead: 0.02,
+            cacheWrite: 0.25,
+            input: 0.2,
+            output: 1.2
+          },
+          name: "GPT-5.6 Luna",
+          tiers: [
+            {
+              cost: {
+                cacheRead: 0.04,
+                cacheWrite: 0.5,
+                input: 0.4,
+                output: 1.8
+              },
+              minContext: 272000
+            }
+          ],
+          release: "2026-07-09"
+        },
+        "gpt-5.6-sol": {
+          cost: {
+            cacheRead: 0.4,
+            cacheWrite: 5,
+            input: 4,
+            output: 20
+          },
+          name: "GPT-5.6 Sol",
+          tiers: [
+            {
+              cost: {
+                cacheRead: 0.8,
+                cacheWrite: 10,
+                input: 8,
+                output: 30
+              },
+              minContext: 272000
+            }
+          ],
+          release: "2026-07-09"
+        },
+        "gpt-5.6-terra": {
+          cost: {
+            cacheRead: 0.2,
+            cacheWrite: 2.5,
+            input: 2,
+            output: 12
+          },
+          name: "GPT-5.6 Terra",
+          tiers: [
+            {
+              cost: {
+                cacheRead: 0.4,
+                cacheWrite: 5,
+                input: 4,
+                output: 18
+              },
+              minContext: 272000
+            }
+          ],
+          release: "2026-07-09"
+        },
+        "gpt-6-astra": {
+          cost: {
+            cacheRead: 1,
+            cacheWrite: 12.5,
+            input: 10,
+            output: 50
+          },
+          name: "GPT-6 Astra",
+          tiers: [
+            {
+              cost: {
+                cacheRead: 2,
+                cacheWrite: 25,
+                input: 20,
+                output: 75
+              },
+              minContext: 272000
+            }
+          ],
+          release: "2026-09-04"
+        },
+        "gpt-6-luna": {
+          cost: {
+            cacheRead: 0.01,
+            cacheWrite: 0.125,
+            input: 0.1,
+            output: 0.5
+          },
+          name: "GPT-6 Luna",
+          tiers: [
+            {
+              cost: {
+                cacheRead: 0.02,
+                cacheWrite: 0.25,
+                input: 0.2,
+                output: 0.75
+              },
+              minContext: 272000
+            }
+          ],
+          release: "2026-09-22"
+        },
+        "gpt-6-sol": {
+          cost: {
+            cacheRead: 0.2,
+            cacheWrite: 2.5,
+            input: 2,
+            output: 10
+          },
+          name: "GPT-6 Sol",
+          tiers: [
+            {
+              cost: {
+                cacheRead: 0.4,
+                cacheWrite: 5,
+                input: 4,
+                output: 15
+              },
+              minContext: 272000
+            }
+          ],
+          release: "2026-09-22"
+        },
+        "gpt-6.1-sol": {
+          cost: {
+            cacheRead: 0.1,
+            cacheWrite: 2.5,
+            input: 2,
+            output: 10
+          },
+          name: "GPT-6.1 Sol",
+          tiers: [
+            {
+              cost: {
+                cacheRead: 0.2,
+                cacheWrite: 5,
+                input: 4,
+                output: 15
+              },
+              minContext: 272000
+            }
+          ],
+          release: "2026-09-29"
+        },
+        "grok-4.5": {
+          cost: {
+            cacheRead: 0.3,
+            cacheWrite: 0,
+            input: 2,
+            output: 6
+          },
+          name: "Grok 4.5",
+          tiers: [
+            {
+              cost: {
+                cacheRead: 0.6,
+                cacheWrite: 0,
+                input: 4,
+                output: 12
+              },
+              minContext: 200000
+            }
+          ],
+          release: "2026-07-08"
+        },
+        "grok-4.6": {
+          cost: {
+            cacheRead: 0.5,
+            cacheWrite: 0,
+            input: 2,
+            output: 6
+          },
+          name: "Grok 4.6",
+          tiers: [
+            {
+              cost: {
+                cacheRead: 1,
+                cacheWrite: 0,
+                input: 4,
+                output: 12
+              },
+              minContext: 200000
+            }
+          ],
+          release: "2026-08-12"
+        },
+        "grok-4.7": {
+          cost: {
+            cacheRead: 0.5,
+            cacheWrite: 0,
+            input: 2,
+            output: 6
+          },
+          name: "Grok 4.7",
+          tiers: [
+            {
+              cost: {
+                cacheRead: 1,
+                cacheWrite: 0,
+                input: 4,
+                output: 12
+              },
+              minContext: 200000
+            }
+          ],
+          release: "2026-09-21"
+        },
+        "grok-build-0.1": {
+          cost: {
+            cacheRead: 0.2,
+            cacheWrite: 0,
+            input: 1,
+            output: 2
+          },
+          name: "Grok Build 0.1",
+          tiers: [],
+          release: "2026-04-16"
+        },
+        "grok-code": {
+          cost: {
+            cacheRead: 0,
+            cacheWrite: 0,
+            input: 0,
+            output: 0
+          },
+          name: "Grok Code Fast 1",
+          tiers: [],
+          release: "2025-09-02"
+        },
+        "hy3-free": {
+          cost: {
+            cacheRead: 0,
+            cacheWrite: 0,
+            input: 0,
+            output: 0
+          },
+          name: "Hy3 Free",
+          tiers: [],
+          release: "2026-07-06"
+        },
+        "hy3-preview-free": {
+          cost: {
+            cacheRead: 0,
+            cacheWrite: 0,
+            input: 0,
+            output: 0
+          },
+          name: "Hy3 preview Free",
+          tiers: [],
+          release: "2026-04-20"
+        },
+        "iceman-free": {
+          cost: {
+            cacheRead: 0,
+            cacheWrite: 0,
+            input: 0,
+            output: 0
+          },
+          name: "Iceman Free",
+          tiers: [],
+          release: "2026-11-06"
+        },
+        "inkling-2-small-free": {
+          cost: {
+            cacheRead: 0,
+            cacheWrite: 0,
+            input: 0,
+            output: 0
+          },
+          name: "Inkling 2 Small Free",
+          tiers: [],
+          release: "2026-11-05"
+        },
+        "kimi-k2": {
+          cost: {
+            cacheRead: 0.4,
+            cacheWrite: 0,
+            input: 0.4,
+            output: 2.5
+          },
+          name: "Kimi K2",
+          tiers: [],
+          release: "2025-09-05"
+        },
+        "kimi-k2-thinking": {
+          cost: {
+            cacheRead: 0.4,
+            cacheWrite: 0,
+            input: 0.4,
+            output: 2.5
+          },
+          name: "Kimi K2 Thinking",
+          tiers: [],
+          release: "2025-11-06"
+        },
+        "kimi-k2.5": {
+          cost: {
+            cacheRead: 0.1,
+            cacheWrite: 0,
+            input: 0.6,
+            output: 3
+          },
+          name: "Kimi K2.5",
+          tiers: [],
+          release: "2026-01-27"
+        },
+        "kimi-k2.5-free": {
+          cost: {
+            cacheRead: 0,
+            cacheWrite: 0,
+            input: 0,
+            output: 0
+          },
+          name: "Kimi K2.5 Free",
+          tiers: [],
+          release: "2026-01-27"
+        },
+        "kimi-k2.6": {
+          cost: {
+            cacheRead: 0.16,
+            cacheWrite: 0,
+            input: 0.95,
+            output: 4
+          },
+          name: "Kimi K2.6",
+          tiers: [],
+          release: "2026-04-20"
+        },
+        "kimi-k2.7-code": {
+          cost: {
+            cacheRead: 0.19,
+            cacheWrite: 0,
+            input: 0.95,
+            output: 4
+          },
+          name: "Kimi K2.7 Code",
+          tiers: [],
+          release: "2026-06-12"
+        },
+        "kimi-k3": {
+          cost: {
+            cacheRead: 0.3,
+            cacheWrite: 3,
+            input: 3,
+            output: 15
+          },
+          name: "Kimi K3",
+          tiers: [],
+          release: "2026-07-16"
+        },
+        "laguna-s-2.1-free": {
+          cost: {
+            cacheRead: 0,
+            cacheWrite: 0,
+            input: 0,
+            output: 0
+          },
+          name: "Laguna S 2.1 Free",
+          tiers: [],
+          release: "2026-07-21"
+        },
+        "ling-2.6-flash-free": {
+          cost: {
+            cacheRead: 0,
+            cacheWrite: 0,
+            input: 0,
+            output: 0
+          },
+          name: "Ling 2.6 Flash Free",
+          tiers: [],
+          release: "2026-04-21"
+        },
+        "ling-3.0-flash-fin-free": {
+          cost: {
+            cacheRead: 0,
+            cacheWrite: 0,
+            input: 0,
+            output: 0
+          },
+          name: "Ling 3.0 Flash Fin Free",
+          tiers: [],
+          release: "2026-08-27"
+        },
+        "ling-3.0-flash-free": {
+          cost: {
+            cacheRead: 0,
+            cacheWrite: 0,
+            input: 0,
+            output: 0
+          },
+          name: "Ling-3.0-flash Free",
+          tiers: [],
+          release: "2026-07-23"
+        },
+        "ling-3.0-tiny-free": {
+          cost: {
+            cacheRead: 0,
+            cacheWrite: 0,
+            input: 0,
+            output: 0
+          },
+          name: "Ling-3.0-tiny Free",
+          tiers: [],
+          release: "2026-08-06"
+        },
+        "ling-3.1-flash-free": {
+          cost: {
+            cacheRead: 0,
+            cacheWrite: 0,
+            input: 0,
+            output: 0
+          },
+          name: "Ling 3.1 Flash Free",
+          tiers: [],
+          release: "2026-09-29"
+        },
+        "ll-alpha-free": {
+          cost: {
+            cacheRead: 0,
+            cacheWrite: 0,
+            input: 0,
+            output: 0
+          },
+          name: "LL Alpha Free",
+          tiers: [],
+          release: "2026-10-15"
+        },
+        "longcat-2.0-free": {
+          cost: {
+            cacheRead: 0,
+            cacheWrite: 0,
+            input: 0,
+            output: 0
+          },
+          name: "LongCat-2.0 Free",
+          tiers: [],
+          release: "2026-06-30"
+        },
+        "longcat-2.5-free": {
+          cost: {
+            cacheRead: 0,
+            cacheWrite: 0,
+            input: 0,
+            output: 0
+          },
+          name: "LongCat 2.5 Free",
+          tiers: [],
+          release: "2026-11-02"
+        },
+        "longcat-2.5-preview-free": {
+          cost: {
+            cacheRead: 0,
+            cacheWrite: 0,
+            input: 0,
+            output: 0
+          },
+          name: "LongCat 2.5 Preview Free",
+          tiers: [],
+          release: "2026-09-25"
+        },
+        "mimo-v2-flash-free": {
+          cost: {
+            cacheRead: 0,
+            cacheWrite: 0,
+            input: 0,
+            output: 0
+          },
+          name: "MiMo V2 Flash Free",
+          tiers: [],
+          release: "2025-12-16"
+        },
+        "mimo-v2-omni-free": {
+          cost: {
+            cacheRead: 0,
+            cacheWrite: 0,
+            input: 0,
+            output: 0
+          },
+          name: "MiMo V2 Omni Free",
+          tiers: [],
+          release: "2026-03-18"
+        },
+        "mimo-v2-pro-free": {
+          cost: {
+            cacheRead: 0,
+            cacheWrite: 0,
+            input: 0,
+            output: 0
+          },
+          name: "MiMo V2 Pro Free",
+          tiers: [],
+          release: "2026-03-18"
+        },
+        "mimo-v2.5-free": {
+          cost: {
+            cacheRead: 0,
+            cacheWrite: 0,
+            input: 0,
+            output: 0
+          },
+          name: "MiMo V2.5 Free",
+          tiers: [],
+          release: "2026-04-22"
+        },
+        "mimo-v2.6-flash-free": {
+          cost: {
+            cacheRead: 0,
+            cacheWrite: 0,
+            input: 0,
+            output: 0
+          },
+          name: "MiMo-V2.6-Flash Free",
+          tiers: [],
+          release: "2026-09-22"
+        },
+        "minimax-m2.1": {
+          cost: {
+            cacheRead: 0.1,
+            cacheWrite: 0,
+            input: 0.3,
+            output: 1.2
+          },
+          name: "MiniMax-M2.1",
+          tiers: [],
+          release: "2025-12-23"
+        },
+        "minimax-m2.1-free": {
+          cost: {
+            cacheRead: 0,
+            cacheWrite: 0,
+            input: 0,
+            output: 0
+          },
+          name: "MiniMax-M2.1 Free",
+          tiers: [],
+          release: "2025-12-23"
+        },
+        "minimax-m2.5": {
+          cost: {
+            cacheRead: 0.06,
+            cacheWrite: 0,
+            input: 0.3,
+            output: 1.2
+          },
+          name: "MiniMax-M2.5",
+          tiers: [],
+          release: "2026-02-12"
+        },
+        "minimax-m2.5-free": {
+          cost: {
+            cacheRead: 0,
+            cacheWrite: 0,
+            input: 0,
+            output: 0
+          },
+          name: "MiniMax-M2.5 Free",
+          tiers: [],
+          release: "2026-02-12"
+        },
+        "minimax-m2.7": {
+          cost: {
+            cacheRead: 0.06,
+            cacheWrite: 0,
+            input: 0.3,
+            output: 1.2
+          },
+          name: "MiniMax-M2.7",
+          tiers: [],
+          release: "2026-03-18"
+        },
+        "minimax-m3": {
+          cost: {
+            cacheRead: 0.06,
+            cacheWrite: 0,
+            input: 0.3,
+            output: 1.2
+          },
+          name: "MiniMax-M3",
+          tiers: [],
+          release: "2026-06-01"
+        },
+        "minimax-m3-free": {
+          cost: {
+            cacheRead: 0,
+            cacheWrite: 0,
+            input: 0,
+            output: 0
+          },
+          name: "MiniMax-M3 Free",
+          tiers: [],
+          release: "2026-06-01"
+        },
+        "minimax-m3.1-flash-free": {
+          cost: {
+            cacheRead: 0,
+            cacheWrite: 0,
+            input: 0,
+            output: 0
+          },
+          name: "MiniMax M3.1 Flash Free",
+          tiers: [],
+          release: "2026-10-19"
+        },
+        "mistral-large-4": {
+          cost: {
+            cacheRead: 0.07,
+            cacheWrite: 0,
+            input: 0.68,
+            output: 2.09
+          },
+          name: "Mistral Large 4",
+          tiers: [],
+          release: "2026-10-06"
+        },
+        "muse-ember-1.0": {
+          cost: {
+            cacheRead: 0.004,
+            cacheWrite: 0,
+            input: 0.1,
+            output: 0.5
+          },
+          name: "Muse Ember 1.0",
+          tiers: [
+            {
+              cost: {
+                cacheRead: 0.012,
+                cacheWrite: 0,
+                input: 0.3,
+                output: 1.5
+              },
+              minContext: 200000
+            }
+          ],
+          release: "2026-11-09"
+        },
+        "muse-spark-1.2": {
+          cost: {
+            cacheRead: 0.15,
+            cacheWrite: 0,
+            input: 1.25,
+            output: 4.25
+          },
+          name: "Muse Spark 1.2",
+          tiers: [],
+          release: "2026-08-05"
+        },
+        "muse-spark-1.2-contributor-free": {
+          cost: {
+            cacheRead: 0,
+            cacheWrite: 0,
+            input: 0,
+            output: 0
+          },
+          name: "Muse Spark 1.2 Free",
+          tiers: [],
+          release: "2026-08-05"
+        },
+        "muse-spark-1.3": {
+          cost: {
+            cacheRead: 0.15,
+            cacheWrite: 0,
+            input: 1.25,
+            output: 4.25
+          },
+          name: "Muse Spark 1.3",
+          tiers: [],
+          release: "2026-09-02"
+        },
+        "muse-spark-1.3-contributor-free": {
+          cost: {
+            cacheRead: 0,
+            cacheWrite: 0,
+            input: 0,
+            output: 0
+          },
+          name: "Muse Spark 1.3 Free",
+          tiers: [],
+          release: "2026-09-02"
+        },
+        "muse-wonder-1.0": {
+          cost: {
+            cacheRead: 0.2,
+            cacheWrite: 0,
+            input: 4,
+            output: 20
+          },
+          name: "Muse Wonder",
+          tiers: [],
+          release: "2026-10-12"
+        },
+        "nemotron-3-super-free": {
+          cost: {
+            cacheRead: 0,
+            cacheWrite: 0,
+            input: 0,
+            output: 0
+          },
+          name: "Nemotron 3 Super Free",
+          tiers: [],
+          release: "2026-03-11"
+        },
+        "nemotron-3-ultra-free": {
+          cost: {
+            cacheRead: 0,
+            cacheWrite: 0,
+            input: 0,
+            output: 0
+          },
+          name: "Nemotron 3 Ultra Free",
+          tiers: [],
+          release: "2026-06-04"
+        },
+        "nemotron-3.5-lightning-free": {
+          cost: {
+            cacheRead: 0,
+            cacheWrite: 0,
+            input: 0,
+            output: 0
+          },
+          name: "Nemotron 3.5 Lightning Free",
+          tiers: [],
+          release: "2026-08-11"
+        },
+        "nemotron-3.5-super-vl-free": {
+          cost: {
+            cacheRead: 0,
+            cacheWrite: 0,
+            input: 0,
+            output: 0
+          },
+          name: "Nemotron 3.5 Super VL Free",
+          tiers: [],
+          release: "2026-10-15"
+        },
+        "north-mini-code-free": {
+          cost: {
+            cacheRead: 0,
+            cacheWrite: 0,
+            input: 0,
+            output: 0
+          },
+          name: "North Mini Code Free",
+          tiers: [],
+          release: "2026-06-09"
+        },
+        "pulse-alpha-free": {
+          cost: {
+            cacheRead: 0,
+            cacheWrite: 0,
+            input: 0,
+            output: 0
+          },
+          name: "Pulse Alpha Free",
+          tiers: [],
+          release: "2026-11-02"
+        },
+        "qwen3-coder": {
+          cost: {
+            cacheRead: 0,
+            cacheWrite: 0,
+            input: 0.45,
+            output: 1.8
+          },
+          name: "Qwen3 Coder",
+          tiers: [],
+          release: "2025-07-22"
+        },
+        "qwen3.5-plus": {
+          cost: {
+            cacheRead: 0.02,
+            cacheWrite: 0.25,
+            input: 0.2,
+            output: 1.2
+          },
+          name: "Qwen3.5 Plus",
+          tiers: [],
+          release: "2026-02-16"
+        },
+        "qwen3.6-plus": {
+          cost: {
+            cacheRead: 0.05,
+            cacheWrite: 0.625,
+            input: 0.5,
+            output: 3
+          },
+          name: "Qwen3.6 Plus",
+          tiers: [],
+          release: "2026-04-02"
+        },
+        "qwen3.6-plus-free": {
+          cost: {
+            cacheRead: 0,
+            cacheWrite: 0,
+            input: 0,
+            output: 0
+          },
+          name: "Qwen3.6 Plus Free",
+          tiers: [],
+          release: "2026-04-02"
+        },
+        "qwen3.8-flash": {
+          cost: {
+            cacheRead: 0.016,
+            cacheWrite: 0.2,
+            input: 0.15,
+            output: 0.47
+          },
+          name: "Qwen3.8 Flash",
+          tiers: [],
+          release: "2026-08-26"
+        },
+        "qwen3.8-max": {
+          cost: {
+            cacheRead: 0.25,
+            cacheWrite: 2.5,
+            input: 2,
+            output: 6
+          },
+          name: "Qwen3.8 Max",
+          tiers: [],
+          release: "2026-08-03"
+        },
+        "ring-2.6-1t-free": {
+          cost: {
+            cacheRead: 0,
+            cacheWrite: 0,
+            input: 0,
+            output: 0
+          },
+          name: "Ring 2.6 1T Free",
+          tiers: [],
+          release: "2026-05-08"
+        },
+        "space-bunny-free": {
+          cost: {
+            cacheRead: 0,
+            cacheWrite: 0,
+            input: 0,
+            output: 0
+          },
+          name: "Space Bunny Free",
+          tiers: [],
+          release: "2026-09-23"
+        },
+        "step-5-preview-free": {
+          cost: {
+            cacheRead: 0,
+            cacheWrite: 0,
+            input: 0,
+            output: 0
+          },
+          name: "Step 5 Preview Free",
+          tiers: [],
+          release: "2026-09-16"
+        },
+        "trinity-large-preview-free": {
+          cost: {
+            cacheRead: 0,
+            cacheWrite: 0,
+            input: 0,
+            output: 0
+          },
+          name: "Trinity Large Preview",
+          tiers: [],
+          release: "2026-01-27"
+        },
+        "x-preview-f-free": {
+          cost: {
+            cacheRead: 0,
+            cacheWrite: 0,
+            input: 0,
+            output: 0
+          },
+          name: "Ox Alpha Free (Unlimited)",
+          tiers: [],
+          release: "2026-08-21"
+        }
+      }
+    },
+    "opencode-go": {
+      name: "OpenCode Go",
+      source: "OpenCode Go card",
+      models: {
+        "beam-free": {
+          cost: {
+            cacheRead: 0,
+            cacheWrite: 0,
+            input: 0,
+            output: 0
+          },
+          name: "Beam Free",
+          tiers: [],
+          release: "2026-10-05"
+        },
+        "cat-jam-free": {
+          cost: {
+            cacheRead: 0,
+            cacheWrite: 0,
+            input: 0,
+            output: 0
+          },
+          name: "Cat Jam Free",
+          tiers: [],
+          release: "2026-10-12"
+        },
+        "claude-haiku-5-5": {
+          cost: {
+            cacheRead: 0.01,
+            cacheWrite: 0.125,
+            input: 0.1,
+            output: 0.5
+          },
+          name: "Claude Haiku 5.5",
+          tiers: [
+            {
+              cost: {
+                cacheRead: 0.05,
+                cacheWrite: 0.625,
+                input: 0.5,
+                output: 2.5
+              },
+              minContext: 1e5
+            }
+          ],
+          release: "2026-10-07"
+        },
+        "crouton-alpha-free": {
+          cost: {
+            cacheRead: 0,
+            cacheWrite: 0,
+            input: 0,
+            output: 0
+          },
+          name: "Crouton Alpha Free",
+          tiers: [],
+          release: "2026-11-03"
+        },
+        "deepseek-v4-pro": {
+          cost: {
+            cacheRead: 0.022,
+            cacheWrite: 0,
+            input: 0.66,
+            output: 1.98
+          },
+          name: "DeepSeek V4 Pro",
+          tiers: [],
+          release: "2026-04-24"
+        },
+        "deepseek-v4.1-flash": {
+          cost: {
+            cacheRead: 0.003,
+            cacheWrite: 0,
+            input: 0.15,
+            output: 0.6
+          },
+          name: "DeepSeek V4.1 Flash 1017",
+          tiers: [],
+          release: "2026-10-17"
+        },
+        "gemini-4-argon": {
+          cost: {
+            cacheRead: 0.1,
+            cacheWrite: 0,
+            input: 2,
+            output: 10
+          },
+          name: "Gemini 4 Argon",
+          tiers: [],
+          release: "2026-10-13"
+        },
+        "gemini-4-argon-contributor": {
+          cost: {
+            cacheRead: 0.2,
+            cacheWrite: 0,
+            input: 4,
+            output: 20
+          },
+          name: "Gemini 4 Argon Contributor",
+          tiers: [],
+          release: "2026-10-13"
+        },
+        "glm-5.2": {
+          cost: {
+            cacheRead: 0.26,
+            cacheWrite: 0,
+            input: 1.4,
+            output: 4.4
+          },
+          name: "GLM-5.2",
+          tiers: [],
+          release: "2026-06-13"
+        },
+        "glm-5.3": {
+          cost: {
+            cacheRead: 0.26,
+            cacheWrite: 0,
+            input: 1.4,
+            output: 4.4
+          },
+          name: "GLM-5.3",
+          tiers: [],
+          release: "2026-08-14"
+        },
+        "glm-5.3-flash": {
+          cost: {
+            cacheRead: 0.03,
+            cacheWrite: 0,
+            input: 0.15,
+            output: 0.5
+          },
+          name: "GLM-5.3-Flash",
+          tiers: [],
+          release: "2026-08-26"
+        },
+        "gpt-5.6-luna": {
+          cost: {
+            cacheRead: 0.02,
+            cacheWrite: 0.25,
+            input: 0.2,
+            output: 1.2
+          },
+          name: "GPT-5.6 Luna",
+          tiers: [
+            {
+              cost: {
+                cacheRead: 0.04,
+                cacheWrite: 0.5,
+                input: 0.4,
+                output: 1.8
+              },
+              minContext: 272000
+            }
+          ],
+          release: "2026-07-09"
+        },
+        "gpt-6-luna": {
+          cost: {
+            cacheRead: 0.01,
+            cacheWrite: 0.125,
+            input: 0.1,
+            output: 0.5
+          },
+          name: "GPT-6 Luna",
+          tiers: [
+            {
+              cost: {
+                cacheRead: 0.02,
+                cacheWrite: 0.25,
+                input: 0.2,
+                output: 0.75
+              },
+              minContext: 272000
+            }
+          ],
+          release: "2026-09-22"
+        },
+        "grok-4.7": {
+          cost: {
+            cacheRead: 0.5,
+            cacheWrite: 0,
+            input: 2,
+            output: 6
+          },
+          name: "Grok 4.7",
+          tiers: [
+            {
+              cost: {
+                cacheRead: 1,
+                cacheWrite: 0,
+                input: 4,
+                output: 12
+              },
+              minContext: 200000
+            }
+          ],
+          release: "2026-09-21"
+        },
+        hy3: {
+          cost: {
+            cacheRead: 0.035,
+            cacheWrite: 0,
+            input: 0.14,
+            output: 0.58
+          },
+          name: "Hy3",
+          tiers: [],
+          release: "2026-07-06"
+        },
+        hy4: {
+          cost: {
+            cacheRead: 0.042,
+            cacheWrite: 0,
+            input: 0.834,
+            output: 2.501
+          },
+          name: "Hy4",
+          tiers: [],
+          release: "2026-11-04"
+        },
+        "hy4-preview": {
+          cost: {
+            cacheRead: 0.042,
+            cacheWrite: 0,
+            input: 0.834,
+            output: 2.501
+          },
+          name: "Hy4 preview",
+          tiers: [],
+          release: "2026-08-28"
+        },
+        "iceman-contributor-free": {
+          cost: {
+            cacheRead: 0,
+            cacheWrite: 0,
+            input: 0,
+            output: 0
+          },
+          name: "Iceman Contributor Free",
+          tiers: [],
+          release: "2026-10-24"
+        },
+        "kimi-k2.7-code": {
+          cost: {
+            cacheRead: 0.19,
+            cacheWrite: 0,
+            input: 0.95,
+            output: 4
+          },
+          name: "Kimi K2.7 Code",
+          tiers: [],
+          release: "2026-06-12"
+        },
+        "kimi-k3": {
+          cost: {
+            cacheRead: 0.3,
+            cacheWrite: 3,
+            input: 3,
+            output: 15
+          },
+          name: "Kimi K3",
+          tiers: [],
+          release: "2026-07-16"
+        },
+        "kimi-k3.1-pro": {
+          cost: {
+            cacheRead: 0.2,
+            cacheWrite: 2,
+            input: 2,
+            output: 10
+          },
+          name: "Kimi K3.1 Pro",
+          tiers: [],
+          release: "2026-10-23"
+        },
+        "longcat-2.0": {
+          cost: {
+            cacheRead: 0.006,
+            cacheWrite: 0,
+            input: 0.3,
+            output: 1.2
+          },
+          name: "LongCat-2.0",
+          tiers: [],
+          release: "2026-06-30"
+        },
+        "longcat-2.5-free": {
+          cost: {
+            cacheRead: 0,
+            cacheWrite: 0,
+            input: 0,
+            output: 0
+          },
+          name: "LongCat 2.5 Free",
+          tiers: [],
+          release: "2026-11-02"
+        },
+        "longcat-2.5-preview-free": {
+          cost: {
+            cacheRead: 0,
+            cacheWrite: 0,
+            input: 0,
+            output: 0
+          },
+          name: "LongCat 2.5 Preview Free",
+          tiers: [],
+          release: "2026-09-25"
+        },
+        "mimo-v2.5": {
+          cost: {
+            cacheRead: 0.0028,
+            cacheWrite: 0,
+            input: 0.14,
+            output: 0.28
+          },
+          name: "MiMo V2.5",
+          tiers: [],
+          release: "2026-04-22"
+        },
+        "mimo-v2.5-pro": {
+          cost: {
+            cacheRead: 0.003625,
+            cacheWrite: 0,
+            input: 0.435,
+            output: 0.87
+          },
+          name: "MiMo V2.5 Pro",
+          tiers: [],
+          release: "2026-04-22"
+        },
+        "mimo-v2.6-flash": {
+          cost: {
+            cacheRead: 0.0028,
+            cacheWrite: 0,
+            input: 0.14,
+            output: 0.28
+          },
+          name: "MiMo-V2.6-Flash",
+          tiers: [],
+          release: "2026-09-22"
+        },
+        "mimo-v2.6-pro": {
+          cost: {
+            cacheRead: 0.003625,
+            cacheWrite: 0,
+            input: 0.435,
+            output: 0.87
+          },
+          name: "MiMo-V2.6-Pro",
+          tiers: [],
+          release: "2026-09-22"
+        },
+        "minimax-m2.7": {
+          cost: {
+            cacheRead: 0.06,
+            cacheWrite: 0.375,
+            input: 0.3,
+            output: 1.2
+          },
+          name: "MiniMax-M2.7",
+          tiers: [],
+          release: "2026-03-18"
+        },
+        "minimax-m3": {
+          cost: {
+            cacheRead: 0.06,
+            cacheWrite: 0,
+            input: 0.3,
+            output: 1.2
+          },
+          name: "MiniMax-M3",
+          tiers: [
+            {
+              cost: {
+                cacheRead: 0.12,
+                cacheWrite: 0,
+                input: 0.6,
+                output: 2.4
+              },
+              minContext: 512000
+            }
+          ],
+          release: "2026-06-01"
+        },
+        "minimax-m3.1-flash": {
+          cost: {
+            cacheRead: 0.015,
+            cacheWrite: 0,
+            input: 0.15,
+            output: 0.6
+          },
+          name: "MiniMax M3.1 Flash",
+          tiers: [],
+          release: "2026-10-19"
+        },
+        "minimax-m3.1-flash-free": {
+          cost: {
+            cacheRead: 0,
+            cacheWrite: 0,
+            input: 0,
+            output: 0
+          },
+          name: "MiniMax M3.1 Flash Free",
+          tiers: [],
+          release: "2026-10-19"
+        },
+        "muse-spark-1.2-contributor": {
+          cost: {
+            cacheRead: 0.002,
+            cacheWrite: 0,
+            input: 0.1,
+            output: 0.2
+          },
+          name: "Muse Spark 1.2 Contributor",
+          tiers: [],
+          release: "2026-08-05"
+        },
+        "muse-spark-1.3-contributor": {
+          cost: {
+            cacheRead: 0.002,
+            cacheWrite: 0,
+            input: 0.1,
+            output: 0.2
+          },
+          name: "Muse Spark 1.3 Contributor",
+          tiers: [],
+          release: "2026-09-02"
+        },
+        "qwen3.7-plus": {
+          cost: {
+            cacheRead: 0.04,
+            cacheWrite: 0.5,
+            input: 0.4,
+            output: 1.6
+          },
+          name: "Qwen3.7 Plus",
+          tiers: [
+            {
+              cost: {
+                cacheRead: 0.12,
+                cacheWrite: 1.5,
+                input: 1.2,
+                output: 4.8
+              },
+              minContext: 256000
+            }
+          ],
+          release: "2026-06-02"
+        },
+        "qwen3.8-flash": {
+          cost: {
+            cacheRead: 0.016,
+            cacheWrite: 0.2,
+            input: 0.15,
+            output: 0.47
+          },
+          name: "Qwen3.8 Flash",
+          tiers: [],
+          release: "2026-08-26"
+        },
+        "qwen3.8-max": {
+          cost: {
+            cacheRead: 0.25,
+            cacheWrite: 2.5,
+            input: 2,
+            output: 6
+          },
+          name: "Qwen3.8 Max",
+          tiers: [],
+          release: "2026-08-03"
+        },
+        "space-bunny": {
+          cost: {
+            cacheRead: 0.03,
+            cacheWrite: 0,
+            input: 0.15,
+            output: 0.6
+          },
+          name: "Space Bunny",
+          tiers: [],
+          release: "2026-09-23"
+        },
+        "step-5-preview": {
+          cost: {
+            cacheRead: 0.1,
+            cacheWrite: 0,
+            input: 1,
+            output: 2.7
+          },
+          name: "Step 5 Preview",
+          tiers: [],
+          release: "2026-09-16"
+        },
+        "step-5-preview-free": {
+          cost: {
+            cacheRead: 0,
+            cacheWrite: 0,
+            input: 0,
+            output: 0
+          },
+          name: "Step 5 Preview Free",
+          tiers: [],
+          release: "2026-09-16"
+        }
+      }
+    }
+  },
+  version: 1
+};
+
+// service/src/prices.js
+import { readFileSync } from "node:fs";
+import path from "node:path";
+var RATES = ["cacheRead", "cacheWrite", "input", "output"];
+function priceOverrideFile(dataDir = process.env.OPENCHAMBER_SERVICE_DATA_DIR ?? null) {
+  return dataDir ? path.join(dataDir, "price-overrides.json") : null;
+}
+function loadPriceOverrides({ file = priceOverrideFile(), log = () => {} } = {}) {
+  if (!file)
+    return {};
+  let text;
+  try {
+    text = readFileSync(file, "utf8");
+  } catch (error) {
+    if (error?.code !== "ENOENT")
+      log(`token-meter: could not read ${file}: ${error?.message ?? error}`);
+    return {};
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(text);
+  } catch (error) {
+    log(`token-meter: ${file} is not JSON: ${error.message}`);
+    return {};
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    log(`token-meter: ${file} must be an object of "provider/model" to rates`);
+    return {};
+  }
+  const overrides = {};
+  for (const [key, value] of Object.entries(parsed)) {
+    if (!/^[\w.-]+\/.+$/.test(key)) {
+      log(`token-meter: override "${key}" is not "provider/model"; ignored`);
+      continue;
+    }
+    const bad = RATES.filter((name) => !Number.isFinite(value?.[name]) || value[name] < 0);
+    if (bad.length) {
+      log(`token-meter: override "${key}" needs finite non-negative ${bad.join(", ")}; ignored`);
+      continue;
+    }
+    overrides[key] = {
+      cacheRead: value.cacheRead,
+      cacheWrite: value.cacheWrite,
+      input: value.input,
+      output: value.output
+    };
+  }
+  const count = Object.keys(overrides).length;
+  if (count)
+    log(`token-meter: ${count} price override${count === 1 ? "" : "s"} from ${file}`);
+  return overrides;
+}
+
 // service/src/main.js
 var PORT = Number(process.env.OPENCHAMBER_SERVICE_PORT);
 var TOKEN = process.env.OPENCHAMBER_SERVICE_TOKEN ?? "";
@@ -941,9 +5544,10 @@ if (!PORT || !TOKEN) {
   console.error("token-meter: OPENCHAMBER_SERVICE_PORT and OPENCHAMBER_SERVICE_TOKEN are required");
   process.exit(1);
 }
-function createService({ fetchImpl = fetch, log = () => {}, base = BASE, token = TOKEN, port = PORT } = {}) {
+function createService({ fetchImpl = fetch, log = () => {}, base = BASE, token = TOKEN, port = PORT, priceBook = PRICE_BOOK, overrides = null, dataDir = process.env.OPENCHAMBER_SERVICE_DATA_DIR ?? null } = {}) {
   const collectors = new Map;
   const state = { stream: "idle", streamError: null, stopping: false, controller: null, since: Date.now() };
+  const priceOverrides = overrides ?? loadPriceOverrides({ file: priceOverrideFile(dataDir), log });
   const upstreamIsLoopback = (() => {
     try {
       const host = new URL(base).hostname;
@@ -954,12 +5558,12 @@ function createService({ fetchImpl = fetch, log = () => {}, base = BASE, token =
   })();
   const subscribeTypes = [...LIVE_TYPES].filter((type) => type !== "session.usage.recorded");
   let filterStream = true;
-  const apiGet = async (path) => {
+  const apiGet = async (path2) => {
     if (!base)
       throw new Error("OpenCode access is not available");
     if (!upstreamIsLoopback)
       throw new Error("OpenCode access is not on loopback; refusing to send the token");
-    const answer = await fetchImpl(`${base}${path}`, {
+    const answer = await fetchImpl(`${base}${path2}`, {
       headers: { authorization: `Bearer ${token}`, accept: "application/json" },
       ...typeof AbortSignal?.timeout === "function" ? { signal: AbortSignal.timeout(API_TIMEOUT_MS) } : {}
     });
@@ -1318,7 +5922,7 @@ function createService({ fetchImpl = fetch, log = () => {}, base = BASE, token =
       const first = collector.historyAt === 0;
       if (!base || !upstreamIsLoopback) {
         json(res, 200, {
-          ...snapshot(collector),
+          ...snapshot(collector, Date.now(), [collector], priceBook, priceOverrides),
           ok: false,
           error: !base ? "OpenCode access is not available. Approve the extension in Settings → Extensions." : "OpenCode access is not on loopback; refusing to send the token.",
           stream: { state: "off", error: state.streamError },
@@ -1341,7 +5945,7 @@ function createService({ fetchImpl = fetch, log = () => {}, base = BASE, token =
       }
       const tree = treeOf(collector);
       tick(collector, now, tree);
-      const answer = snapshot(collector, now, tree);
+      const answer = snapshot(collector, now, tree, priceBook, priceOverrides);
       if (url.searchParams.get("steps") === String(answer.stepsSeq))
         delete answer.steps;
       json(res, 200, {

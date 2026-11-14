@@ -9,6 +9,7 @@ import { createCollector, applyRecord, loadHistory, applyEvent, tick, snapshot }
 import { compress, easeToward, ratesOf } from '../shared/chart.js';
 import { dotState } from '../shared/cells.js';
 import { isPeakAt, timeTariff } from '../shared/pricing.js';
+import { FIXTURE_BOOK } from './fixtures/price-book.js';
 import { speedTier } from '../shared/speed-color.js';
 
 const MANAGED = path.join(os.homedir(), '.config', 'openchamber', 'managed-opencode');
@@ -735,6 +736,174 @@ check(
 );
 rateRun.model = 'rate-model';
 
+// ---------------------------------------------------------------- API value
+// With a book, the Cost headline is what the tokens would cost at list rates and
+// the recorded cost sits beside it. Without one, everything above still holds:
+// the recorded cost is the total.
+const priceStep = (at, provider, model, input, generated, cacheRead, cost, cacheWrite = 0) => ({
+  aborted: false,
+  at,
+  cacheRead,
+  cacheWrite,
+  cost,
+  model,
+  ms: 0,
+  provider,
+  tokens: generated,
+  total: input + generated,
+  tps: null,
+});
+const withPrices = (id, provider, model, steps) => {
+  const collector = createCollector(id);
+  collector.provider = provider;
+  collector.model = model;
+  collector.steps = steps;
+  collector.stepsSeq = steps.length;
+  return collector;
+};
+const priced = (collector, now, book = FIXTURE_BOOK) => snapshot(collector, now, [collector], book);
+const bookAt = Date.UTC(2026, 10, 14, 12, 0, 0);
+
+const claudeRun = withPrices('ses_price_book', 'claude-agent', 'claude-opus-5-5', [
+  priceStep(bookAt, 'claude-agent', 'claude-opus-5-5', 1e6, 0, 0, 0),
+]);
+const claudeSnap = priced(claudeRun, bookAt);
+check(
+  'SN-01 the book prices the total as API value',
+  claudeSnap.cost.total === 4 && claudeSnap.cost.billed.total === 0,
+  `$${claudeSnap.cost.total} API, $${claudeSnap.cost.billed.total} billed`,
+);
+const firstApi = claudeRun.derived.api;
+
+const legacySnap = snapshot(claudeRun, bookAt);
+check(
+  'SN-02 without a book the total is still the billed cost',
+  legacySnap.cost.total === 0 && legacySnap.cost.priceNote === null && legacySnap.cost.lowerBound === false,
+  `$${legacySnap.cost.total}, priceNote ${legacySnap.cost.priceNote}`,
+);
+
+check(
+  'SN-03 a plan session shows API value with nothing billed',
+  claudeSnap.cost.billed.total === 0 && claudeSnap.cost.total > 0 && claudeSnap.cost.priceNote === 'noBilledCost',
+  claudeSnap.cost.priceNote,
+);
+
+const unknownRun = withPrices('ses_price_unknown', 'nowhere', 'unknown/model', [
+  priceStep(bookAt, 'nowhere', 'unknown/model', 1e6, 0, 0, 0),
+]);
+const unknownSnap = priced(unknownRun, bookAt);
+check(
+  'SN-04 an unpriced model is null, not zero',
+  unknownSnap.cost.total === null && unknownSnap.cost.priceNote === 'noPrice' && unknownSnap.cost.rates === null,
+  `${unknownSnap.cost.total}, ${unknownSnap.cost.priceNote}`,
+);
+
+const partialRun = withPrices('ses_price_partial', 'anthropic', 'claude-opus-5-5', [
+  priceStep(bookAt, 'anthropic', 'claude-opus-5-5', 1e6, 0, 0, 0),
+  priceStep(bookAt + 1, 'nowhere', 'unknown/model', 1e6, 0, 0, 0),
+]);
+const partialSnap = priced(partialRun, bookAt + 2);
+check(
+  'SN-05 a partially priced tree is a lower bound',
+  partialSnap.cost.lowerBound === true && partialSnap.cost.coverage === 0.5 && partialSnap.cost.total === 4,
+  `coverage ${partialSnap.cost.coverage}, $${partialSnap.cost.total}`,
+);
+
+const goPeakAt = Date.UTC(2026, 10, 16, 2, 0, 0);
+const goRun = withPrices('ses_price_go', 'opencode-go', 'deepseek-v4.1-flash', [
+  priceStep(goPeakAt, 'opencode-go', 'deepseek-v4.1-flash', 1e6, 0, 0, 0),
+]);
+const goSnap = priced(goRun, goPeakAt);
+check(
+  'SN-06 the active tariff side prices the step',
+  Math.abs(goSnap.cost.total - 0.3) < 1e-9 && goSnap.cost.tariff?.peak === true && goSnap.cost.rates?.timeTier === 'peak',
+  `$${goSnap.cost.total}, ${goSnap.cost.rates?.timeTier}`,
+);
+
+check(
+  'SN-07 the rates line is the current model card',
+  claudeSnap.cost.rates?.provider === 'anthropic' &&
+    claudeSnap.cost.rates?.model === 'claude-opus-5-5' &&
+    claudeSnap.cost.rates?.input === 4 &&
+    claudeSnap.cost.rates?.source === 'Anthropic list' &&
+    claudeSnap.cost.rates?.checkedAt === '2026-11-14',
+  JSON.stringify(claudeSnap.cost.rates),
+);
+
+const switchRun = withPrices('ses_price_switch', 'anthropic', 'claude-opus-5-5', [
+  priceStep(bookAt, 'anthropic', 'claude-opus-5-5', 1e6, 0, 0, 0),
+  priceStep(bookAt + 1, 'openai', 'gpt-6.1-terra', 1e6, 0, 0, 0),
+]);
+const switchSnap = priced(switchRun, bookAt + 2);
+check(
+  'SN-08 a tree on two models lists both, dearest first',
+  Array.isArray(switchSnap.cost.models) &&
+    switchSnap.cost.models.length === 2 &&
+    switchSnap.cost.models[0].model === 'claude-opus-5-5' &&
+    switchSnap.cost.models.every((entry) => entry.rates),
+  `${switchSnap.cost.models?.length} models`,
+);
+
+priced(claudeRun, bookAt + 10);
+check('SN-09 the value rides with the cached step list', Boolean(firstApi) && claudeRun.derived.api === firstApi);
+
+claudeRun.steps = [...claudeRun.steps, priceStep(bookAt + 2, 'anthropic', 'claude-opus-5-5', 1e6, 0, 0, 0)];
+claudeRun.stepsSeq += 1;
+const rebuilt = priced(claudeRun, bookAt + 20);
+check(
+  'SN-10 a new step rebuilds the value',
+  claudeRun.derived.api !== firstApi && rebuilt.cost.total === 8,
+  `$${rebuilt.cost.total}`,
+);
+
+claudeRun.model = 'gpt-6.1-terra';
+claudeRun.provider = 'openai';
+const switched = priced(claudeRun, bookAt + 30);
+check(
+  'SN-11 a model switch carries no stale card',
+  switched.cost.rates?.model === 'gpt-6.1-terra' && switched.cost.rates?.provider === 'openai',
+  String(switched.cost.rates?.model),
+);
+claudeRun.model = 'claude-opus-5-5';
+claudeRun.provider = 'anthropic';
+
+const turnPriceRun = withPrices('ses_price_turn', 'anthropic', 'claude-opus-5-5', [
+  priceStep(bookAt, 'anthropic', 'claude-opus-5-5', 1e6, 0, 0, 0),
+  priceStep(bookAt + 5_000, 'anthropic', 'claude-opus-5-5', 1e6, 0, 0, 0),
+]);
+turnPriceRun.turnStartedAt = bookAt + 1_000;
+const turnPriceSnap = priced(turnPriceRun, bookAt + 6_000);
+check(
+  'SN-12 the turn is a filter over the priced steps',
+  turnPriceSnap.cost.lastTurn === 4 && turnPriceSnap.cost.total === 8,
+  `$${turnPriceSnap.cost.lastTurn} of $${turnPriceSnap.cost.total}`,
+);
+
+const driftRun = withPrices('ses_price_drift', 'anthropic', 'claude-opus-5-5', [
+  priceStep(bookAt, 'anthropic', 'claude-opus-5-5', 1e6, 0, 0, 12.24),
+]);
+const costDriftSnap = priced(driftRun, bookAt);
+check(
+  'SN-13 recorded drift is flagged and the total stays API value',
+  costDriftSnap.cost.drift !== null && costDriftSnap.cost.total === 4 && costDriftSnap.cost.priceNote === 'drift',
+  costDriftSnap.cost.drift ? `${(costDriftSnap.cost.drift.relative * 100).toFixed(1)}%` : 'none',
+);
+
+const freeRun = withPrices('ses_price_free', 'opencode', 'muse-spark-1.3-contributor-free', [
+  priceStep(bookAt, 'opencode', 'muse-spark-1.3-contributor-free', 1e6, 0, 0, 0),
+]);
+const freeSnap = priced(freeRun, bookAt);
+check(
+  'SN-14 a free model is zero, not unknown',
+  freeSnap.cost.total === 0 && freeSnap.cost.priceNote === 'free' && freeSnap.cost.coverage === 1,
+  `${freeSnap.cost.total}, ${freeSnap.cost.priceNote}`,
+);
+
+check(
+  'SN-15 an unknown model invents nothing',
+  unknownSnap.cost.rates === null && unknownSnap.cost.models === undefined && unknownSnap.cost.coverage === 0,
+);
+
 // A subagent whose history is longer than the kept list still counts in full.
 const knownRun = createCollector('ses_known_test');
 knownRun.knownSteps = 450;
@@ -1223,6 +1392,32 @@ const wrongToken = await fetch(`http://127.0.0.1:${port}/state?session=${session
 check('service refuses a wrong bearer', wrongToken.status === 401, String(wrongToken.status));
 const served = await get(`session=${session.id}`);
 check('service answers with the same totals', served.status === 200 && served.body.totals.input === baseline.input, `${served.body.totals?.input} vs ${baseline.input}`);
+
+// The route, not the function: a service given a book must answer /state with
+// API-value fields, which only the wired path can produce.
+const bookPort = 47829;
+const bookService = (await import('../service/src/main.js')).createService({
+  base: 'http://127.0.0.1:9',
+  fetchImpl: async () => {
+    throw new Error('offline');
+  },
+  log: () => {},
+  port: bookPort,
+  priceBook: FIXTURE_BOOK,
+  token: 'book-token',
+});
+bookService.start();
+await new Promise((resolve) => setTimeout(resolve, 250));
+const bookAnswer = await fetch(`http://127.0.0.1:${bookPort}/state?session=ses_price_route`, {
+  headers: { authorization: 'Bearer book-token' },
+});
+const bookBody = await bookAnswer.json();
+check(
+  'SN-16 the route passes the book to the snapshot',
+  bookBody.cost?.priceNote === 'noPrice' && bookBody.cost?.total === null && bookBody.cost?.billed?.total === 0,
+  `${bookBody.cost?.priceNote}, ${bookBody.cost?.total}`,
+);
+bookService.stop();
 
 const push = (event) => stream.controller.enqueue(new TextEncoder().encode(`data: ${JSON.stringify(event)}\n\n`));
 await new Promise((resolve) => setTimeout(resolve, 100));

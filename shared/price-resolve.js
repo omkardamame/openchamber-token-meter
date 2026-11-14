@@ -210,6 +210,7 @@ export function priceStep(book, step, { provider = null, model = null, overrides
 
   return {
     apiCost,
+    at: step.at ?? null,
     billed: step.cost ?? 0,
     cacheRead,
     cacheWrite,
