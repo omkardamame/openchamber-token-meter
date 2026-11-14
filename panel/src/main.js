@@ -308,16 +308,18 @@ function paintCost(data) {
   ui.apiBadge.hidden = !api;
   ui.costTotal.textContent = priced ? `${floor}${money(cost.total)}` : '—';
   ui.costTotal.title = api
-    ? [
-        `API value at ${source ?? 'published'} rates`,
-        `billed ${moneyValue(cost.billed?.total ?? 0)}`,
-        cost.lowerBound
-          ? `${Math.round((cost.coverage ?? 0) * 100)}% of these tokens have a published rate, so this is a lower bound`
-          : '',
-        cost.drift ? 'the rate table disagrees with the recorded cost; open the rates line for both numbers' : '',
-      ]
-        .filter(Boolean)
-        .join(' · ')
+    ? priced
+      ? [
+          `API value at ${source ?? 'published'} rates`,
+          `billed ${moneyValue(cost.billed?.total ?? 0)}`,
+          cost.lowerBound
+            ? `${Math.round((cost.coverage ?? 0) * 100)}% of these tokens have a published rate, so this is a lower bound`
+            : '',
+          cost.drift ? 'the rate table disagrees with the recorded cost; open the rates line for both numbers' : '',
+        ]
+          .filter(Boolean)
+          .join(' · ')
+      : `no step has a published rate; billed ${moneyValue(cost.billed?.total ?? 0)}`
     : cost.tariff
       ? 'OpenCode’s recorded cost; the active side of the rate table is what the provider charges'
       : 'this session and its subagents, as OpenCode recorded it';
@@ -360,15 +362,21 @@ function paintCost(data) {
     return;
   }
 
-  const waitline = steps === 0;
+  // Nothing has finished yet: a card in the book says what the model will cost,
+  // not what this session has run. Say that instead of drawing a table of zeroes.
+  if (steps === 0) {
+    const line = el('div', 'rate-source');
+    line.textContent = 'waiting for the first step';
+    ui.costRates.replaceChildren(line);
+    ui.costRates.title = 'no step has finished yet; the first one brings this session’s rates';
+    return;
+  }
 
   if (!rates && !tariff) {
     const line = el('div', 'rate-source');
-    line.textContent = waitline ? 'waiting for the first step' : 'no published rate';
+    line.textContent = 'no published rate';
     ui.costRates.replaceChildren(line);
-    ui.costRates.title = waitline
-      ? 'no step has finished yet; the first one brings this session’s rates'
-      : 'this model has no published rate, and the meter does not guess one from a neighbour';
+    ui.costRates.title = 'this model has no published rate, and the meter does not guess one from a neighbour';
     return;
   }
 
@@ -407,7 +415,10 @@ function paintCost(data) {
         : rates.tier
           ? `context >${compact(rates.tier.minContext)}`
           : 'list';
-  ui.costRates.replaceChildren(rateHead(), rateRow(label, rates), sourceLine(cost, rates.source));
+  // An active context tier carries its own four rates; prefer them over the
+  // base, so the numbers under a `context >Nk` label are that band's.
+  const shown = rates.tier?.rates ? { ...rates, ...rates.tier.rates } : rates;
+  ui.costRates.replaceChildren(rateHead(), rateRow(label, shown), sourceLine(cost, rates.source));
   ui.costRates.title = ratesTitle(cost, rates.source);
 }
 

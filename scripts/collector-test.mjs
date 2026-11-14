@@ -904,6 +904,45 @@ check(
   unknownSnap.cost.rates === null && unknownSnap.cost.models === undefined && unknownSnap.cost.coverage === 0,
 );
 
+// A price change arrives as a new book. The cached value must not outlive it.
+const REBOOKED = {
+  ...FIXTURE_BOOK,
+  providers: {
+    ...FIXTURE_BOOK.providers,
+    anthropic: {
+      ...FIXTURE_BOOK.providers.anthropic,
+      models: {
+        ...FIXTURE_BOOK.providers.anthropic.models,
+        'claude-opus-5-5': {
+          ...FIXTURE_BOOK.providers.anthropic.models['claude-opus-5-5'],
+          cost: { cacheRead: 0.2, cacheWrite: 5, input: 10, output: 20 },
+        },
+      },
+    },
+  },
+};
+const rebookRun = withPrices('ses_price_rebook', 'anthropic', 'claude-opus-5-5', [
+  priceStep(bookAt, 'anthropic', 'claude-opus-5-5', 1e6, 0, 0, 0),
+]);
+const beforeBook = priced(rebookRun, bookAt);
+const afterBook = priced(rebookRun, bookAt, REBOOKED);
+check(
+  'SN-17 a new book re-prices the same steps',
+  beforeBook.cost.total === 4 && afterBook.cost.total === 10 && afterBook.cost.rates.input === 10,
+  `${beforeBook.cost.total} → ${afterBook.cost.total}, card ${afterBook.cost.rates.input}`,
+);
+
+// Same for a different override map: the rates line updated but the total did not.
+const OVERRIDDEN = { 'anthropic/claude-opus-5-5': { cacheRead: 0.18, cacheWrite: 4.5, input: 3.5, output: 18 } };
+const CHEAPER = { 'anthropic/claude-opus-5-5': { cacheRead: 1, cacheWrite: 1, input: 1, output: 1 } };
+const overrideFirst = snapshot(rebookRun, bookAt, [rebookRun], FIXTURE_BOOK, OVERRIDDEN);
+const overrideSecond = snapshot(rebookRun, bookAt, [rebookRun], FIXTURE_BOOK, CHEAPER);
+check(
+  'SN-18 a new override map re-prices the same steps',
+  overrideFirst.cost.total === 3.5 && overrideSecond.cost.total === 1 && overrideSecond.cost.rates.match === 'override',
+  `${overrideFirst.cost.total} → ${overrideSecond.cost.total}`,
+);
+
 // A subagent whose history is longer than the kept list still counts in full.
 const knownRun = createCollector('ses_known_test');
 knownRun.knownSteps = 450;

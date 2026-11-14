@@ -81,8 +81,9 @@ at the higher band; time-of-day tariffs apply per step's own timestamp.
 **Reconciliation.** For a metered provider, API value is compared with what
 OpenCode recorded, per model. More than 1% apart shows a `price drift` flag and
 the tooltip names both numbers. That check is what keeps the snapshot honest:
-over 1,805 real OpenCode Go messages the two agree within 0.6–0.9%, and a model
-whose card disagrees is flagged rather than trusted.
+across 1,805 real OpenCode Go messages the two agree within 0.6–0.9%, and a model
+whose card disagrees is flagged rather than trusted. A single session carries too
+few steps for that average, so it can sit outside the band and say so.
 
 **Overrides.** `$OPENCHAMBER_SERVICE_DATA_DIR/price-overrides.json` takes four
 rates per `provider/model` key. All four are required, and a malformed entry is

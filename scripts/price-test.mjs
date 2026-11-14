@@ -108,6 +108,24 @@ check('PR-34 override beats the lab fallback', labOverride?.provider === 'anthro
 
 check('PR-35 override without a card is null', resolve('anthropic', 'no-such-model', { overrides: { 'anthropic/no-such-model': { cacheRead: 0, cacheWrite: 0, input: 1, output: 2 } } }) === null);
 
+// The committed book and the time tariffs must agree: the panel draws the
+// tariff's two sides while labeling them with the card's source, so a drift
+// between the two would print one provider's numbers under another's name.
+const { PRICE_BOOK } = await import('../shared/price-book.js');
+const { timeTariff } = await import('../shared/pricing.js');
+const tariffMismatch = [];
+for (const [provider, entry] of Object.entries(PRICE_BOOK.providers)) {
+  for (const [modelId, card] of Object.entries(entry.models)) {
+    const tariff = timeTariff(provider, modelId);
+    if (!tariff) continue;
+    const same = ['input', 'output', 'cacheRead'].every(
+      (key) => Math.abs((card.cost[key] ?? 0) - (tariff.offPeak[key] ?? 0)) <= Math.max(1e-9, Math.abs(tariff.offPeak[key]) * 1e-6),
+    );
+    if (!same) tariffMismatch.push(`${provider}/${modelId}: book ${JSON.stringify(card.cost)} vs off-peak ${JSON.stringify(tariff.offPeak)}`);
+  }
+}
+check('PR-36 every tariffed card matches its off-peak side', tariffMismatch.length === 0, tariffMismatch.slice(0, 2).join(' · '));
+
 // --- 11.3 Computation --------------------------------------------------------
 
 const value = (steps, extra = {}) => computeApiValue(book, steps, extra);

@@ -1137,7 +1137,7 @@ function snapshot(collector, now = Date.now(), tree = [collector], priceBook = n
   let ratesCard = null;
   if (priceBook) {
     const apiKey = `${collector.provider ?? ""}|${model ?? ""}|${overrides ? "override" : ""}`;
-    if (!derived.api || derived.apiKey !== apiKey) {
+    if (!derived.api || derived.apiKey !== apiKey || derived.apiBook !== priceBook || derived.apiOverrides !== overrides) {
       const recovered = modelCostRates ? { model, provider: collector.provider ?? null, rates: modelCostRates } : null;
       derived.api = computeApiValue(priceBook, steps, {
         model,
@@ -1145,7 +1145,9 @@ function snapshot(collector, now = Date.now(), tree = [collector], priceBook = n
         provider: collector.provider ?? null,
         recovered
       });
+      derived.apiBook = priceBook;
       derived.apiKey = apiKey;
+      derived.apiOverrides = overrides;
     }
     api = derived.api;
     const lastOfModel = [...steps].reverse().find((item) => item.model === model) ?? null;

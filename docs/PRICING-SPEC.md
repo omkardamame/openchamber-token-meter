@@ -629,6 +629,7 @@ expected values (section 11.4).
 | PR-33 | same during a 2026 Chinese holiday | off-peak |
 | PR-34 | lab fallback + override | override wins over the fallback card |
 | PR-35 | override key with no resolvable card | `null`, not an override match |
+| PR-36 | every tariffed card in the real book | matches its tariff's off-peak side |
 
 ### 11.3 Computation
 
@@ -689,6 +690,8 @@ With the fixture book:
 | SN-14 | free | `total: 0`, `priceNote: free` |
 | SN-15 | unknown | no fake number |
 | SN-16 | route | `createService({ priceBook })` passes the book to `/state` |
+| SN-17 | a second book, same steps | re-priced; the cache is keyed by the book |
+| SN-18 | a second override map, same steps | re-priced; the cache is keyed by the overrides |
 
 ### 11.6 Page
 
@@ -714,6 +717,8 @@ With the fixture book:
 | UI-18 | CSS | no overflow at 300 px |
 | UI-19 | legacy shape | old cost fields do not crash |
 | UI-20 | status frame | unchanged |
+| UI-21 | zero steps, known card | `waiting for the first step`, not a table of zeroes |
+| UI-22 | override / active tier | `manual` row; `context >Nk` row with that band's four rates |
 
 ### 11.7 Live / integration
 
@@ -742,9 +747,9 @@ machine has `claude-agent` (16 messages) and `openai` (213) history but **no
 | Phase | Work | Gate |
 |---|---|---|
 | 0 | This spec, owner review | **approved 2026-11-14** — six providers, `≥` wins |
-| 1 | `shared/price-book.js`, resolver, fixtures, `price-test.mjs` | PR-01..35, CV-01..20 |
-| 2 | `snapshot` + service wiring + collector tests; key the recovered fit and its cache by `provider/model` | SN-01..16 |
-| 3 | Panel rendering + CSS + page tests | UI-01..20 |
+| 1 | `shared/price-book.js`, resolver, fixtures, `price-test.mjs` | PR-01..36, CV-01..20 |
+| 2 | `snapshot` + service wiring + collector tests; key the recovered fit and its cache by `provider/model` | SN-01..18 |
+| 3 | Panel rendering + CSS + page tests | UI-01..22 |
 | 4 | Reconciliation + live tests + browser proof | INT-01..12 |
 | 5 | README, CHANGELOG, release | `bun run verify`, secret scan, screenshot |
 

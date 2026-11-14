@@ -816,6 +816,34 @@ try {
   const fitUi = await panel.read();
   check('UI-18 the rates row does not overflow the rail', fitUi.costOverflow === 0, `${fitUi.costOverflow}px`);
 
+  await panel.set({ ...priced({ lastTurn: null, perMillion: null, priceNote: 'noPrice', total: null }), stepsKnown: 0 });
+  const waitingCard = await panel.read();
+  check(
+    'UI-21 a known card with no steps still waits',
+    waitingCard.costTotal === '—' && waitingCard.costSource === 'waiting for the first step' && waitingCard.costRows.length === 0,
+    `${waitingCard.costTotal} ${waitingCard.costSource} ${waitingCard.costRows.length} rows`,
+  );
+
+  await panel.set(priced({ rates: { ...CLAUDE_CARD, match: 'override', source: 'manual override' } }));
+  const manualUi = await panel.read();
+  check(
+    'UI-22 an override reads as manual',
+    manualUi.costRows[0]?.label === 'manual' && /manual override/.test(manualUi.costSource ?? ''),
+    `${manualUi.costRows[0]?.label} ${manualUi.costSource}`,
+  );
+
+  await panel.set(
+    priced({
+      rates: { ...CLAUDE_CARD, tier: { minContext: 272000, rates: { cacheRead: 0.1, cacheWrite: 2.5, input: 2, output: 7.5 } } },
+    }),
+  );
+  const tierUi = await panel.read();
+  check(
+    'UI-22 an active context tier names its threshold',
+    tierUi.costRows[0]?.label === 'context >272k' && tierUi.costRows[0].cells[0] === '$2.00',
+    `${tierUi.costRows[0]?.label} ${tierUi.costRows[0]?.cells.join('|')}`,
+  );
+
   await panel.set(state());
   const legacyUi = await panel.read();
   check(

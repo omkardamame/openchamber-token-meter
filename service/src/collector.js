@@ -856,7 +856,15 @@ export function snapshot(collector, now = Date.now(), tree = [collector], priceB
   let ratesCard = null;
   if (priceBook) {
     const apiKey = `${collector.provider ?? ''}|${model ?? ''}|${overrides ? 'override' : ''}`;
-    if (!derived.api || derived.apiKey !== apiKey) {
+    // The book itself is part of the key: a different snapshot must re-price,
+    // even when the steps, the model and the overrides are unchanged. So must a
+    // different override map, for the same reason.
+    if (
+      !derived.api ||
+      derived.apiKey !== apiKey ||
+      derived.apiBook !== priceBook ||
+      derived.apiOverrides !== overrides
+    ) {
       const recovered = modelCostRates
         ? { model, provider: collector.provider ?? null, rates: modelCostRates }
         : null;
@@ -866,7 +874,9 @@ export function snapshot(collector, now = Date.now(), tree = [collector], priceB
         provider: collector.provider ?? null,
         recovered,
       });
+      derived.apiBook = priceBook;
       derived.apiKey = apiKey;
+      derived.apiOverrides = overrides;
     }
     api = derived.api;
     // The rates line is the current model's card, resolved at the prompt the
