@@ -125,7 +125,7 @@ check(
   snap.steps.length <= 1000 &&
     snap.steps.every((step) => {
       const keys = Object.keys(step).sort().join(',');
-      return keys === 'aborted,at,cost,ms,tokens,tps' || keys === 'aborted,at,cost,ms,tokens,tps,sub';
+      return keys === 'aborted,at,cost,in,ms,tokens,tps' || keys === 'aborted,at,cost,in,ms,tokens,tps,sub';
     }),
   `${snap.steps.length} steps, ${Object.keys(snap.steps[0] ?? {}).length} fields`,
 );
@@ -1017,6 +1017,62 @@ check(
     longSnap.v.every((value, index) => value === Math.round((keptBuckets[index].sum / keptBuckets[index].n) * 10) / 10) &&
     shortSnap.seriesLong === undefined,
   `${longSnap?.v.length} of ${longBuckets.length} buckets kept, t0 +${longSnap ? (longSnap.t0 - longAt) / 1000 : '?'} s, 60 s ${shortSnap.seriesLong === undefined ? 'omitted' : 'sent'}`,
+);
+
+// The three numbers a row, a turn and the roster each need from the same merged
+// step list: what a step read fresh, what the turn consumed in full, and who is
+// in the tree at all — running or finished.
+const snRoot = createCollector('ses_sn_root');
+const snChild = createCollector('ses_sn_child');
+const snQuiet = createCollector('ses_sn_quiet');
+snRoot.turnStartedAt = 4_000;
+applyRecord(snChild, {
+  id: 'ses_sn_child',
+  title: 'SN-22 child',
+  cost: 0.0123456789,
+  tokens: { input: 100, output: 40, reasoning: 10, cache: { read: 60, write: 5 } },
+  time: {},
+});
+snQuiet.title = 'SN-22 quiet';
+// `tokens` is output + reasoning and `total` the whole step, so the fresh input
+// is total - tokens and the turn's own bill adds both cache directions.
+const snStep = (id, at, input, generated, cacheRead, cacheWrite) => ({
+  aborted: false,
+  at,
+  cacheRead,
+  cacheWrite,
+  cost: 0.001,
+  id,
+  model: 'sn-model',
+  ms: 1_000,
+  tokens: generated,
+  total: input + generated,
+  tps: generated,
+});
+snRoot.steps = [snStep('msg_sn_turn', 4_500, 700, 300, 2_000, 40), snStep('msg_sn_before', 500, 900, 100, 0, 0)];
+snRoot.stepsSeq = snRoot.steps.length;
+snChild.steps = [snStep('msg_sn_child', 6_000, 200, 80, 400, 0)];
+snChild.stepsSeq = snChild.steps.length;
+const snSnap = snapshot(snRoot, 7_000, [snRoot, snChild, snQuiet]);
+const snTurnSteps = [...snRoot.steps, ...snChild.steps].filter((step) => step.at >= snRoot.turnStartedAt);
+const snWireStep = snSnap.steps.find((step) => step.at === 4_500);
+const snMember = snSnap.subagents.members.find((member) => member.id === snChild.id);
+const snChildRates = ratesOf(snChild.steps);
+check(
+  'SN-22 a step row carries its input, the turn its consumed, the tree its whole roster',
+  snWireStep?.in === 700 &&
+    snSnap.turn.consumed === snTurnSteps.reduce((sum, step) => sum + step.total + step.cacheRead + step.cacheWrite, 0) &&
+    snSnap.subagents.members.length === 2 &&
+    snSnap.subagents.members.every((member) => member.id !== snRoot.id) &&
+    snSnap.subagents.members[0].id === snChild.id &&
+    snMember?.title === 'SN-22 child' &&
+    snMember?.consumed === 215 &&
+    snMember?.avgTps === Math.round(snChildRates.avg * 10) / 10 &&
+    snMember?.peakTps === Math.round(snChildRates.peak * 10) / 10 &&
+    snMember?.lastAt === 6_000 &&
+    snMember?.steps === snChild.totals.steps &&
+    snSnap.subagents.members[1].lastAt === null,
+  `${snWireStep?.in} in, turn consumed ${snSnap.turn.consumed}, roster ${JSON.stringify(snSnap.subagents.members.map((member) => [member.id, member.lastAt]))}`,
 );
 
 // A subagent whose history is longer than the kept list still counts in full.

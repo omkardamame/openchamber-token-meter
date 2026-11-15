@@ -1,7 +1,6 @@
 import { HostRequestError, connectHost } from '@openchamber/sdk';
 import { applyHostReady, mountBanner, mountEmpty } from '@openchamber/sdk/ui';
 import { compact, duration, percent, seconds } from '../../shared/summary.js';
-import { capturePng, downloadBlob } from './screenshot.js';
 import { easeToward, seriesPoints, smoothPath } from '../../shared/chart.js';
 import { dotState, mountCells, paintCells } from '../../shared/cells.js';
 import { el } from '../../shared/dom.js';
@@ -34,18 +33,26 @@ let modelLabel = '';
 let liveHoverX = null;
 // How much history the live chart draws. The wheel widens it; the service keeps
 // a coarse five-minute series beside the 60 s one so there is something to show.
-const LIVE_LEVELS = [60_000, 120_000, 300_000];
-let liveWindowMs = 60_000;
-let liveLevel = 0;
-// When the reader stops zooming, the chart goes back on its own: a zoomed-out
-// graph left behind is a graph read as if it were the default.
-const ZOOM_RESET_MS = 4_000;
-const ZOOM_EASE_MS = 260;
+const ZOOM_MIN_MS = 60_000;
+const ZOOM_MAX_MS = 300_000;
+// A notch is a ratio, not a rung: many small steps read as one smooth gesture
+// instead of three jumps.
+const ZOOM_STEP = 1.18;
+const ZOOM_EASE_MS = 170;
+// Long enough to read the wider view, short enough that it is a passing look.
+// Hovering the chart holds it; leaving starts the clock again.
+const ZOOM_RESET_MS = 60_000;
+let liveWindowMs = ZOOM_MIN_MS;
+let liveTargetMs = ZOOM_MIN_MS;
+let liveHovering = false;
 let zoomResetAt = 0;
-let zoomAnim = null;
-// Per step zooms the other way: bars are thinned, not widened.
-const STEP_LEVELS = [null, 100, 25];
-let stepLimit = 0;
+// Per step zooms the other way: bars are thinned, not widened, and the count
+// eases too so the bars slide in and out instead of blinking.
+const STEP_MIN_BARS = 20;
+let stepTarget = 0; // 0 means every bar
+let stepShown = 0;
+let stepFull = 0;
+let stepHovering = false;
 let stepResetAt = 0;
 let peakLineY = null;
 let liveHoverY = null;
@@ -54,6 +61,12 @@ let peakHover = false;
 // scales to this turn, which is what a long session needs to stay readable.
 let ceilingMode = 'session';
 let sessionTitle = '';
+// The detail list is a look, not a fixture: it closes itself a minute after the
+// last hover, and the running-subagent block above is never touched by it.
+let subsDetailOpen = false;
+let subsDetailHover = false;
+let subsDetailUntil = 0;
+let subsDetailKey = '';
 let stepHover = null;
 let lastDrawnSteps = null;
 let lastDrawnLimit = null;
@@ -142,7 +155,11 @@ function build() {
     </section>
 
     <section class="block">
-      <div class="block-head" title="Every step since the session started, not one turn"><span>Session details</span><span class="block-meta totals-source"></span></div>
+      <section class="block subs-detail" hidden>
+        <div class="block-head" title="Every subagent session in this tree"><span>Subagents</span><span class="block-meta subs-detail-meta"></span></div>
+        <div class="subs-detail-list"></div>
+      </section>
+      <div class="block-head" title="Every step since the session started, not one turn"><span>Session details</span><span class="block-meta totals-source"></span><button type="button" class="chip subs-toggle" hidden></button></div>
       <div class="grid totals-grid"></div>
     </section>
 
@@ -169,7 +186,6 @@ function build() {
       <span class="foot-actions">
         <button type="button" class="chip foot-copy" title="this session's numbers as a markdown table">copy stats</button>
         <button type="button" class="chip foot-ceiling" title="the chart's ceiling: the whole session, or this turn">session peak</button>
-        <button type="button" class="chip foot-png" title="save this panel as a PNG">PNG</button>
       </span>
       <span class="foot-clock"></span>
     </div>
@@ -199,6 +215,10 @@ function build() {
     subsBlock: app.querySelector('.subagents'),
     subsMeta: app.querySelector('.subs-meta'),
     subsList: app.querySelector('.subs-list'),
+    subsToggle: app.querySelector('.subs-toggle'),
+    subsDetail: app.querySelector('.subs-detail'),
+    subsDetailMeta: app.querySelector('.subs-detail-meta'),
+    subsDetailList: app.querySelector('.subs-detail-list'),
     legend: app.querySelector('.legend'),
     stepsChart: app.querySelector('[data-chart="steps"]'),
     stepsCount: app.querySelector('.steps-count'),
@@ -211,7 +231,6 @@ function build() {
     foot: app.querySelector('.foot-text'),
     footCopy: app.querySelector('.foot-copy'),
     footCeiling: app.querySelector('.foot-ceiling'),
-    footPng: app.querySelector('.foot-png'),
   };
 }
 
@@ -685,14 +704,13 @@ function drawLive(data) {
   const pad = 8;
   svg.setAttribute('viewBox', `0 0 ${width} ${height}`);
   const nodes = ensureLive(svg, width, height, pad);
-  const wide = liveWindowMs > LIVE_LEVELS[0] && Array.isArray(data.pointsLong);
+  const wide = liveWindowMs > ZOOM_MIN_MS + 500 && Array.isArray(data.pointsLong);
   const series = Array.isArray(wide ? data.pointsLong : data.points) ? (wide ? data.pointsLong : data.points) : [];
   const now = projectedNow(data);
   const from = now - liveWindowMs;
   const seconds = Math.round(liveWindowMs / 1_000);
-  // The default window reads as "60 s ago", not "1 min ago": it is the label
-  // the panel has always shown, and one minute is exactly what it means.
-  ui.axisFrom.textContent = seconds > 60 ? `${Math.round(seconds / 60)} min ago` : `${seconds} s ago`;
+  // Seconds up close, minutes once the number would be noise.
+  ui.axisFrom.textContent = seconds >= 120 ? `${Math.round(seconds / 60)} min ago` : `${seconds} s ago`;
   const visible = series.filter((point) => point.t >= from && point.t <= now);
   const peakValue = visible.reduce((max, point) => Math.max(max, point.v), 0);
   // References drawn on the chart: the session's average and its best step,
@@ -872,7 +890,9 @@ function drawLive(data) {
  * service leaves the last three out rather than printing a hole.
  */
 function stepReadout(step) {
-  let text = `${Math.round(step.tps)} t/s · ${compact(step.tokens)} tok in ${seconds(step.ms)}`;
+  // In and out apart, in the order the step spent them: a step that read 90k
+  // and wrote 2k is a different animal from one that read 2k and wrote 90k.
+  let text = `${Math.round(step.tps)} t/s · in ${compact(step.in ?? 0)} · out ${compact(step.tokens)} in ${seconds(step.ms)}`;
   const at = clock(step.at);
   if (at) text += ` · ${at}`;
   if (step.cost > 0) text += ` · ${money4(step.cost)}`;
@@ -889,7 +909,9 @@ function drawSteps(data) {
   const all = Array.isArray(data.steps) ? data.steps : [];
   const rated = all.filter((step) => step.tps && step.tps > 0 && !step.aborted);
   // Zooming in here means drawing fewer bars, never fewer numbers in the header.
-  const limit = STEP_LEVELS[stepLimit];
+  stepFull = rated.length;
+  if (stepShown === 0) stepShown = rated.length;
+  const limit = stepTarget > 0 ? Math.max(1, Math.round(stepShown)) : 0;
   const steps = limit ? rated.slice(-limit) : rated;
   // The count is every step the session and its subagents ran, not only the
   // bars the meter can draw or rate.
@@ -1021,6 +1043,42 @@ function subRateText(item) {
 // One row per running subagent, keyed by id, so a new one can slide in and a
 // finished one can fade out instead of the list being rebuilt under the reader.
 let subRows = new Map();
+
+/**
+ * Every subagent session in the tree, not only the running ones: name, what it
+ * consumed, what it cost, its average and best rate, and when it last moved.
+ * Opens from the `N subagents` chip and closes itself a minute later.
+ */
+function paintSubsDetail(members) {
+  const list = Array.isArray(members) ? members : [];
+  if (!subsDetailOpen || list.length === 0) {
+    ui.subsDetail.hidden = true;
+    return;
+  }
+  ui.subsDetail.hidden = false;
+  ui.subsDetailMeta.textContent = `${list.length} in this tree`;
+  const key = list.map((item) => `${item.id}:${item.steps}:${item.lastAt}:${item.cost}`).join('|');
+  if (key === subsDetailKey) return;
+  subsDetailKey = key;
+  const now = Date.now();
+  const nodes = [];
+  for (const item of list.slice(0, 12)) {
+    const row = el('div', 'sub-detail');
+    const head = el('div', 'sub-detail-head');
+    const dot = el('i', 'dot');
+    dot.dataset.state = dotState(item.status);
+    const title = el('span', 'sub-detail-title', item.title || item.id || 'subagent');
+    title.title = item.title || item.id || '';
+    const when = el('span', 'sub-detail-when', item.lastAt ? `${duration(now - item.lastAt)} ago` : 'never');
+    head.append(dot, title, when);
+    const stats = el('div', 'sub-detail-stats');
+    stats.textContent = `${compact(item.consumed ?? 0)} tok · ${item.cost > 0 ? money4(item.cost) : '$0'} · avg ${Math.round(item.avgTps ?? 0)} t/s · peak ${Math.round(item.peakTps ?? 0)} t/s · ${item.steps ?? 0} step${item.steps === 1 ? '' : 's'}`;
+    row.append(head, stats);
+    nodes.push(row);
+  }
+  if (list.length > 12) nodes.push(el('div', 'sub-detail-stats', `and ${list.length - 12} more`));
+  ui.subsDetailList.replaceChildren(...nodes);
+}
 
 function paintSubagents(active, running, total) {
   ui.legend.hidden = total === 0;
@@ -1185,8 +1243,16 @@ function render(data) {
   drawLive(data);
   drawSteps(data);
   paintSubagents(activeSubs, runningSubs, subagents.count ?? 0);
+  const members = Array.isArray(subagents.members) ? subagents.members : [];
+  const roster = members.length || (subagents.count ?? 0);
+  ui.subsToggle.hidden = roster === 0;
+  ui.subsToggle.textContent = `${roster} subagent${roster === 1 ? '' : 's'}`;
+  paintSubsDetail(members);
 
   const lastStep = data.live?.lastStep;
+  // What the turn has consumed so far, not what the last step generated: the
+  // line answers "what did this turn cost", and the step answers a different one.
+  const turnConsumed = Number.isFinite(data.turn?.consumed) ? data.turn.consumed : (data.turn?.tokens ?? 0);
   const lastSub = lastStep?.sub ? ' · subagent' : '';
   const lastCost = typeof data.cost?.lastTurn === 'number' ? ` · ${money4(data.cost.lastTurn)}` : '';
   if (lastStep?.tps) {
@@ -1194,7 +1260,7 @@ function render(data) {
     // Classify the digits on screen, exactly like the headline, so a 19.6 t/s
     // step printed as "20" is not coloured as a slow rate.
     ui.lastRate.dataset.tier = speedTier(Math.round(lastStep.tps));
-    ui.lastRest.textContent = ` · ${seconds(lastStep.ms)} · ${compact(lastStep.tokens)} tok${lastSub}${lastCost}`;
+    ui.lastRest.textContent = ` · ${seconds(lastStep.ms)} · ${compact(turnConsumed)} tok${lastSub}${lastCost}`;
   } else {
     ui.lastRate.textContent = '';
     delete ui.lastRate.dataset.tier;
@@ -1215,7 +1281,7 @@ function render(data) {
     data.status === 'waiting-permission' ||
     data.status === 'waiting-question';
   const origin = working ? 'live' : totals.source === 'history' ? 'from history' : '';
-  ui.source.textContent = [origin, subLabel].filter(Boolean).join(' · ');
+  ui.source.textContent = origin;
   ui.foot.textContent = data.error
     ? `cannot read history: ${data.error}`
     : loadingSubs > 0
@@ -1353,38 +1419,60 @@ host.onReady((ctx) => {
       peakHover = false;
       if (current) drawLive(current);
     });
-    // The wheel widens the live window and thins the step bars. Both are
-    // temporary views: the reset timer puts them back on its own.
+    // The wheel moves a target; the frame loop eases the drawn window towards
+    // it, so both directions are one smooth movement with as many steps as the
+    // hand makes. Hovering holds the view, leaving restarts the clock.
     ui.live.addEventListener(
       'wheel',
       (event) => {
         if (!current) return;
         event.preventDefault();
-        // The ease leaves liveLevel describing the window it is leaving, so the
-        // step is taken from what is actually drawn.
-        if (zoomAnim) liveLevel = Math.max(0, LIVE_LEVELS.findIndex((value) => value >= liveWindowMs - 1));
-        const next = event.deltaY > 0 ? Math.min(LIVE_LEVELS.length - 1, liveLevel + 1) : Math.max(0, liveLevel - 1);
-        liveLevel = next;
-        liveWindowMs = LIVE_LEVELS[next];
-        zoomAnim = null;
+        const ratio = event.deltaY > 0 ? ZOOM_STEP : 1 / ZOOM_STEP;
+        liveTargetMs = Math.min(ZOOM_MAX_MS, Math.max(ZOOM_MIN_MS, liveTargetMs * ratio));
         zoomResetAt = performance.now() + ZOOM_RESET_MS;
-        drawLive(current);
       },
       { passive: false },
     );
+    ui.live.addEventListener('pointerenter', () => {
+      liveHovering = true;
+    });
+    ui.live.addEventListener('pointerleave', () => {
+      liveHovering = false;
+      zoomResetAt = performance.now() + ZOOM_RESET_MS;
+    });
     ui.stepsChart.addEventListener(
       'wheel',
       (event) => {
         if (!current) return;
         event.preventDefault();
-        const next = event.deltaY < 0 ? Math.min(STEP_LEVELS.length - 1, stepLimit + 1) : Math.max(0, stepLimit - 1);
-        if (next === stepLimit) return;
-        stepLimit = next;
+        const floor = Math.min(STEP_MIN_BARS, stepFull || STEP_MIN_BARS);
+        const from = stepTarget > 0 ? stepTarget : stepFull || floor;
+        const next = event.deltaY < 0 ? Math.max(floor, from * 0.8) : Math.min(stepFull || floor, from * 1.25);
+        stepTarget = next >= (stepFull || floor) - 0.5 ? 0 : next;
         stepResetAt = performance.now() + ZOOM_RESET_MS;
-        drawSteps(current);
       },
       { passive: false },
     );
+    ui.stepsChart.addEventListener('pointerenter', () => {
+      stepHovering = true;
+    });
+    ui.stepsChart.addEventListener('pointerleave', () => {
+      stepHovering = false;
+      stepResetAt = performance.now() + ZOOM_RESET_MS;
+    });
+    ui.subsToggle.addEventListener('click', () => {
+      subsDetailOpen = !subsDetailOpen;
+      subsDetailKey = '';
+      subsDetailUntil = performance.now() + ZOOM_RESET_MS;
+      if (current) paintSubsDetail(current.subagents?.members ?? []);
+    });
+    ui.subsDetail.addEventListener('pointerenter', () => {
+      subsDetailHover = true;
+    });
+    ui.subsDetail.addEventListener('pointerleave', () => {
+      subsDetailHover = false;
+      subsDetailUntil = performance.now() + ZOOM_RESET_MS;
+    });
     ui.footCopy.addEventListener('click', async () => {
       if (!current) return;
       const text = statsMarkdown(current);
@@ -1405,31 +1493,6 @@ host.onReady((ctx) => {
       ceilingMode = ceilingMode === 'session' ? 'turn' : 'session';
       ui.footCeiling.textContent = ceilingMode === 'turn' ? 'turn peak' : 'session peak';
       if (current) drawLive(current);
-    });
-    // The chip's own name is what it goes back to, so flash() must not capture
-    // the "saving…" it is about to replace.
-    ui.footPng.dataset.label = 'PNG';
-    ui.footCopy.dataset.label = 'copy stats';
-    ui.footPng.addEventListener('click', async () => {
-      // The clone is made synchronously by capturePng, so the promise must be
-      // created before the chip changes: otherwise the artifact shows the chip
-      // reading "saving…", dimmed.
-      const shot = capturePng(ui.app, { scale: 2, background: getComputedStyle(document.body).backgroundColor });
-      const id = current?.session ?? 'session';
-      ui.footPng.disabled = true;
-      ui.footPng.textContent = 'saving…';
-      try {
-        const { blob } = await shot;
-        const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
-        downloadBlob(blob, `token-meter-${id}-${stamp}.png`);
-        ui.footPng.title = 'save this panel as a PNG';
-        flash(ui.footPng, 'saved');
-      } catch (error) {
-        ui.footPng.title = String(error?.message ?? error);
-        flash(ui.footPng, 'PNG failed');
-      } finally {
-        ui.footPng.disabled = false;
-      }
     });
     ui.stepsChart.addEventListener('pointermove', (event) => {
       if (drawnSteps.length === 0 || !(drawnSlot > 0)) return;
@@ -1461,22 +1524,27 @@ host.onReady((ctx) => {
           lastPaint = stamp;
           drawLive(current);
         }
-        // A zoom eases back to the default once the reader has stopped: the
-        // width is a real number, so it can be animated honestly.
+        // Both charts ease towards their target every frame, so a gesture and
+        // its reset are the same movement in opposite directions.
         const at = performance.now();
-        if (zoomAnim) {
-          const k = Math.min(1, (at - zoomAnim.startedAt) / ZOOM_EASE_MS);
-          liveWindowMs = zoomAnim.from + (zoomAnim.to - zoomAnim.from) * (1 - (1 - k) ** 3);
+        if (!liveHovering && liveTargetMs !== ZOOM_MIN_MS && at > zoomResetAt) liveTargetMs = ZOOM_MIN_MS;
+        if (liveWindowMs !== liveTargetMs) {
+          const k = 1 - Math.exp(-Math.max(1, stamp - lastPaint) / ZOOM_EASE_MS);
+          liveWindowMs += (liveTargetMs - liveWindowMs) * k;
+          if (Math.abs(liveTargetMs - liveWindowMs) < 40) liveWindowMs = liveTargetMs;
           if (current) drawLive(current);
-          if (k >= 1) {
-            zoomAnim = null;
-            liveLevel = 0;
-          }
-        } else if (liveLevel > 0 && at > zoomResetAt) {
-          zoomAnim = { from: liveWindowMs, startedAt: at, to: LIVE_LEVELS[0] };
         }
-        if (stepLimit > 0 && at > stepResetAt) {
-          stepLimit = 0;
+        if (subsDetailOpen && !subsDetailHover && at > subsDetailUntil) {
+          subsDetailOpen = false;
+          subsDetailKey = '';
+          ui.subsDetail.hidden = true;
+        }
+        if (!stepHovering && stepTarget !== 0 && at > stepResetAt) stepTarget = 0;
+        const wanted = stepTarget > 0 ? stepTarget : stepFull;
+        if (stepFull > 0 && Math.abs(stepShown - wanted) > 0.5) {
+          const k = 1 - Math.exp(-Math.max(1, stamp - lastPaint) / ZOOM_EASE_MS);
+          stepShown += (wanted - stepShown) * k;
+          if (Math.abs(stepShown - wanted) < 0.5) stepShown = wanted;
           if (current) drawSteps(current);
         }
       }
@@ -1517,10 +1585,14 @@ host.onReady((ctx) => {
   delete ui.lastRate.dataset.tier;
   lastSteps = [];
   lastStepsSeq = -1;
-  liveLevel = 0;
-  liveWindowMs = LIVE_LEVELS[0];
-  zoomAnim = null;
-  stepLimit = 0;
+  liveWindowMs = ZOOM_MIN_MS;
+  liveTargetMs = ZOOM_MIN_MS;
+  stepTarget = 0;
+  stepShown = 0;
+  stepFull = 0;
+  subsDetailOpen = false;
+  subsDetailKey = '';
+  ui.subsDetail.hidden = true;
   // The drawn chart belongs to the session that left: force the empty one.
   lastDrawnSteps = null;
   stepHover = null;

@@ -23,6 +23,9 @@ const DEFAULT_CHARS_PER_TOKEN = 0.28;
 const TOOL_CHARS_MAX = 200;
 // Which subagent states still count as working, best first for the list.
 const SUBAGENT_RANK = { streaming: 0, tool: 1, 'waiting-permission': 2, 'waiting-question': 2 };
+// How many tree members the roster carries. The list is drawn, not scrolled to
+// the end, and a delegating turn can name dozens.
+const ROSTER_CAP = 40;
 
 export const LIVE_TYPES = new Set([
   'session.execution.started',
@@ -801,15 +804,19 @@ export function snapshot(collector, now = Date.now(), tree = [collector], priceB
       shownSteps,
       rates: ratesOf(steps),
       // The chart draws every step the meter keeps (1000 at most), and only when
-      // its sequence is stale. It reads six fields: tokens, ms, tps, aborted,
-      // at and cost, plus `sub` on a subagent's step. Nothing else travels: the
-      // wire carried eleven fields for four the frame reads, which was two
-      // thirds of a 34 KB answer.
+      // its sequence is stale. It reads seven fields: tokens, in, ms, tps,
+      // aborted, at and cost, plus `sub` on a subagent's step. Nothing else
+      // travels: the wire carried eleven fields for four the frame reads, which
+      // was two thirds of a 34 KB answer.
+      //
+      // `tokens` is what the step generated (output + reasoning), `total` its
+      // whole bill; `in` is the fresh input it read, `total - tokens`.
       //
       // This array is shared between answers, so a caller may drop the property
       // from its own answer object but never sort or cut the array itself.
       wire: shownSteps.map((step) => ({
         tokens: step.tokens,
+        in: step.total - step.tokens,
         ms: step.ms,
         tps: step.tps,
         aborted: step.aborted,
@@ -838,11 +845,15 @@ export function snapshot(collector, now = Date.now(), tree = [collector], priceB
   let lastTurnCost = 0;
   let turnTokens = 0;
   let turnSteps = 0;
+  // The turn's whole bill, the way `totals.consumed` reads the session's:
+  // prompt, generated, and both cache directions.
+  let turnConsumed = 0;
   if (collector.turnStartedAt) {
     for (const step of steps) {
       if (step.at >= collector.turnStartedAt) {
         lastTurnCost += step.cost ?? 0;
         turnTokens += step.tokens ?? 0;
+        turnConsumed += (step.total ?? 0) + (step.cacheRead ?? 0) + (step.cacheWrite ?? 0);
         turnSteps += 1;
       }
     }
@@ -993,6 +1004,44 @@ export function snapshot(collector, now = Date.now(), tree = [collector], priceB
     });
   }
   active.sort((a, b) => a.rank - b.rank || b.item.tps - a.item.tps);
+  // The roster: every member of the tree, not only the ones still working, so
+  // the panel can list a child that has finished. Newest activity first; a
+  // member with no step at all goes last, and the id breaks a tie so the list
+  // never reshuffles between two snapshots of the same tree.
+  const roster = [];
+  for (const member of members) {
+    if (member === collector) continue;
+    let lastAt = null;
+    for (const step of member.steps) {
+      if (typeof step.at === 'number' && (lastAt === null || step.at > lastAt)) lastAt = step.at;
+    }
+    const memberRates = ratesOf(member.steps);
+    roster.push({
+      id: member.id,
+      title: member.title ?? null,
+      status: member.status,
+      tps: Math.round(memberRate(member, now) * 10) / 10,
+      cost: round6(member.totals.cost),
+      consumed:
+        member.totals.input +
+        member.totals.output +
+        member.totals.reasoning +
+        member.totals.cacheRead +
+        member.totals.cacheWrite,
+      avgTps: Math.round(memberRates.avg * 10) / 10,
+      peakTps: Math.round(memberRates.peak * 10) / 10,
+      lastAt,
+      steps: member.totals.steps,
+    });
+  }
+  roster.sort((a, b) => {
+    if (a.lastAt !== b.lastAt) {
+      if (a.lastAt === null) return 1;
+      if (b.lastAt === null) return -1;
+      return b.lastAt - a.lastAt;
+    }
+    return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
+  });
   const subagents = {
     count: members.length - 1,
     running: active.length,
@@ -1003,6 +1052,7 @@ export function snapshot(collector, now = Date.now(), tree = [collector], priceB
     streaming: members.filter((member) => member !== collector && member.status === 'streaming').length,
     tool: members.filter((member) => member !== collector && member.status === 'tool').length,
     active: active.slice(0, 8).map((entry) => entry.item),
+    members: roster.slice(0, ROSTER_CAP),
   };
   // The series travels as values plus each sample's own offset from t0. The
   // service's ticker and the frame's poll both sample, and a poll resets the
@@ -1139,6 +1189,7 @@ export function snapshot(collector, now = Date.now(), tree = [collector], priceB
       active: Boolean(collector.turnActive),
       startedAt: collector.turnStartedAt || null,
       tokens: turnTokens,
+      consumed: turnConsumed,
       steps: turnSteps,
     },
     live: {

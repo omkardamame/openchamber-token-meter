@@ -447,6 +447,7 @@ var LIVE_WINDOW_MS = 3000;
 var DEFAULT_CHARS_PER_TOKEN = 0.28;
 var TOOL_CHARS_MAX = 200;
 var SUBAGENT_RANK = { streaming: 0, tool: 1, "waiting-permission": 2, "waiting-question": 2 };
+var ROSTER_CAP = 40;
 var LIVE_TYPES = new Set([
   "session.execution.started",
   "session.execution.succeeded",
@@ -1109,6 +1110,7 @@ function snapshot(collector, now = Date.now(), tree = [collector], priceBook = n
       rates: ratesOf(steps2),
       wire: shownSteps2.map((step) => ({
         tokens: step.tokens,
+        in: step.total - step.tokens,
         ms: step.ms,
         tps: step.tps,
         aborted: step.aborted,
@@ -1129,11 +1131,13 @@ function snapshot(collector, now = Date.now(), tree = [collector], priceBook = n
   let lastTurnCost = 0;
   let turnTokens = 0;
   let turnSteps = 0;
+  let turnConsumed = 0;
   if (collector.turnStartedAt) {
     for (const step of steps) {
       if (step.at >= collector.turnStartedAt) {
         lastTurnCost += step.cost ?? 0;
         turnTokens += step.tokens ?? 0;
+        turnConsumed += (step.total ?? 0) + (step.cacheRead ?? 0) + (step.cacheWrite ?? 0);
         turnSteps += 1;
       }
     }
@@ -1242,6 +1246,39 @@ function snapshot(collector, now = Date.now(), tree = [collector], priceBook = n
     });
   }
   active.sort((a, b) => a.rank - b.rank || b.item.tps - a.item.tps);
+  const roster = [];
+  for (const member of members) {
+    if (member === collector)
+      continue;
+    let lastAt = null;
+    for (const step of member.steps) {
+      if (typeof step.at === "number" && (lastAt === null || step.at > lastAt))
+        lastAt = step.at;
+    }
+    const memberRates = ratesOf(member.steps);
+    roster.push({
+      id: member.id,
+      title: member.title ?? null,
+      status: member.status,
+      tps: Math.round(memberRate(member, now) * 10) / 10,
+      cost: round6(member.totals.cost),
+      consumed: member.totals.input + member.totals.output + member.totals.reasoning + member.totals.cacheRead + member.totals.cacheWrite,
+      avgTps: Math.round(memberRates.avg * 10) / 10,
+      peakTps: Math.round(memberRates.peak * 10) / 10,
+      lastAt,
+      steps: member.totals.steps
+    });
+  }
+  roster.sort((a, b) => {
+    if (a.lastAt !== b.lastAt) {
+      if (a.lastAt === null)
+        return 1;
+      if (b.lastAt === null)
+        return -1;
+      return b.lastAt - a.lastAt;
+    }
+    return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
+  });
   const subagents = {
     count: members.length - 1,
     running: active.length,
@@ -1249,7 +1286,8 @@ function snapshot(collector, now = Date.now(), tree = [collector], priceBook = n
     partial: members.filter((member) => member !== collector && member.historyPartial).length,
     streaming: members.filter((member) => member !== collector && member.status === "streaming").length,
     tool: members.filter((member) => member !== collector && member.status === "tool").length,
-    active: active.slice(0, 8).map((entry) => entry.item)
+    active: active.slice(0, 8).map((entry) => entry.item),
+    members: roster.slice(0, ROSTER_CAP)
   };
   const series = collector.series.slice(-SERIES_POINTS);
   const seriesT0 = series.length ? series[0].t : now;
@@ -1352,6 +1390,7 @@ function snapshot(collector, now = Date.now(), tree = [collector], priceBook = n
       active: Boolean(collector.turnActive),
       startedAt: collector.turnStartedAt || null,
       tokens: turnTokens,
+      consumed: turnConsumed,
       steps: turnSteps
     },
     live: {

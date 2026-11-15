@@ -346,11 +346,19 @@ const harness = `<!doctype html><meta charset="utf-8"><title>page test</title>
       sectionHead: [...doc.querySelectorAll('.block-head span')].map((n) => n.textContent),
       footClock: (doc.querySelector('.foot-clock') || {}).textContent ?? null,
       footText: (doc.querySelector('.foot-text') || {}).textContent ?? null,
+      subsToggle: (doc.querySelector('.subs-toggle') || {}).textContent ?? null,
+      subsDetailShown: doc.querySelector('.subs-detail') ? !doc.querySelector('.subs-detail').hidden : null,
+      subsDetailText: (() => {
+        const section = doc.querySelector('.subs-detail');
+        if (!section) return null;
+        const list = section.querySelector('.subs-detail-list');
+        const rows = list ? list.children.length : 'nolist';
+        const text = section.textContent.replace(/\\s+/g, ' ').trim().slice(0, 140);
+        return (section.hidden ? 'hidden' : 'shown') + ' rows=' + rows + ' text=' + text;
+      })(),
       axisFrom: (doc.querySelector('.axis-from') || {}).textContent ?? null,
       peakLabelText: (doc.querySelector('.axis-peak') || {}).textContent ?? null,
       ceilingChip: (doc.querySelector('.foot-ceiling') || {}).textContent ?? null,
-      pngChip: (doc.querySelector('.foot-png') || {}).textContent ?? null,
-      pngTitle: (doc.querySelector('.foot-png') || {}).title ?? null,
       livePathD: (() => {
         const line = doc.querySelector('[data-chart="live"] path[data-role="live-line"]');
         return line ? line.getAttribute('d') : null;
@@ -575,7 +583,7 @@ try {
   check('panel shows the last measured step', /last 33 t\/s/.test(idle.text), idle.text.slice(0, 60));
   check(
     'panel puts the last turn cost after the last measured step',
-    /last 33 t\/s · 7\.8 s · 1\.1k tok · \$0\.0800/.test(idle.text),
+    /last 33 t\/s · 7\.8 s · 2\.0k tok · \$0\.0800/.test(idle.text),
     idle.text.slice(0, 100),
   );
   check(
@@ -1148,7 +1156,7 @@ try {
   check('panel counts both bars while one is hovered', stepHover.bars === 2, `${stepHover.bars} bars`);
   check(
     'panel reads the hovered step under the pointer',
-    /^180 t\/s · 900 tok in 5\.0 s · \d\d:\d\d:\d\d · \$0\.0034$/.test(stepHover.stepsHoverText ?? ''),
+    /^180 t\/s · in 0 · out 900 in 5\.0 s · \d\d:\d\d:\d\d · \$0\.0034$/.test(stepHover.stepsHoverText ?? ''),
     String(stepHover.stepsHoverText),
   );
   check(
@@ -1172,7 +1180,7 @@ try {
   const oldStore = await panel.read();
   check(
     'panel reads a step from an older service without a time or a cost',
-    oldStore.stepsHoverText === '180 t/s · 900 tok in 5.0 s',
+    oldStore.stepsHoverText === '180 t/s · in 0 · out 900 in 5.0 s',
     String(oldStore.stepsHoverText),
   );
   await panel.leave('[data-chart="steps"]');
@@ -1249,7 +1257,11 @@ try {
   await panel.set(subState());
   const subagent = await panel.read();
   check('panel names the subagent behind the rate', /a subagent is generating/.test(subagent.text), subagent.text.slice(0, 90));
-  check('panel says how many subagents are in the totals', /2 subagents/.test(subagent.text), subagent.text.slice(0, 90));
+  check(
+    'panel says how many subagents are in the tree',
+    /2 subagents/.test(subagent.text),
+    String(subagent.subsToggle ?? subagent.text.slice(0, 90)),
+  );
   check('panel marks the last step as a subagent’s', /last 33 t\/s .*subagent/.test(subagent.text), subagent.text.slice(-90));
   await panel.hover('[data-chart="steps"]', 0.5);
   const subStep = await panel.read();
@@ -1381,69 +1393,97 @@ try {
   const longSeries = {
     t0: Date.now() - 300_000,
     step: 1_000,
+    d: Array.from({ length: 300 }, (_, index) => index * 1_000),
     v: Array.from({ length: 300 }, (_, index) => 20 + (index % 7) * 3),
   };
   await panel.set(state({ seriesLong: longSeries }));
   const atRest = await panel.read();
   check('UI-34 the live chart starts on the 60 s window', atRest.axisFrom === '60 s ago', String(atRest.axisFrom));
   await panel.wheel('[data-chart="live"]', 120);
-  const zoomed = await panel.read();
-  check('UI-34 the wheel widens the live chart', zoomed.axisFrom === '2 min ago', String(zoomed.axisFrom));
-  await panel.wheel('[data-chart="live"]', 120);
+  const oneNotch = await panel.read();
+  check(
+    'UI-34 a wheel notch widens the live chart gradually',
+    oneNotch.axisFrom !== '60 s ago' && Number.parseInt(oneNotch.axisFrom, 10) < 120 && Boolean(oneNotch.livePathD),
+    String(oneNotch.axisFrom),
+  );
+  for (let notch = 0; notch < 14; notch += 1) await panel.wheel('[data-chart="live"]', 120);
   const widest = await panel.read();
   check(
-    'UI-34 it widens to five minutes and draws the coarse series',
+    'UI-34 many notches reach five minutes and draw the coarse series',
     widest.axisFrom === '5 min ago' && Boolean(widest.livePathD),
-    `${widest.axisFrom} d=${String(widest.livePathD).slice(0, 24)}`,
+    `${widest.axisFrom} d=${String(widest.livePathD).slice(0, 20)}`,
   );
-  await panel.wheel('[data-chart="live"]', -120);
-  const back = await panel.read();
-  check('UI-34 the wheel narrows it again', back.axisFrom === '2 min ago', String(back.axisFrom));
-  await panel.wait(4_600);
-  const reset = await panel.read();
-  check('UI-34 it eases back to 60 s on its own', reset.axisFrom === '60 s ago', String(reset.axisFrom));
+  for (let notch = 0; notch < 16; notch += 1) await panel.wheel('[data-chart="live"]', -120);
+  const closest = await panel.read();
+  check('UI-34 the wheel narrows it back to the floor', closest.axisFrom === '60 s ago', String(closest.axisFrom));
 
   const manySteps = Array.from({ length: 150 }, (_, index) => ({
+    aborted: false,
     at: Date.now() - (150 - index) * 1_000,
     cost: 0,
+    in: 4_000 + index,
     ms: 900,
     tokens: 60 + (index % 5) * 10,
     tps: 60 + (index % 5) * 10,
-    aborted: false,
   }));
   await panel.set(state({ steps: manySteps, stepsKnown: manySteps.length, stepsSeq: 9 }));
   const manyBars = await panel.read();
   await panel.wheel('[data-chart="steps"]', -120);
   const fewBars = await panel.read();
   check(
-    'UI-35 the per-step chart zooms in to the last 100 steps',
-    manyBars.bars === 150 && fewBars.bars === 100,
+    'UI-35 a step-chart notch thins the bars, gradually',
+    manyBars.bars === 150 && fewBars.bars < 150 && fewBars.bars > 100,
     `${manyBars.bars} then ${fewBars.bars} bars`,
   );
-  await panel.wait(4_600);
-  const barsBack = await panel.read();
-  check('UI-35 it comes back to every step on its own', barsBack.bars === 150, `${barsBack.bars} bars`);
-
-  await panel.set(state({ status: 'streaming', steps: manySteps, stepsKnown: manySteps.length, stepsSeq: 9 }));
-  await panel.click('.foot-ceiling');
-  const turnMode = await panel.read();
+  await panel.hover('[data-chart="steps"]', 0.6);
+  const readout = await panel.read();
   check(
-    'UI-36 the ceiling can follow this turn instead of the session',
-    turnMode.ceilingChip === 'turn peak' && /turn peak/.test(turnMode.text),
-    `${turnMode.ceilingChip} · ${turnMode.text.slice(0, 70)}`,
+    'UI-39 the step readout names in and out apart',
+    /^\d+ t\/s · in \S+ · out \S+ in \d+(\.\d)? (s|ms) · \d\d:\d\d:\d\d( · \$[\d.]+)?$/.test(readout.stepsHoverText ?? ''),
+    String(readout.stepsHoverText).slice(0, 90),
   );
-  await panel.click('.foot-ceiling');
+  await panel.leave('[data-chart="steps"]');
 
-  await panel.click('.foot-png');
-  await panel.wait(600);
-  const saving = await panel.read();
-  await panel.wait(1_800);
-  const shot = await panel.read();
+  await panel.set(state({ status: 'streaming', steps: manySteps, stepsKnown: manySteps.length, stepsSeq: 9, turn: { active: true, consumed: 5_500_000, startedAt: Date.now() - 120_000, steps: 3, tokens: 2_000 } }));
+  const turnLine = await panel.read();
   check(
-    'UI-37 the panel saves itself as a PNG',
-    saving.pngChip === 'saved' && shot.pngChip === 'PNG' && !/failed/i.test(shot.pngTitle ?? ''),
-    `${saving.pngChip} then ${shot.pngChip}, title=${String(shot.pngTitle).slice(0, 60)}`,
+    'UI-40 the last line carries the turn’s consumed tokens',
+    /· 5\.5M tok/.test(turnLine.text),
+    String(turnLine.text).slice(0, 80),
   );
+
+  await panel.set(
+    state({
+      subagents: {
+        active: [],
+        count: 2,
+        loading: 0,
+        members: [
+          { avgTps: 120, consumed: 4_200_000, cost: 0.0123, id: 'ses_sub_a', lastAt: Date.now() - 90_000, peakTps: 340, status: 'idle', steps: 12, title: 'reading the spec', tps: 0 },
+          { avgTps: 80, consumed: 1_100_000, cost: 0.004, id: 'ses_sub_b', lastAt: Date.now() - 300_000, peakTps: 150, status: 'idle', steps: 5, title: 'writing tests', tps: 0 },
+        ],
+        partial: 0,
+        running: 0,
+        streaming: 0,
+        tool: 0,
+      },
+    }),
+  );
+  const subsClosed = await panel.read();
+  check('UI-41 the tree count is a chip beside Session details', subsClosed.subsToggle === '2 subagents', String(subsClosed.subsToggle));
+  await panel.click('.subs-toggle');
+  const subsOpen = await panel.read();
+  check(
+    'UI-41 clicking it lists every subagent session with its own numbers',
+    subsOpen.subsDetailShown === true &&
+      /reading the spec/.test(subsOpen.subsDetailText ?? '') &&
+      /4\.2M tok/.test(subsOpen.subsDetailText ?? '') &&
+      /avg 120 t\/s/.test(subsOpen.subsDetailText ?? '') &&
+      /peak 340 t\/s/.test(subsOpen.subsDetailText ?? '') &&
+      /ago/.test(subsOpen.subsDetailText ?? ''),
+    `${subsOpen.subsDetailShown} ${String(subsOpen.subsDetailText).slice(0, 200)}`,
+  );
+  await panel.click('.subs-toggle');
 
   await panel.set(state({ stream: { state: 'retrying', error: 'socket closed' } }));
   const cutUi = await panel.read();
