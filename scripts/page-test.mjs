@@ -422,7 +422,8 @@ const server = createServer((req, res) => {
   }
 });
 
-const port = 41_873;
+// A second suite (or a parallel verify) must not fight for the same port.
+const port = Number(process.env.PAGE_TEST_PORT ?? 41_873);
 await new Promise((resolve) => server.listen(port, '127.0.0.1', resolve));
 
 if (spawnSync('agent-browser', ['--version'], { stdio: 'ignore' }).status !== 0) {
@@ -1513,9 +1514,9 @@ try {
   await panel.set(state({ series: { d: [0, 250, 500, 750, 1000, 1250], step: 250, t0: Date.now() - 6_000, v: [30, 900, 900, 900, 900, 900] } }));
   const burst = await panel.read();
   check(
-    'panel dips the peak line only for a live sample above the peak',
-    burst.peakLineY > 8,
-    `y ${burst.peakLineY} with a sustained 900 t/s burst`,
+    'panel keeps the peak line on the top edge through a burst, and scales to it',
+    burst.peakLineY === 8 && Number(burst.gridLabels[0]) > 334,
+    `y ${burst.peakLineY}, axis ${burst.gridLabels[0]} with a sustained 900 t/s burst`,
   );
   await panel.set(state());
   const settled = await panel.read();

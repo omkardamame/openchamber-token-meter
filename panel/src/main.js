@@ -54,6 +54,9 @@ let stepShown = 0;
 let stepFull = 0;
 let stepHovering = false;
 let stepResetAt = 0;
+// Bars the per-step window is scrolled back from the newest one.
+let stepPan = 0;
+let stepDrag = null;
 let peakLineY = null;
 let liveHoverY = null;
 let peakHover = false;
@@ -181,12 +184,12 @@ function build() {
     </section>
 
     <div class="foot">
-      <span class="foot-text">reading OpenCode usage</span>
       <span class="foot-actions">
         <button type="button" class="chip foot-copy" title="this session's numbers as a markdown table">copy stats</button>
         <button type="button" class="chip foot-ceiling" title="the chart's ceiling: the whole session, or this turn">session peak</button>
       </span>
       <span class="foot-clock"></span>
+      <span class="foot-text">reading OpenCode usage</span>
     </div>
   `;
   root.append(app);
@@ -672,11 +675,13 @@ function flash(node, text) {
 function statsMarkdown(data) {
   const t = data.totals ?? {};
   const c = data.cost ?? {};
+  const members = Array.isArray(data.subagents?.members) ? data.subagents.members : [];
   const lines = [
     `**Token meter — ${sessionTitle || data.session || 'session'}**`,
     '',
     '| | |',
     '|---|---|',
+    `| Session | ${sessionTitle || data.session || '—'} |`,
     `| In | ${compact(t.input)} |`,
     `| Out | ${compact(t.output)} |`,
     `| Think | ${compact(t.reasoning)} |`,
@@ -740,8 +745,11 @@ function drawLive(data) {
   // where every value on the axis would otherwise be zero.
   const turnPeak = ceilingMode === 'turn' ? turnPeakOf(data) : 0;
   const turnMode = ceilingMode === 'turn' && turnPeak > 0;
-  const ceilingPeak = turnMode ? turnPeak : rates.peak;
-  const max = Math.max(8, ceilingPeak, liveTop);
+  // The line is the ceiling, so the ceiling has to include the curve that is
+  // being drawn: a finished step's rate lags a burst by a whole turn, and the
+  // curve would cross a line that claims to be the peak.
+  const ceilingPeak = Math.max(turnMode ? turnPeak : rates.peak, liveTop);
+  const max = Math.max(8, ceilingPeak);
   const share = (value) => Math.min(1, Math.max(0, value) / max);
   const lineY = (value) => height - pad - share(value) * (height - pad * 2);
   const xOf = (point) => ((point.t - from) / liveWindowMs) * width;
@@ -789,7 +797,10 @@ function drawLive(data) {
     peakLineY = y;
     // How old the best step is: the scale is pinned to it, so "peak 337" beside
     // a 20 t/s stream needs the date to make sense.
-    const age = rates.peakAt && !turnMode ? duration(now - rates.peakAt) : '';
+    // The age belongs to a finished step; a ceiling that the live curve set has
+    // no step to name.
+    const fromStep = ceilingPeak <= (turnMode ? turnPeak : rates.peak) + 0.05;
+    const age = rates.peakAt && !turnMode && fromStep ? duration(now - rates.peakAt) : '';
     // Keep the labels apart when the lines are close. Above the average label
     // when there is room, so the peak label stays beside its own (higher) line;
     // on the top edge, stack it below instead of clipping it.
@@ -916,7 +927,12 @@ function drawSteps(data) {
   stepFull = rated.length;
   const shownBars = Math.min(rated.length, Math.max(1, Math.round(stepShown)));
   const limit = shownBars >= rated.length ? 0 : shownBars;
-  const steps = limit ? rated.slice(-limit) : rated;
+  // The window ends `stepPan` bars before the newest one, so the same drag works
+  // at any zoom level.
+  const panMax = Math.max(0, rated.length - shownBars);
+  stepPan = Math.min(panMax, Math.max(0, stepPan));
+  const endIndex = rated.length - Math.round(stepPan);
+  const steps = rated.slice(Math.max(0, endIndex - shownBars), endIndex);
   // The count is every step the session and its subagents ran, not only the
   // bars the meter can draw or rate.
   const known = data.stepsKnown ?? all.length;
@@ -1053,11 +1069,47 @@ let subRows = new Map();
  * consumed, what it cost, its average and best rate, and when it last moved.
  * Opens from the `N subagents` chip and closes itself a minute later.
  */
+/**
+ * The roster grows and shrinks instead of appearing: its own height is the only
+ * honest size, so it is measured, transitioned, then released.
+ */
+function openSubsDetail() {
+  const node = ui.subsDetail;
+  node.hidden = false;
+  node.style.maxHeight = '0px';
+  node.style.opacity = '0';
+  // Two frames: one for the browser to see the zero, one to start the move.
+  requestAnimationFrame(() => {
+    node.style.maxHeight = `${node.scrollHeight}px`;
+    node.style.opacity = '1';
+  });
+  setTimeout(() => {
+    if (!subsDetailOpen) return;
+    node.style.maxHeight = 'none';
+  }, 240);
+}
+
+function closeSubsDetail() {
+  const node = ui.subsDetail;
+  if (node.hidden) return;
+  node.style.maxHeight = `${node.scrollHeight}px`;
+  node.style.opacity = '1';
+  requestAnimationFrame(() => {
+    node.style.maxHeight = '0px';
+    node.style.opacity = '0';
+  });
+  setTimeout(() => {
+    if (subsDetailOpen) return;
+    node.hidden = true;
+    node.style.maxHeight = '';
+    node.style.opacity = '';
+  }, 220);
+}
+
 function paintSubsDetail(members) {
   const list = Array.isArray(members) ? members : [];
   if (!subsDetailOpen || list.length === 0) {
-    ui.subsDetail.hidden = true;
-    if (!subsDetailOpen) {
+    if (!subsDetailOpen && ui.subsDetail.hidden) {
       ui.subsDetailList.replaceChildren();
       ui.subsDetailMeta.textContent = '';
       subsDetailKey = '';
@@ -1264,7 +1316,8 @@ function render(data) {
   // line answers "what did this turn cost", and the step answers a different one.
   const turnConsumed = Number.isFinite(data.turn?.consumed) ? data.turn.consumed : null;
   const consumedText = turnConsumed === null ? '' : ` · ${compact(turnConsumed)} tok`;
-  const lastSub = lastStep?.sub ? ' · subagent' : '';
+  // Only name the owner when there is somebody else in the tree to tell apart.
+  const lastSub = lastStep?.sub ? ' · subagent' : (data.subagents?.count ?? 0) > 0 ? ' · main' : '';
   const lastCost = typeof data.cost?.lastTurn === 'number' ? ` · ${money4(data.cost.lastTurn)}` : '';
   if (lastStep?.tps) {
     ui.lastRate.textContent = `last ${Math.round(lastStep.tps)} t/s`;
@@ -1479,6 +1532,8 @@ host.onReady((ctx) => {
       subsDetailKey = '';
       subsDetailUntil = performance.now() + ZOOM_RESET_MS;
       if (current) paintSubsDetail(current.subagents?.members ?? []);
+      if (subsDetailOpen) openSubsDetail();
+      else closeSubsDetail();
     });
     ui.footCopy.addEventListener('click', async () => {
       if (!current) return;
@@ -1514,6 +1569,28 @@ host.onReady((ctx) => {
       stepHover = null;
       if (current) drawSteps(current);
     });
+    // Drag the step window back through history. The chart keeps no scrollbar:
+    // the gesture is the scrollbar, and the window snaps back with the zoom.
+    ui.stepsChart.addEventListener('pointerdown', (event) => {
+      if (!current || drawnSteps.length === 0 || !(drawnSlot > 0)) return;
+      stepDrag = { pan: stepPan, x: event.clientX, slot: drawnSlot };
+      ui.stepsChart.setPointerCapture?.(event.pointerId);
+    });
+    ui.stepsChart.addEventListener('pointermove', (event) => {
+      if (!stepDrag) return;
+      event.preventDefault();
+      const moved = (event.clientX - stepDrag.x) / stepDrag.slot;
+      stepPan = Math.max(0, stepDrag.pan + moved);
+      stepHover = null;
+      drawSteps(current);
+    });
+    const endDrag = () => {
+      if (!stepDrag) return;
+      stepDrag = null;
+      stepResetAt = performance.now() + ZOOM_RESET_MS;
+    };
+    ui.stepsChart.addEventListener('pointerup', endDrag);
+    ui.stepsChart.addEventListener('pointercancel', endDrag);
     // Redraw between polls against the projected clock, but only while tokens
     // are moving and at a rate a 60 s curve needs: rebuilding the path at
     // 60 fps bought nothing and burnt CPU on every idle session.
@@ -1544,9 +1621,12 @@ host.onReady((ctx) => {
         if (subsDetailOpen && !ui.subsDetail.matches(':hover') && at > subsDetailUntil) {
           subsDetailOpen = false;
           subsDetailKey = '';
-          ui.subsDetail.hidden = true;
+          closeSubsDetail();
         }
-        if (!stepHovering && stepTarget !== 0 && at > stepResetAt) stepTarget = 0;
+        if (!stepHovering && (stepTarget !== 0 || stepPan > 0) && at > stepResetAt) {
+          stepTarget = 0;
+          stepPan = 0;
+        }
         const wanted = stepTarget > 0 ? stepTarget : stepFull;
         if (stepFull > 0 && Math.abs(stepShown - wanted) > 0.5) {
           const k = 1 - Math.exp(-dt / ZOOM_EASE_MS);
@@ -1597,9 +1677,13 @@ host.onReady((ctx) => {
   stepTarget = 0;
   stepShown = 0;
   stepFull = 0;
+  stepPan = 0;
+  stepDrag = null;
   subsDetailOpen = false;
   subsDetailKey = '';
   ui.subsDetail.hidden = true;
+  ui.subsDetail.style.maxHeight = '';
+  ui.subsDetail.style.opacity = '';
   ui.subsDetailList.replaceChildren();
   ui.subsDetailMeta.textContent = '';
   ui.subsToggle.hidden = true;

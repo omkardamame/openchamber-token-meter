@@ -376,12 +376,12 @@
       .subs-toggle {
         margin-left: 8px;
       }
+      .subs-detail {
+        overflow: hidden;
+        transition: max-height 200ms ease, opacity 160ms ease;
+      }
       .subs-detail .sub-detail {
         padding: 3px 0;
-        border-top: 1px solid var(--oc-border);
-      }
-      .subs-detail .sub-detail:first-child {
-        border-top: 0;
       }
       .sub-detail-head {
         display: flex;
@@ -607,12 +607,12 @@
         opacity: 0.8;
       }
       .foot-text {
-        flex: 1 1 auto;
+        flex: 0 0 100%;
         min-width: 0;
       }
       .foot-clock {
-        flex: 0 0 100%;
-        text-align: right;
+        flex: none;
+        margin-left: auto;
         font-variant-numeric: tabular-nums;
         white-space: nowrap;
       }

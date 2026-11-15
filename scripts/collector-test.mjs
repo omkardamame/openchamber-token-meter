@@ -1008,6 +1008,9 @@ const longSnap = snapshot(longRun, longAt + 400_000).seriesLong;
 const shortRun = createCollector('ses_series_short');
 for (let index = 0; index < 240; index += 1) tick(shortRun, longAt + index * 250);
 const shortSnap = snapshot(shortRun, longAt + 60_000);
+// The ticker stops for a quiet session, so the buckets are not a grid: each
+// sample travels with its own offset from t0, in order, the first one zero.
+const longLastOffset = keptBuckets.at(-1).t - keptBuckets[0].t;
 check(
   'SN-21 the coarse series keeps five minutes of one-second averages',
   longSnap?.step === 1000 &&
@@ -1015,8 +1018,13 @@ check(
     longSnap.t0 === keptBuckets[0].t &&
     longSnap.v.at(-1) === longSamples.at(-1).v &&
     longSnap.v.every((value, index) => value === Math.round((keptBuckets[index].sum / keptBuckets[index].n) * 10) / 10) &&
+    Array.isArray(longSnap.d) &&
+    longSnap.d.length === longSnap.v.length &&
+    longSnap.d[0] === 0 &&
+    longSnap.d.every((offset, index) => index === 0 || offset >= longSnap.d[index - 1]) &&
+    longSnap.d.at(-1) === longLastOffset &&
     shortSnap.seriesLong === undefined,
-  `${longSnap?.v.length} of ${longBuckets.length} buckets kept, t0 +${longSnap ? (longSnap.t0 - longAt) / 1000 : '?'} s, 60 s ${shortSnap.seriesLong === undefined ? 'omitted' : 'sent'}`,
+  `${longSnap?.v.length} of ${longBuckets.length} buckets kept, t0 +${longSnap ? (longSnap.t0 - longAt) / 1000 : '?'} s, offsets 0…${longSnap?.d?.at(-1)} ms of ${longLastOffset}, 60 s ${shortSnap.seriesLong === undefined ? 'omitted' : 'sent'}`,
 );
 
 // The three numbers a row, a turn and the roster each need from the same merged
@@ -1075,6 +1083,18 @@ check(
     snMember?.steps === Math.max(snChild.totals.steps, snChild.steps.length, snChild.knownSteps ?? 0) &&
     snSnap.subagents.members[1].lastAt === null,
   `${snWireStep?.in} in, turn consumed ${snSnap.turn.consumed}, roster ${JSON.stringify(snSnap.subagents.members.map((member) => [member.id, member.lastAt]))}`,
+);
+// A step whose whole bill is below what it generated cannot have read fresh
+// input: the wire clamps that difference to zero instead of sending a step the
+// frame would draw with negative input.
+const snUnderflowRun = createCollector('ses_sn_underflow');
+snUnderflowRun.steps = [{ ...snStep('msg_sn_underflow', 8_500, 700, 300, 0, 0), total: 100 }];
+snUnderflowRun.stepsSeq = snUnderflowRun.steps.length;
+const snUnderflowStep = snapshot(snUnderflowRun, 9_000).steps.find((step) => step.at === 8_500);
+check(
+  'SN-22 a step billed below its own tokens reads zero input, never a negative',
+  snUnderflowStep?.in === 0,
+  `${snUnderflowStep?.in} in from total 100 − tokens 300`,
 );
 
 // A subagent whose history is longer than the kept list still counts in full.
