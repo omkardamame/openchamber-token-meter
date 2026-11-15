@@ -1408,7 +1408,13 @@ try {
     d: Array.from({ length: 300 }, (_, index) => index * 1_000),
     v: Array.from({ length: 300 }, (_, index) => 20 + (index % 7) * 3),
   };
-  await panel.set(state({ seriesLong: longSeries }));
+  const hourSeries = {
+    t0: Date.now() - 3_600_000,
+    step: 10_000,
+    d: Array.from({ length: 360 }, (_, index) => index * 10_000),
+    v: Array.from({ length: 360 }, (_, index) => 10 + (index % 11) * 2),
+  };
+  await panel.set(state({ seriesLong: longSeries, seriesWide: hourSeries }));
   const atRest = await panel.read();
   check('UI-34 the live chart starts on the 60 s window', atRest.axisFrom === '60 s ago', String(atRest.axisFrom));
   await panel.wheel('[data-chart="live"]', 120);
@@ -1428,14 +1434,21 @@ try {
       Number.parseInt(eased.axisFrom, 10) === 71,
     `${early.axisFrom} → ${later.axisFrom} → ${eased.axisFrom}`,
   );
-  for (let notch = 0; notch < 14; notch += 1) await panel.wheel('[data-chart="live"]', 120);
+  for (let notch = 0; notch < 10; notch += 1) await panel.wheel('[data-chart="live"]', 120);
+  const fiveMinutes = await panel.read();
+  check(
+    'UI-34 ten more notches reach five minutes on the 1 s series',
+    fiveMinutes.axisFrom === '5 min ago' && Boolean(fiveMinutes.livePathD),
+    `${fiveMinutes.axisFrom} d=${String(fiveMinutes.livePathD).slice(0, 20)}`,
+  );
+  for (let notch = 0; notch < 18; notch += 1) await panel.wheel('[data-chart="live"]', 120);
   const widest = await panel.read();
   check(
-    'UI-34 many notches reach five minutes and draw the coarse series',
-    widest.axisFrom === '5 min ago' && Boolean(widest.livePathD),
+    'UI-34 it reaches an hour on the 10 s series',
+    widest.axisFrom === '1 h ago' && Boolean(widest.livePathD),
     `${widest.axisFrom} d=${String(widest.livePathD).slice(0, 20)}`,
   );
-  for (let notch = 0; notch < 16; notch += 1) await panel.wheel('[data-chart="live"]', -120);
+  for (let notch = 0; notch < 32; notch += 1) await panel.wheel('[data-chart="live"]', -120);
   const closest = await panel.read();
   check('UI-34 the wheel narrows it back to the floor', closest.axisFrom === '60 s ago', String(closest.axisFrom));
   // The reset path itself, with its minute shortened to what a test can wait.

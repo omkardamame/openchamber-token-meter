@@ -29,6 +29,10 @@ const ROSTER_CAP = 200;
 // A subagent is worth listing for an hour after it last moved. Past that the
 // roster is a museum, and every entry is a read the tree does not need.
 const ROSTER_TTL_MS = 60 * 60_000;
+// The chart's own hour: ten-second buckets, 360 of them. A second-granular hour
+// would be 3,600 numbers on every poll; this is 2 KB.
+const WIDE_POINTS = 360;
+const WIDE_BUCKET_MS = 10_000;
 
 export const LIVE_TYPES = new Set([
   'session.execution.started',
@@ -103,6 +107,8 @@ export function createCollector(id) {
     // One bucket per second: { t: start of that second, sum, n }. The average
     // is worked out when the snapshot is built, so a bucket stays one object.
     seriesLong: [],
+    // One bucket per ten seconds: { t, sum, n }, an hour at most.
+    seriesWide: [],
     chars: [],
     charsPerToken: DEFAULT_CHARS_PER_TOKEN,
     stream: null, // { started, streamed, messageID, chars, firstOutputAt, startedAt, toolChars, deltaParts }
@@ -653,6 +659,21 @@ function memberRate(collector, now) {
  * faster or slower tick cadence changes how many samples a bucket holds, never
  * how long the ring covers.
  */
+function addWideBucket(collector, now, value) {
+  const t = now - (now % WIDE_BUCKET_MS);
+  const last = collector.seriesWide[collector.seriesWide.length - 1];
+  if (last && last.t > t) return;
+  if (last && last.t === t) {
+    last.sum += value;
+    last.n += 1;
+    return;
+  }
+  collector.seriesWide.push({ t, sum: value, n: 1 });
+  if (collector.seriesWide.length > WIDE_POINTS) {
+    collector.seriesWide.splice(0, collector.seriesWide.length - WIDE_POINTS);
+  }
+}
+
 function addLongBucket(collector, now, value) {
   const t = now - (now % LONG_BUCKET_MS);
   const last = collector.seriesLong[collector.seriesLong.length - 1];
@@ -684,6 +705,7 @@ export function tick(collector, now = Date.now(), tree = [collector]) {
     collector.series.push({ t: now, v: value });
     if (collector.series.length > SERIES_POINTS) collector.series.splice(0, collector.series.length - SERIES_POINTS);
     addLongBucket(collector, now, value);
+    addWideBucket(collector, now, value);
   }
   return rate;
 }
@@ -1082,6 +1104,7 @@ export function snapshot(collector, now = Date.now(), tree = [collector], priceB
   // for a quiet collector, so the buckets are not a contiguous grid. Under a
   // minute it would only repeat the live series, so it is left out.
   const longSeries = collector.seriesLong.length >= LONG_MIN_POINTS ? collector.seriesLong : null;
+  const wideSeries = collector.seriesWide.length >= LONG_MIN_POINTS ? collector.seriesWide : null;
   return {
     ok: true,
     session: collector.id,
@@ -1249,6 +1272,16 @@ export function snapshot(collector, now = Date.now(), tree = [collector], priceB
             // a grid would draw them at the wrong time.
             d: longSeries.map((bucket) => bucket.t - longSeries[0].t),
             v: longSeries.map((bucket) => Math.round((bucket.sum / bucket.n) * 10) / 10),
+          },
+        }
+      : {}),
+    ...(wideSeries
+      ? {
+          seriesWide: {
+            t0: wideSeries[0].t,
+            step: WIDE_BUCKET_MS,
+            d: wideSeries.map((bucket) => bucket.t - wideSeries[0].t),
+            v: wideSeries.map((bucket) => Math.round((bucket.sum / bucket.n) * 10) / 10),
           },
         }
       : {}),

@@ -1097,6 +1097,28 @@ check(
   `${snUnderflowStep?.in} in from total 100 − tokens 300`,
 );
 
+// The chart's hour: ten-second buckets, capped at 360, with their own offsets.
+const wideRun = createCollector('ses_wide_series');
+applyEvent(wideRun, { created: 1_000, data: { sessionID: wideRun.id }, type: 'session.execution.started' });
+for (let second = 0; second < 3_700; second += 1) {
+  applyEvent(wideRun, {
+    created: 1_000 + second * 1_000,
+    data: { assistantMessageID: `msg_wide_${second}`, sessionID: wideRun.id },
+    type: 'session.step.streamed',
+  });
+  tick(wideRun, 1_000 + second * 1_000);
+}
+const wideSnap = snapshot(wideRun, 1_000 + 3_700_000);
+check(
+  'SN-24 the wide series keeps one hour of ten-second buckets',
+  wideSnap.seriesWide?.step === 10_000 &&
+    wideSnap.seriesWide.v.length === 360 &&
+    wideSnap.seriesWide.d.length === 360 &&
+    wideSnap.seriesWide.d[0] === 0 &&
+    wideSnap.seriesWide.d.at(-1) === 359 * 10_000,
+  `${wideSnap.seriesWide?.v.length} buckets, last offset ${wideSnap.seriesWide?.d.at(-1)}`,
+);
+
 // The roster is an hour wide: a child that moved five minutes ago is listed, one
 // that has been quiet for two hours is not, and one with no known time stays
 // because an unknown age is not evidence of an old one.

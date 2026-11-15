@@ -449,6 +449,8 @@ var TOOL_CHARS_MAX = 200;
 var SUBAGENT_RANK = { streaming: 0, tool: 1, "waiting-permission": 2, "waiting-question": 2 };
 var ROSTER_CAP = 200;
 var ROSTER_TTL_MS = 60 * 60000;
+var WIDE_POINTS = 360;
+var WIDE_BUCKET_MS = 1e4;
 var LIVE_TYPES = new Set([
   "session.execution.started",
   "session.execution.succeeded",
@@ -509,6 +511,7 @@ function createCollector(id) {
     knownSteps: 0,
     series: [],
     seriesLong: [],
+    seriesWide: [],
     chars: [],
     charsPerToken: DEFAULT_CHARS_PER_TOKEN,
     stream: null,
@@ -974,6 +977,21 @@ function memberRate(collector, now) {
     return 0;
   return charsInWindow(collector, now) / (LIVE_WINDOW_MS / 1000) * collector.charsPerToken;
 }
+function addWideBucket(collector, now, value) {
+  const t = now - now % WIDE_BUCKET_MS;
+  const last = collector.seriesWide[collector.seriesWide.length - 1];
+  if (last && last.t > t)
+    return;
+  if (last && last.t === t) {
+    last.sum += value;
+    last.n += 1;
+    return;
+  }
+  collector.seriesWide.push({ t, sum: value, n: 1 });
+  if (collector.seriesWide.length > WIDE_POINTS) {
+    collector.seriesWide.splice(0, collector.seriesWide.length - WIDE_POINTS);
+  }
+}
 function addLongBucket(collector, now, value) {
   const t = now - now % LONG_BUCKET_MS;
   const last = collector.seriesLong[collector.seriesLong.length - 1];
@@ -999,6 +1017,7 @@ function tick(collector, now = Date.now(), tree = [collector]) {
     if (collector.series.length > SERIES_POINTS)
       collector.series.splice(0, collector.series.length - SERIES_POINTS);
     addLongBucket(collector, now, value);
+    addWideBucket(collector, now, value);
   }
   return rate;
 }
@@ -1302,6 +1321,7 @@ function snapshot(collector, now = Date.now(), tree = [collector], priceBook = n
   const series = collector.series.slice(-SERIES_POINTS);
   const seriesT0 = series.length ? series[0].t : now;
   const longSeries = collector.seriesLong.length >= LONG_MIN_POINTS ? collector.seriesLong : null;
+  const wideSeries = collector.seriesWide.length >= LONG_MIN_POINTS ? collector.seriesWide : null;
   return {
     ok: true,
     session: collector.id,
@@ -1425,6 +1445,14 @@ function snapshot(collector, now = Date.now(), tree = [collector], priceBook = n
         step: LONG_BUCKET_MS,
         d: longSeries.map((bucket) => bucket.t - longSeries[0].t),
         v: longSeries.map((bucket) => Math.round(bucket.sum / bucket.n * 10) / 10)
+      }
+    } : {},
+    ...wideSeries ? {
+      seriesWide: {
+        t0: wideSeries[0].t,
+        step: WIDE_BUCKET_MS,
+        d: wideSeries.map((bucket) => bucket.t - wideSeries[0].t),
+        v: wideSeries.map((bucket) => Math.round(bucket.sum / bucket.n * 10) / 10)
       }
     } : {},
     stepsSeq: members.reduce((sum, member) => sum + member.stepsSeq, 0),

@@ -34,7 +34,7 @@ let liveHoverX = null;
 // How much history the live chart draws. The wheel widens it; the service keeps
 // a coarse five-minute series beside the 60 s one so there is something to show.
 const ZOOM_MIN_MS = 60_000;
-const ZOOM_MAX_MS = 300_000;
+const ZOOM_MAX_MS = 3_600_000;
 // A notch is a ratio, not a rung: many small steps read as one smooth gesture
 // instead of three jumps.
 const ZOOM_STEP = 1.18;
@@ -715,14 +715,24 @@ function drawLive(data) {
   const pad = 8;
   svg.setAttribute('viewBox', `0 0 ${width} ${height}`);
   const nodes = ensureLive(svg, width, height, pad);
-  const wide = liveWindowMs > ZOOM_MIN_MS + 500 && Array.isArray(data.pointsLong);
-  const series = Array.isArray(wide ? data.pointsLong : data.points) ? (wide ? data.pointsLong : data.points) : [];
+  // Three resolutions: the fine 250 ms series, the 1 s one for the minutes, and
+  // the 10 s one for the hour. Each is drawn only over the span it covers.
+  const source = liveWindowMs > 300_500 && Array.isArray(data.pointsWide)
+    ? data.pointsWide
+    : liveWindowMs > ZOOM_MIN_MS + 500 && Array.isArray(data.pointsLong)
+      ? data.pointsLong
+      : data.points;
+  const series = Array.isArray(source) ? source : [];
   const now = projectedNow(data);
   const from = now - liveWindowMs;
   const windowSeconds = Math.round(liveWindowMs / 1_000);
   // Seconds up close, minutes once the number would be noise.
   ui.axisFrom.textContent =
-    windowSeconds >= 120 ? `${Math.floor(windowSeconds / 60)} min ago` : `${windowSeconds} s ago`;
+    windowSeconds >= 3_600
+      ? '1 h ago'
+      : windowSeconds >= 120
+        ? `${Math.floor(windowSeconds / 60)} min ago`
+        : `${windowSeconds} s ago`;
   const visible = series.filter((point) => point.t >= from && point.t <= now);
   const peakValue = visible.reduce((max, point) => Math.max(max, point.v), 0);
   // References drawn on the chart: the session's average and its best step,
@@ -1443,6 +1453,13 @@ async function poll() {
     data.points = seriesPoints(data);
     // The coarse series carries its own offsets: a quiet collector stops
     // ticking, so its buckets are not a contiguous grid.
+    const wide = data.seriesWide;
+    data.pointsWide = Array.isArray(wide?.v)
+      ? wide.v.map((value, index) => ({
+          t: wide.t0 + (Array.isArray(wide.d) && wide.d.length === wide.v.length ? wide.d[index] : index * (wide.step || 10_000)),
+          v: value,
+        }))
+      : null;
     const long = data.seriesLong;
     data.pointsLong = Array.isArray(long?.v)
       ? long.v.map((value, index) => ({
