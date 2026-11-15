@@ -137,6 +137,14 @@ const harness = `<!doctype html><meta charset="utf-8"><title>page test</title>
     node.click();
     return true;
   };
+  window.__key = (selector, key) => {
+    const frame = document.getElementById('f');
+    const node = frame.contentDocument.querySelector(selector);
+    if (!node) return false;
+    node.focus();
+    node.dispatchEvent(new frame.contentWindow.KeyboardEvent('keydown', { bubbles: true, cancelable: true, key }));
+    return frame.contentDocument.activeElement === frame.contentDocument.querySelector(selector);
+  };
   window.__wheel = (selector, deltaY) => {
     const frame = document.getElementById('f');
     const node = frame.contentDocument.querySelector(selector);
@@ -481,6 +489,7 @@ const run = async (page) => {
       return done;
     },
     click: async (selector) => Boolean(JSON.parse(await browser(['eval', `window.__click(${JSON.stringify(selector)})`]))),
+    key: async (selector, key) => Boolean(JSON.parse(await browser(['eval', `window.__key(${JSON.stringify(selector)}, ${JSON.stringify(key)})`]))),
     wheel: async (selector, deltaY) => {
       const done = Boolean(JSON.parse(await browser(['eval', `window.__wheel(${JSON.stringify(selector)}, ${deltaY})`])));
       await new Promise((resolve) => setTimeout(resolve, 120));
@@ -1613,6 +1622,25 @@ try {
   await panel.wait(300);
   const wholeTree = await panel.read();
   check('panel draws the whole tree again on a second click', wholeTree.stepFills.length === 3, `${wholeTree.stepFills.length} bars`);
+
+  // The rows are toggles to a keyboard too: focusable, announced as buttons
+  // with their pressed state, and Enter filters exactly as a click does.
+  const rowA = wholeTree.subRows.find((row) => row.member === 'ses_sub_a');
+  check(
+    'panel exposes each roster row as a focusable toggle',
+    Boolean(rowA) && rowA.role === 'button' && rowA.tabIndex === 0 && rowA.pressed === 'false',
+    JSON.stringify(rowA),
+  );
+  const keptFocus = await panel.key('.sub-detail[data-member="ses_sub_a"]', 'Enter');
+  await panel.wait(300);
+  const keyed = await panel.read();
+  check(
+    'panel filters on Enter and keeps the focus on the row',
+    keptFocus && keyed.stepFills.length === 1 && keyed.subRows.find((row) => row.member === 'ses_sub_a')?.pressed === 'true',
+    `focus ${keptFocus}, ${keyed.stepFills.length} bars, ${JSON.stringify(keyed.subRows)}`,
+  );
+  await panel.key('.sub-detail[data-member="ses_sub_a"]', ' ');
+  await panel.wait(300);
 
   // The filtered member leaves the tree (quiet for an hour): its row and its
   // steps are gone, and the filter must go with them, not hold the chart empty.

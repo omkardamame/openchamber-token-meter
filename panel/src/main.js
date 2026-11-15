@@ -1219,17 +1219,33 @@ function paintSubsDetail(members) {
   subsDetailKey = key;
   const now = Date.now();
   const nodes = [];
+  // The list is rebuilt whenever a member's numbers move; a reader on the
+  // keyboard keeps their place across that.
+  const focused = ui.subsDetailList.contains(document.activeElement) ? document.activeElement.dataset.member : null;
+  let refocus = null;
   for (const item of list) {
     const row = el('div', 'sub-detail');
     row.dataset.member = item.id;
     if (stepFilter === item.id) row.dataset.selected = 'true';
-    row.addEventListener('click', () => {
+    // A row is a toggle for the step chart's filter, so it is one to a keyboard
+    // and a screen reader as well as to the pointer.
+    row.setAttribute('role', 'button');
+    row.tabIndex = 0;
+    row.setAttribute('aria-pressed', stepFilter === item.id ? 'true' : 'false');
+    if (focused === item.id) refocus = row;
+    const toggle = () => {
       stepFilter = stepFilter === item.id ? null : item.id;
       subsDetailKey = '';
       if (current) {
         paintSubsDetail(current.subagents?.members ?? []);
         drawSteps(current);
       }
+    };
+    row.addEventListener('click', toggle);
+    row.addEventListener('keydown', (event) => {
+      if (event.key !== 'Enter' && event.key !== ' ') return;
+      event.preventDefault();
+      toggle();
     });
     const head = el('div', 'sub-detail-head');
     const dot = el('i', 'dot');
@@ -1245,6 +1261,7 @@ function paintSubsDetail(members) {
     nodes.push(row);
   }
   ui.subsDetailList.replaceChildren(...nodes);
+  refocus?.focus();
 }
 
 function paintSubagents(active, running, total) {
