@@ -26,6 +26,9 @@ const SUBAGENT_RANK = { streaming: 0, tool: 1, 'waiting-permission': 2, 'waiting
 // How many tree members the roster carries. The list is drawn, not scrolled to
 // the end, and a delegating turn can name dozens.
 const ROSTER_CAP = 200;
+// A subagent is worth listing for an hour after it last moved. Past that the
+// roster is a museum, and every entry is a read the tree does not need.
+const ROSTER_TTL_MS = 60 * 60_000;
 
 export const LIVE_TYPES = new Set([
   'session.execution.started',
@@ -259,6 +262,12 @@ function raisedTotals(current, shape, cost = null, steps = null) {
  */
 export function applyRecord(collector, record) {
   if (!record) return;
+  // OpenCode's own "last touched" for this session. The scanner's own timestamp
+  // says when it last looked, which never ages, so it cannot decide this.
+  const updated = record.time?.updated ?? record.time?.created;
+  if (typeof updated === 'number' && updated > (collector.recordUpdatedAt ?? 0)) {
+    collector.recordUpdatedAt = updated;
+  }
   if (typeof record.title === 'string' && record.title) collector.title = record.title;
   if (typeof record.model?.id === 'string') collector.model = record.model.id;
   if (typeof record.model?.providerID === 'string') collector.provider = record.model.providerID;
@@ -1018,6 +1027,11 @@ export function snapshot(collector, now = Date.now(), tree = [collector], priceB
     for (const step of member.steps) {
       if (typeof step.at === 'number' && (lastAt === null || step.at > lastAt)) lastAt = step.at;
     }
+    // Nothing that has been quiet for an hour: a finished child keeps its place
+    // while it is recent, then leaves the tree alone. A member with no known
+    // time is kept — an unknown age is not evidence of an old one.
+    const touched = Math.max(lastAt ?? 0, member.recordUpdatedAt ?? 0);
+    if (touched > 0 && now - touched > ROSTER_TTL_MS) continue;
     const memberRates = ratesOf(member.steps);
     roster.push({
       id: member.id,

@@ -448,6 +448,7 @@ var DEFAULT_CHARS_PER_TOKEN = 0.28;
 var TOOL_CHARS_MAX = 200;
 var SUBAGENT_RANK = { streaming: 0, tool: 1, "waiting-permission": 2, "waiting-question": 2 };
 var ROSTER_CAP = 200;
+var ROSTER_TTL_MS = 60 * 60000;
 var LIVE_TYPES = new Set([
   "session.execution.started",
   "session.execution.succeeded",
@@ -631,6 +632,10 @@ function raisedTotals(current, shape, cost = null, steps = null) {
 function applyRecord(collector, record) {
   if (!record)
     return;
+  const updated = record.time?.updated ?? record.time?.created;
+  if (typeof updated === "number" && updated > (collector.recordUpdatedAt ?? 0)) {
+    collector.recordUpdatedAt = updated;
+  }
   if (typeof record.title === "string" && record.title)
     collector.title = record.title;
   if (typeof record.model?.id === "string")
@@ -1257,6 +1262,9 @@ function snapshot(collector, now = Date.now(), tree = [collector], priceBook = n
       if (typeof step.at === "number" && (lastAt === null || step.at > lastAt))
         lastAt = step.at;
     }
+    const touched = Math.max(lastAt ?? 0, member.recordUpdatedAt ?? 0);
+    if (touched > 0 && now - touched > ROSTER_TTL_MS)
+      continue;
     const memberRates = ratesOf(member.steps);
     roster.push({
       id: member.id,
@@ -5625,6 +5633,7 @@ var LINEAGE_MS = 30000;
 var LINEAGE_RETRY_MS = 60000;
 var LINEAGE_DEPTH = 4;
 var MAX_SUBAGENTS = 200;
+var MAX_SUBAGENT_AGE_MS = 60 * 60000;
 var SUBAGENT_HISTORY_RETRY_MS = 15000;
 var TICK_MS = 250;
 if (!PORT || !TOKEN) {
@@ -5751,6 +5760,9 @@ function createService({ fetchImpl = fetch, log = () => {}, base = BASE, token =
           return;
         for (const record of Array.isArray(answer?.data) ? answer.data : []) {
           if (!record?.id || record.id === root.id || seen.has(record.id))
+            continue;
+          const quietSince = record.time?.updated ?? record.time?.created ?? 0;
+          if (!collectors.has(record.id) && quietSince && Date.now() - quietSince > MAX_SUBAGENT_AGE_MS)
             continue;
           seen.add(record.id);
           found += 1;

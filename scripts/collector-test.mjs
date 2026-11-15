@@ -1097,6 +1097,27 @@ check(
   `${snUnderflowStep?.in} in from total 100 − tokens 300`,
 );
 
+// The roster is an hour wide: a child that moved five minutes ago is listed, one
+// that has been quiet for two hours is not, and one with no known time stays
+// because an unknown age is not evidence of an old one.
+const ttlRoot = createCollector('ses_ttl_root');
+const ttlFresh = createCollector('ses_ttl_fresh');
+ttlFresh.parentId = ttlRoot.id;
+ttlFresh.recordUpdatedAt = Date.now() - 5 * 60_000;
+ttlFresh.touchedAt = Date.now();
+const ttlOld = createCollector('ses_ttl_old');
+ttlOld.parentId = ttlRoot.id;
+ttlOld.recordUpdatedAt = Date.now() - 2 * 60 * 60_000;
+ttlOld.touchedAt = Date.now();
+const ttlUnknown = createCollector('ses_ttl_unknown');
+ttlUnknown.parentId = ttlRoot.id;
+const ttlSnap = snapshot(ttlRoot, Date.now(), [ttlRoot, ttlFresh, ttlOld, ttlUnknown]);
+check(
+  'SN-23 the roster is an hour wide',
+  ttlSnap.subagents.members.map((member) => member.id).join(',') === 'ses_ttl_fresh,ses_ttl_unknown',
+  ttlSnap.subagents.members.map((member) => member.id).join(','),
+);
+
 // A subagent whose history is longer than the kept list still counts in full.
 const knownRun = createCollector('ses_known_test');
 knownRun.knownSteps = 450;

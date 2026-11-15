@@ -43,6 +43,8 @@ const LINEAGE_DEPTH = 4;
 // requests, not on the tree: 200 covers any real tree and still bounds a run
 // away tree. "Unlimited" would let one session hold the service open.
 const MAX_SUBAGENTS = 200;
+// The same hour the roster uses: past it, a child is not walked or listed.
+const MAX_SUBAGENT_AGE_MS = 60 * 60_000;
 const SUBAGENT_HISTORY_RETRY_MS = 15_000;
 const TICK_MS = 250;
 
@@ -205,6 +207,11 @@ export function createService({ fetchImpl = fetch, log = () => {}, base = BASE, 
         if (!collectors.has(root.id)) return;
         for (const record of Array.isArray(answer?.data) ? answer.data : []) {
           if (!record?.id || record.id === root.id || seen.has(record.id)) continue;
+          // A child that has been quiet for an hour is not part of this tree any
+          // more; walking it would cost a read per pass for a tombstone. One we
+          // already hold is left alone — it may still be the session on screen.
+          const quietSince = record.time?.updated ?? record.time?.created ?? 0;
+          if (!collectors.has(record.id) && quietSince && Date.now() - quietSince > MAX_SUBAGENT_AGE_MS) continue;
           seen.add(record.id);
           found += 1;
           ensureSubagent(record.id, record, id);
