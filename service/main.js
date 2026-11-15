@@ -116,7 +116,7 @@ function tariffTiers(tariff, rates = null) {
   if (atPeak && !atOffPeak) {
     return { source: "recovered", offPeak: scale(rates, 1 / tariff.peakMultiplier), peak: pick(rates) };
   }
-  if (atOffPeak || !atPeak) {
+  if (atOffPeak) {
     return { source: "recovered", offPeak: pick(rates), peak: scale(rates, tariff.peakMultiplier) };
   }
   return card;
@@ -1374,6 +1374,7 @@ function snapshot(collector, now = Date.now(), tree = [collector], priceBook = n
       seriesLong: {
         t0: longSeries[0].t,
         step: LONG_BUCKET_MS,
+        d: longSeries.map((bucket) => bucket.t - longSeries[0].t),
         v: longSeries.map((bucket) => Math.round(bucket.sum / bucket.n * 10) / 10)
       }
     } : {},

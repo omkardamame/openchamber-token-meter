@@ -562,13 +562,19 @@
       }
       .foot {
         display: flex;
+        flex-wrap: wrap;
         justify-content: space-between;
         gap: 8px;
         font-size: 11.5px;
         color: var(--oc-muted);
         opacity: 0.8;
       }
+      .foot-text {
+        flex: 1 1 auto;
+        min-width: 0;
+      }
       .foot-clock {
+        flex: none;
         font-variant-numeric: tabular-nums;
         white-space: nowrap;
       }
@@ -580,6 +586,8 @@
       .chip {
         font: inherit;
         font-size: 10.5px;
+        white-space: nowrap;
+        padding: 2px 8px;
         color: var(--oc-muted);
         background: none;
         border: 1px solid var(--oc-border);
@@ -589,6 +597,11 @@
       }
       .chip:hover {
         color: var(--oc-fg);
+      }
+      .chip:focus-visible {
+        color: var(--oc-fg);
+        outline: 2px solid var(--oc-primary);
+        outline-offset: 1px;
       }
       .chip:disabled {
         opacity: 0.6;

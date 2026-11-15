@@ -416,8 +416,10 @@ const port = 41_873;
 await new Promise((resolve) => server.listen(port, '127.0.0.1', resolve));
 
 if (spawnSync('agent-browser', ['--version'], { stdio: 'ignore' }).status !== 0) {
-  console.log('PAGE TESTS SKIPPED — agent-browser is not installed here');
-  process.exit(0);
+  // A gate that reports a green without running is the one thing the rules
+  // forbid: say it could not run, and fail.
+  console.error('PAGE TESTS DID NOT RUN — agent-browser is not installed here');
+  process.exit(1);
 }
 
 let failures = 0;

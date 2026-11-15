@@ -48,6 +48,7 @@ const STEP_LEVELS = [null, 100, 25];
 let stepLimit = 0;
 let stepResetAt = 0;
 let peakLineY = null;
+let liveHoverY = null;
 let peakHover = false;
 // The chart's ceiling is the session's best step by default; the other mode
 // scales to this turn, which is what a long session needs to stay readable.
@@ -633,7 +634,7 @@ function turnPeakOf(data) {
   const from = data.turn?.startedAt;
   if (!from) return 0;
   let best = 0;
-  for (const step of data.steps ?? []) {
+  for (const step of Array.isArray(data.steps) ? data.steps : []) {
     if ((step.at ?? 0) >= from && step.tps > best) best = step.tps;
   }
   return best;
@@ -643,7 +644,8 @@ function turnPeakOf(data) {
 function flash(node, text) {
   if (!node.dataset.label) node.dataset.label = node.textContent;
   node.textContent = text;
-  setTimeout(() => {
+  clearTimeout(node.flashTimer);
+  node.flashTimer = setTimeout(() => {
     if (node.dataset.label) node.textContent = node.dataset.label;
   }, 1_200);
 }
@@ -667,7 +669,11 @@ function statsMarkdown(data) {
     `| Consumed | ${compact(t.consumed ?? 0)} |`,
   ];
   if (c.rates?.name) lines.push(`| Model | ${c.rates.name} |`);
-  if (c.mode === 'api' && typeof c.total === 'number') lines.push(`| API value | $${c.total.toFixed(4)} |`);
+  if (c.mode === 'api' && typeof c.total === 'number') {
+    lines.push(`| API value | ${c.lowerBound ? '≥ ' : ''}$${c.total.toFixed(4)} |`);
+  }
+  if (data.historyPartial || (data.subagents?.partial ?? 0) > 0) lines.push('| Note | history is partial |');
+  lines.push(`| At | ${localNow()} |`);
   if (typeof c.billed?.total === 'number') lines.push(`| Billed | $${c.billed.total.toFixed(4)} |`);
   return lines.join('\n');
 }
@@ -691,7 +697,9 @@ function drawLive(data) {
   const peakValue = visible.reduce((max, point) => Math.max(max, point.v), 0);
   // References drawn on the chart: the session's average and its best step,
   // worked out by the service over every step it knows.
-  const rates = data.rates ?? { avg: 0, peak: 0 };
+  const rates = data.rates ?? {};
+  rates.avg = Number(rates.avg) || 0;
+  rates.peak = Number(rates.peak) || 0;
 
   // Draw a smoothed curve first: the samples are a 250 ms average already, and
   // the providers arrive in bursts, so a short exponential pass keeps the shape
@@ -713,7 +721,8 @@ function drawLive(data) {
   // must not be drawn above the plot. The 8 t/s floor is for an empty window,
   // where every value on the axis would otherwise be zero.
   const turnPeak = ceilingMode === 'turn' ? turnPeakOf(data) : 0;
-  const ceilingPeak = ceilingMode === 'turn' && turnPeak > 0 ? turnPeak : rates.peak;
+  const turnMode = ceilingMode === 'turn' && turnPeak > 0;
+  const ceilingPeak = turnMode ? turnPeak : rates.peak;
   const max = Math.max(8, ceilingPeak, liveTop);
   const share = (value) => Math.min(1, Math.max(0, value) / max);
   const lineY = (value) => height - pad - share(value) * (height - pad * 2);
@@ -744,7 +753,7 @@ function drawLive(data) {
   }
 
   let avgLabelY = null;
-  if (rates.avg > 0) {
+  if (rates.avg > 0 && rates.avg <= max) {
     const y = lineY(rates.avg);
     avgLabelY = y < pad + 10 ? y + 11 : y - 4;
     placeY(nodes.avg, y, width);
@@ -762,7 +771,7 @@ function drawLive(data) {
     peakLineY = y;
     // How old the best step is: the scale is pinned to it, so "peak 337" beside
     // a 20 t/s stream needs the date to make sense.
-    const age = rates.peakAt && ceilingMode === 'session' ? duration(now - rates.peakAt) : '';
+    const age = rates.peakAt && !turnMode ? duration(now - rates.peakAt) : '';
     // Keep the labels apart when the lines are close. Above the average label
     // when there is room, so the peak label stays beside its own (higher) line;
     // on the top edge, stack it below instead of clipping it.
@@ -773,7 +782,7 @@ function drawLive(data) {
     }
     if (labelY > height - 2) labelY = (avgLabelY ?? labelY) - 13;
     placeY(nodes.peak, y, width);
-    nodes['peak-label'].textContent = `${ceilingMode === 'turn' ? 'turn peak' : 'peak'} ${Math.round(ceilingPeak)} t/s${age ? ` · ${age} ago` : ''}`;
+    nodes['peak-label'].textContent = `${turnMode ? 'turn peak' : 'peak'} ${Math.round(ceilingPeak)} t/s${age ? ` · ${age} ago` : ''}`;
     nodes['peak-label'].setAttribute('y', labelY.toFixed(1));
     showPart(nodes.peak, true);
     showPart(nodes['peak-label'], true);
@@ -840,6 +849,7 @@ function drawLive(data) {
     showPart(nodes.baseline, true);
   }
 
+  if (liveHoverY !== null && peakLineY !== null) peakHover = Math.abs(liveHoverY - peakLineY) < 6;
   if (peakHover && ceilingPeak > 0) {
     // The line's own step: the label above it already carries the age, this
     // adds the shape of the step that set the ceiling.
@@ -888,10 +898,10 @@ function drawSteps(data) {
   ui.stepsCount.title =
     (data.subagents?.loading ?? 0) > 0 || (data.subagents?.partial ?? 0) > 0 || data.historyPartial
       ? 'history is partial; the count is a lower bound'
-      : known > all.length
-        ? `the last ${all.length} steps are drawn`
-        : limit
-          ? `zoomed in: the last ${limit} of ${all.length} steps are drawn`
+      : limit
+        ? `zoomed in: the last ${limit} of ${all.length} steps are drawn`
+        : known > all.length
+          ? `the last ${all.length} steps are drawn`
           : 'every step the meter keeps';
   // A list that shrank under the pointer has no bar at that index any more.
   if (stepHover !== null && stepHover >= steps.length) stepHover = null;
@@ -904,6 +914,7 @@ function drawSteps(data) {
     ui.stepsHover.textContent = '';
     drawnSteps = [];
     drawnSlot = 0;
+    stepHover = null;
     if (data.steps === lastDrawnSteps && limit === lastDrawnLimit && width === lastDrawnW && height === lastDrawnH) return;
     lastDrawnSteps = data.steps;
     lastDrawnLimit = limit;
@@ -914,7 +925,8 @@ function drawSteps(data) {
     return;
   }
   ui.stepsAxis.hidden = false;
-  ui.stepsStart.textContent = data.stepsFrom ? `start ${clock(data.stepsFrom)}` : '';
+  const firstDrawn = steps[0]?.at ?? data.stepsFrom;
+  ui.stepsStart.textContent = firstDrawn ? `start ${clock(firstDrawn)}` : '';
   ui.stepsStart.title = 'the first step on the chart';
   ui.stepsNow.textContent = `now ${clock(Date.now())}`;
   ui.stepsNow.title = 'the current time';
@@ -1062,6 +1074,8 @@ function paintSubagents(active, running, total) {
       // The enter animation lives in CSS, so a reduced-motion reader gets none.
       node.classList.add('sub-in');
       node.addEventListener('animationend', () => node.classList.remove('sub-in'), { once: true });
+      // No animation means no animationend: drop the class on the clock too.
+      setTimeout(() => node.classList.remove('sub-in'), 220);
     }
     row.dot.dataset.state = dotState(item.status);
     row.title.textContent = item.title || 'subagent';
@@ -1195,7 +1209,11 @@ function render(data) {
   // `live` says the session is working right now, not where the numbers came
   // from: an idle session keeps its usage record, and labelling a frozen number
   // "live" is the one thing a dashboard must not do.
-  const working = data.status === 'streaming' || data.status === 'tool' || data.status === 'waiting-permission';
+  const working =
+    data.status === 'streaming' ||
+    data.status === 'tool' ||
+    data.status === 'waiting-permission' ||
+    data.status === 'waiting-question';
   const origin = working ? 'live' : totals.source === 'history' ? 'from history' : '';
   ui.source.textContent = [origin, subLabel].filter(Boolean).join(' · ');
   ui.foot.textContent = data.error
@@ -1283,9 +1301,10 @@ async function poll() {
     data.points = seriesPoints(data);
     // The coarse series has no per-point offsets: a fixed one-second grid is
     // what it is, and sending 300 offsets for it would be pure wire.
-    data.pointsLong = Array.isArray(data.seriesLong?.v)
-      ? data.seriesLong.v.map((value, index) => ({
-          t: data.seriesLong.t0 + index * (data.seriesLong.step || 1_000),
+    const long = data.seriesLong;
+    data.pointsLong = Array.isArray(long?.v)
+      ? long.v.map((value, index) => ({
+          t: long.t0 + (Array.isArray(long.d) && long.d.length === long.v.length ? long.d[index] : index * (long.step || 1_000)),
           v: value,
         }))
       : null;
@@ -1325,7 +1344,8 @@ host.onReady((ctx) => {
       liveHoverX = event.clientX - rect.left;
       // A few pixels around the ceiling line read out the step behind it: the
       // label gives the age, this gives the step that set it.
-      peakHover = peakLineY !== null && Math.abs(event.clientY - rect.top - peakLineY) < 6;
+      liveHoverY = event.clientY - rect.top;
+      peakHover = peakLineY !== null && Math.abs(liveHoverY - peakLineY) < 6;
       if (current) drawLive(current);
     });
     ui.live.addEventListener('pointerleave', () => {
@@ -1340,6 +1360,9 @@ host.onReady((ctx) => {
       (event) => {
         if (!current) return;
         event.preventDefault();
+        // The ease leaves liveLevel describing the window it is leaving, so the
+        // step is taken from what is actually drawn.
+        if (zoomAnim) liveLevel = Math.max(0, LIVE_LEVELS.findIndex((value) => value >= liveWindowMs - 1));
         const next = event.deltaY > 0 ? Math.min(LIVE_LEVELS.length - 1, liveLevel + 1) : Math.max(0, liveLevel - 1);
         liveLevel = next;
         liveWindowMs = LIVE_LEVELS[next];
@@ -1364,10 +1387,17 @@ host.onReady((ctx) => {
     );
     ui.footCopy.addEventListener('click', async () => {
       if (!current) return;
+      const text = statsMarkdown(current);
       try {
-        await navigator.clipboard.writeText(statsMarkdown(current));
+        // The guest frame is sandboxed without allow-same-origin, so the
+        // clipboard API is blocked there by permissions policy. The host owns
+        // the clipboard; navigator.clipboard is only the fallback for the page
+        // test's same-origin frame.
+        if (typeof host.writeClipboard === 'function') await host.writeClipboard(text);
+        else await navigator.clipboard.writeText(text);
         flash(ui.footCopy, 'copied');
-      } catch {
+      } catch (error) {
+        ui.footCopy.title = String(error?.message ?? error);
         flash(ui.footCopy, 'copy failed');
       }
     });
@@ -1381,12 +1411,18 @@ host.onReady((ctx) => {
     ui.footPng.dataset.label = 'PNG';
     ui.footCopy.dataset.label = 'copy stats';
     ui.footPng.addEventListener('click', async () => {
+      // The clone is made synchronously by capturePng, so the promise must be
+      // created before the chip changes: otherwise the artifact shows the chip
+      // reading "saving…", dimmed.
+      const shot = capturePng(ui.app, { scale: 2, background: getComputedStyle(document.body).backgroundColor });
+      const id = current?.session ?? 'session';
       ui.footPng.disabled = true;
       ui.footPng.textContent = 'saving…';
       try {
-        const { blob } = await capturePng(ui.app, { scale: 2 });
+        const { blob } = await shot;
         const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
-        downloadBlob(blob, `token-meter-${current?.session ?? 'session'}-${stamp}.png`);
+        downloadBlob(blob, `token-meter-${id}-${stamp}.png`);
+        ui.footPng.title = 'save this panel as a PNG';
         flash(ui.footPng, 'saved');
       } catch (error) {
         ui.footPng.title = String(error?.message ?? error);
@@ -1453,7 +1489,7 @@ host.onReady((ctx) => {
       const zone = Intl.DateTimeFormat().resolvedOptions().timeZone;
       ui.footClock.title = zone ? `your time · ${zone}` : 'your time';
       const tickClock = () => {
-        if (ui) ui.footClock.textContent = localNow();
+        if (ui && !document.hidden) ui.footClock.textContent = localNow();
       };
       tickClock();
       setInterval(tickClock, 1_000);

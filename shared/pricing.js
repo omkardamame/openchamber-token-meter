@@ -122,8 +122,11 @@ export function tariffTiers(tariff, rates = null) {
   if (atPeak && !atOffPeak) {
     return { source: 'recovered', offPeak: scale(rates, 1 / tariff.peakMultiplier), peak: pick(rates) };
   }
-  if (atOffPeak || !atPeak) {
+  if (atOffPeak) {
     return { source: 'recovered', offPeak: pick(rates), peak: scale(rates, tariff.peakMultiplier) };
   }
+  // A fit that matches neither side is a session spanning both windows, or a
+  // provider whose price moved. Either way the card is the answer: scaling a
+  // fit by 2x would print a tariff nobody published.
   return card;
 }

@@ -1176,6 +1176,10 @@ export function snapshot(collector, now = Date.now(), tree = [collector], priceB
           seriesLong: {
             t0: longSeries[0].t,
             step: LONG_BUCKET_MS,
+            // Offsets, not a nominal grid: the ticker stops for a quiet
+            // collector, so two neighbouring buckets can be a minute apart and
+            // a grid would draw them at the wrong time.
+            d: longSeries.map((bucket) => bucket.t - longSeries[0].t),
             v: longSeries.map((bucket) => Math.round((bucket.sum / bucket.n) * 10) / 10),
           },
         }

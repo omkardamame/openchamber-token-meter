@@ -134,6 +134,11 @@ const STYLE_PROPS = [
   'stroke-linecap',
   'stroke-linejoin',
   'stroke-opacity',
+  // <stop> carries its colour as an attribute, and the CSS variable it names
+  // does not exist inside the data: document: without these the area fill
+  // rasterises black.
+  'stop-color',
+  'stop-opacity',
 ];
 
 /**
@@ -205,7 +210,9 @@ export async function capturePng(root, { scale = 2, background = null } = {}) {
 
   const box = root.getBoundingClientRect();
   const width = Math.ceil(box.width);
-  const height = Math.ceil(box.height);
+  // `.meter` scrolls, so its rect is the viewport, not the content: the fold
+  // would silently cut the Per step block and the footer out of the file.
+  const height = Math.ceil(Math.max(box.height, root.scrollHeight));
   if (width <= 0 || height <= 0) throw new Error(`capturePng: nothing to draw, the element measures ${width}×${height}`);
 
   const clone = root.cloneNode(true);
@@ -244,13 +251,18 @@ export async function capturePng(root, { scale = 2, background = null } = {}) {
   ctx.scale(scale, scale);
   ctx.drawImage(image, 0, 0, width, height);
 
-  const blob = await new Promise((resolve, reject) => {
-    // A null blob means the browser refused to encode (usually a canvas over its
-    // size limit); that must not read as a successful, empty screenshot.
-    canvas.toBlob((out) => (out ? resolve(out) : reject(new Error('capturePng: the browser refused to encode the PNG'))), 'image/png');
-  });
+  const blob = await Promise.race([
+    new Promise((resolve, reject) => {
+      // A null blob means the browser refused to encode (usually a canvas over
+      // its size limit); that must not read as a successful, empty screenshot.
+      canvas.toBlob((out) => (out ? resolve(out) : reject(new Error('capturePng: the browser refused to encode the PNG'))), 'image/png');
+    }),
+    new Promise((_, reject) => setTimeout(() => reject(new Error('capturePng: the PNG encode never finished')), 20_000)),
+  ]);
 
-  return { blob, dataUrl: canvas.toDataURL('image/png'), width, height };
+  // No dataUrl: it is a second full encode of the same bitmap, and the caller
+  // only ever wanted the blob.
+  return { blob, width, height };
 }
 
 /** Offer a blob to the user as a download; a missing .png is added. */
