@@ -21,6 +21,12 @@
         display: flex;
         flex-direction: column;
       }
+      /* The hidden attribute always wins. A class that sets display (.block is
+         flex) outranks the browser's own [hidden] rule, which left an empty
+         "Models" heading on every single-model session. */
+      [hidden] {
+        display: none !important;
+      }
       .notice:empty {
         display: none;
       }

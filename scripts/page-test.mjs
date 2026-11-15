@@ -355,6 +355,17 @@ const harness = `<!doctype html><meta charset="utf-8"><title>page test</title>
       subsToggle: (doc.querySelector('.subs-toggle') || {}).textContent ?? null,
       subsDetailShown: doc.querySelector('.subs-detail') ? !doc.querySelector('.subs-detail').hidden : null,
       subsDetailDisplay: doc.querySelector('.subs-detail') ? getComputedStyle(doc.querySelector('.subs-detail')).display : null,
+      modelsDisplay: doc.querySelector('.models') ? getComputedStyle(doc.querySelector('.models')).display : null,
+      modelsText: doc.querySelector('.models') ? doc.querySelector('.models').innerText.replace(/\\s+/g, ' ').trim() : null,
+      dotStateNow: (doc.querySelector('.dot') || { dataset: {} }).dataset.state ?? null,
+      subRows: [...doc.querySelectorAll('.sub-detail')].map((node) => ({
+        member: node.dataset.member,
+        role: node.getAttribute('role'),
+        tabIndex: node.tabIndex,
+        pressed: node.getAttribute('aria-pressed'),
+      })),
+      stepFills: [...doc.querySelectorAll('[data-chart="steps"] rect:not([data-role])')].map((node) => node.getAttribute('fill')),
+      stepsCountTitle: (doc.querySelector('.steps-count') || {}).title ?? null,
       subsDetailText: (() => {
         const section = doc.querySelector('.subs-detail');
         if (!section) return null;
@@ -568,6 +579,9 @@ try {
   const panel = await run('panel');
   const idle = await panel.read();
   check('panel draws all eight cells', idle.cells.join(',') === 'In,Out,Think,Total out,Cache,Cache hit,TTFT,Consumed', idle.cells.join(','));
+  // `.block` sets display: flex, which outranks the browser's own [hidden]
+  // rule: a single-model session drew an empty "Models" heading.
+  check('panel draws no Models block for one model', idle.modelsDisplay === 'none', `${idle.modelsDisplay} "${idle.modelsText}"`);
   check('panel draws the consumed total', idle.values.some((v) => v.startsWith('49.2M')), idle.values.join(' | '));
   check('panel draws the measured ttft', idle.values.some((v) => v.includes('6.5 s')), idle.values.join(' | '));
   check('panel labels the average and the peak', idle.labels.some((l) => l.startsWith('avg 79')) && idle.labels.some((l) => l.startsWith('peak 334')), idle.labels.join(' | '));
