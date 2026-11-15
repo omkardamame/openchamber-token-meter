@@ -1070,7 +1070,9 @@ check(
     snMember?.avgTps === Math.round(snChildRates.avg * 10) / 10 &&
     snMember?.peakTps === Math.round(snChildRates.peak * 10) / 10 &&
     snMember?.lastAt === 6_000 &&
-    snMember?.steps === snChild.totals.steps &&
+    // The roster's count uses the same max as the session header: history read
+    // stepsOnly leaves totals.steps behind while knownSteps holds the truth.
+    snMember?.steps === Math.max(snChild.totals.steps, snChild.steps.length, snChild.knownSteps ?? 0) &&
     snSnap.subagents.members[1].lastAt === null,
   `${snWireStep?.in} in, turn consumed ${snSnap.turn.consumed}, roster ${JSON.stringify(snSnap.subagents.members.map((member) => [member.id, member.lastAt]))}`,
 );
