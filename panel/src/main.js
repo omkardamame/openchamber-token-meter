@@ -31,6 +31,9 @@ let streamingNow = false;
 let lastTier = '';
 let modelLabel = '';
 let liveHoverX = null;
+// How much history the live chart draws. Zoom (wheel) widens this; the service
+// keeps enough samples to fill it.
+let liveWindowMs = 60_000;
 let stepHover = null;
 let lastDrawnSteps = null;
 let lastDrawnW = 0;
@@ -517,15 +520,92 @@ function paintRecoveredRates(cost, rates, tariff) {
             : 'not enough differently shaped steps to recover the model’s input, output and cache rates';
 }
 
+// The live chart's SVG is built once per size; after that only attributes
+// change. Rebuilding the tree every frame meant parsing a new SVG 12.5 times a
+// second, which is why the curve stepped instead of moving, and why raising the
+// rate any further was too expensive to consider.
+const LIVE_PARTS = [
+  'avg',
+  'avg-label',
+  'baseline',
+  'cross',
+  'cross-dot',
+  'dot',
+  'fill',
+  'half-grid',
+  'half-label',
+  'line',
+  'peak',
+  'peak-label',
+  'time-0.25',
+  'time-0.5',
+  'time-0.75',
+  'top-grid',
+  'top-label',
+];
+let liveSkeleton = null;
+let liveSkeletonKey = '';
+
+function ensureLive(svg, width, height, pad) {
+  const key = `${Math.round(width)}x${Math.round(height)}`;
+  if (liveSkeletonKey === key && liveSkeleton) return liveSkeleton;
+  liveSkeletonKey = key;
+  const timeLines = [0.25, 0.5, 0.75]
+    .map(
+      (part) =>
+        `<line data-n="time-${part}" x1="${(width * part).toFixed(1)}" y1="${pad}" x2="${(width * part).toFixed(1)}" y2="${(height - pad).toFixed(1)}" stroke="var(--oc-border)" stroke-width="1" opacity="0.5" data-role="time-grid" />`,
+    )
+    .join('');
+  svg.innerHTML =
+    `<defs><linearGradient id="tm-live-fill" x1="0" y1="0" x2="0" y2="1">` +
+    `<stop offset="0%" stop-color="var(--oc-primary)" stop-opacity="0.38" />` +
+    `<stop offset="55%" stop-color="var(--oc-primary)" stop-opacity="0.12" />` +
+    `<stop offset="100%" stop-color="var(--oc-primary)" stop-opacity="0" />` +
+    `</linearGradient></defs>` +
+    `<line data-n="top-grid" x1="0" x2="${width}" stroke="var(--oc-border)" stroke-width="1" stroke-dasharray="2 4" opacity="0.8" />` +
+    `<text data-n="top-label" x="2" text-anchor="start" fill="var(--oc-muted)" font-size="9.5" opacity="0.8" data-role="grid-label"></text>` +
+    `<line data-n="half-grid" x1="0" x2="${width}" stroke="var(--oc-border)" stroke-width="1" stroke-dasharray="2 4" opacity="0.8" />` +
+    `<text data-n="half-label" x="2" text-anchor="start" fill="var(--oc-muted)" font-size="9.5" opacity="0.8" data-role="grid-label"></text>` +
+    timeLines +
+    `<line data-n="baseline" x1="0" x2="${width}" stroke="var(--oc-primary)" stroke-width="1.6" opacity="0.45" />` +
+    `<path data-n="fill" fill="url(#tm-live-fill)" data-role="live-fill" />` +
+    `<path data-n="line" fill="none" stroke="var(--oc-primary)" stroke-width="1.6" stroke-linejoin="round" stroke-linecap="round" data-role="live-line" />` +
+    `<circle data-n="dot" r="2.6" fill="var(--oc-primary)" />` +
+    `<line data-n="avg" x1="0" x2="${width}" stroke="var(--oc-success)" stroke-width="1" stroke-dasharray="3 3" opacity="0.7" data-role="live-avg" />` +
+    `<text data-n="avg-label" x="${width - 2}" text-anchor="end" fill="var(--oc-success)" font-size="9.5" opacity="0.85"></text>` +
+    `<line data-n="peak" x1="0" x2="${width}" stroke="var(--oc-error)" stroke-width="1" stroke-dasharray="2 3" opacity="0.65" data-role="live-peak" />` +
+    `<text data-n="peak-label" x="${width - 2}" text-anchor="end" fill="var(--oc-error)" font-size="9.5" opacity="0.95"></text>` +
+    `<line data-n="cross" stroke="var(--oc-fg)" opacity="0.35" stroke-width="1" data-role="live-cross" />` +
+    `<circle data-n="cross-dot" r="3" fill="var(--oc-fg)" data-role="live-cross-dot" />`;
+  const nodes = {};
+  for (const node of svg.querySelectorAll('[data-n]')) nodes[node.getAttribute('data-n')] = node;
+  liveSkeleton = nodes;
+  return nodes;
+}
+
+/** A node that is not drawn this frame is hidden, never removed. */
+const showPart = (node, on) => node.setAttribute('visibility', on ? 'visible' : 'hidden');
+/** A hidden path also loses its `d`: an empty box is a truth a test or a hit test can read. */
+const hidePath = (node) => {
+  node.setAttribute('visibility', 'hidden');
+  node.removeAttribute('d');
+};
+const placeY = (node, y, width) => {
+  node.setAttribute('y1', y.toFixed(1));
+  node.setAttribute('y2', y.toFixed(1));
+  node.setAttribute('x2', width);
+};
+
 function drawLive(data) {
   const svg = ui.live;
   const width = Math.max(140, svg.clientWidth || 300);
   const height = Math.max(110, svg.clientHeight || 112);
   const pad = 8;
   svg.setAttribute('viewBox', `0 0 ${width} ${height}`);
+  const nodes = ensureLive(svg, width, height, pad);
   const series = Array.isArray(data.points) ? data.points : [];
   const now = projectedNow(data);
-  const from = now - 60_000;
+  const from = now - liveWindowMs;
   const visible = series.filter((point) => point.t >= from && point.t <= now);
   const peakValue = visible.reduce((max, point) => Math.max(max, point.v), 0);
   // References drawn on the chart: the session's average and its best step,
@@ -552,20 +632,10 @@ function drawLive(data) {
   // must not be drawn above the plot. The 8 t/s floor is for an empty window,
   // where every value on the axis would otherwise be zero.
   const max = Math.max(8, rates.peak, liveTop);
-  // References above the visible peak sit on the top edge rather than leaving
-  // the plot; the drawn curve itself can never exceed `max`.
   const share = (value) => Math.min(1, Math.max(0, value) / max);
   const lineY = (value) => height - pad - share(value) * (height - pad * 2);
-  const xOf = (point) => ((point.t - from) / 60_000) * width;
-
-  const pieces = [];
-  pieces.push(
-    `<defs><linearGradient id="tm-live-fill" x1="0" y1="0" x2="0" y2="1">` +
-      `<stop offset="0%" stop-color="var(--oc-primary)" stop-opacity="0.38" />` +
-      `<stop offset="55%" stop-color="var(--oc-primary)" stop-opacity="0.12" />` +
-      `<stop offset="100%" stop-color="var(--oc-primary)" stop-opacity="0" />` +
-      `</linearGradient></defs>`,
-  );
+  const xOf = (point) => ((point.t - from) / liveWindowMs) * width;
+  const baseline = height - pad;
 
   // The scale down the left edge: the top and the middle of the plot, labelled
   // with the rate they stand for. An empty or all-zero window says nothing,
@@ -575,41 +645,40 @@ function drawLive(data) {
     const halfValue = Math.round(max / 2);
     const topY = lineY(max);
     const halfY = lineY(max / 2);
-    pieces.push(
-      `<line x1="0" y1="${topY.toFixed(1)}" x2="${width}" y2="${topY.toFixed(1)}" stroke="var(--oc-border)" stroke-width="1" stroke-dasharray="2 4" opacity="0.8" />`,
-      `<text x="2" y="${(topY + 10).toFixed(1)}" text-anchor="start" fill="var(--oc-muted)" font-size="9.5" opacity="0.8" data-role="grid-label">${topValue}</text>`,
-      `<line x1="0" y1="${halfY.toFixed(1)}" x2="${width}" y2="${halfY.toFixed(1)}" stroke="var(--oc-border)" stroke-width="1" stroke-dasharray="2 4" opacity="0.8" />`,
-    );
+    placeY(nodes['top-grid'], topY, width);
+    placeY(nodes['half-grid'], halfY, width);
+    nodes['top-label'].textContent = String(topValue);
+    nodes['top-label'].setAttribute('y', (topY + 10).toFixed(1));
+    showPart(nodes['top-grid'], true);
+    showPart(nodes['top-label'], true);
     // A scale near 1 rounds both lines to the same number; one label is enough.
-    if (halfValue !== topValue) {
-      pieces.push(
-        `<text x="2" y="${(halfY - 3).toFixed(1)}" text-anchor="start" fill="var(--oc-muted)" font-size="9.5" opacity="0.8" data-role="grid-label">${halfValue}</text>`,
-      );
-    }
-  }
-  // Where 15, 30 and 45 seconds ago sit. Without them the 60 s window has no
-  // marks at all and a shape can only be read by counting pixels.
-  for (const part of [0.25, 0.5, 0.75]) {
-    pieces.push(
-      `<line x1="${(width * part).toFixed(1)}" y1="${pad}" x2="${(width * part).toFixed(1)}" y2="${(height - pad).toFixed(1)}" stroke="var(--oc-border)" stroke-width="1" opacity="0.5" data-role="time-grid" />`,
-    );
+    nodes['half-label'].textContent = String(halfValue);
+    nodes['half-label'].setAttribute('y', (halfY - 3).toFixed(1));
+    showPart(nodes['half-grid'], true);
+    showPart(nodes['half-label'], halfValue !== topValue);
+  } else {
+    for (const name of ['top-grid', 'top-label', 'half-grid', 'half-label']) showPart(nodes[name], false);
   }
 
   let avgLabelY = null;
   if (rates.avg > 0) {
     const y = lineY(rates.avg);
     avgLabelY = y < pad + 10 ? y + 11 : y - 4;
-    pieces.push(
-      `<line x1="0" y1="${y.toFixed(1)}" x2="${width}" y2="${y.toFixed(1)}" stroke="var(--oc-success)" stroke-width="1" stroke-dasharray="3 3" opacity="0.7" data-role="live-avg" />`,
-      `<text x="${width - 2}" y="${avgLabelY.toFixed(1)}" text-anchor="end" fill="var(--oc-success)" font-size="9.5" opacity="0.85">avg ${Math.round(rates.avg)} t/s</text>`,
-    );
+    placeY(nodes.avg, y, width);
+    nodes['avg-label'].textContent = `avg ${Math.round(rates.avg)} t/s`;
+    nodes['avg-label'].setAttribute('y', avgLabelY.toFixed(1));
+    showPart(nodes.avg, true);
+    showPart(nodes['avg-label'], true);
+  } else {
+    showPart(nodes.avg, false);
+    showPart(nodes['avg-label'], false);
   }
+
   if (rates.peak > 0) {
     const y = lineY(rates.peak);
     // How old the best step is: the scale is pinned to it, so "peak 337" beside
     // a 20 t/s stream needs the date to make sense.
     const age = rates.peakAt ? duration(now - rates.peakAt) : '';
-    const peakLabel = `peak ${Math.round(rates.peak)} t/s${age ? ` · ${age} ago` : ''}`;
     // Keep the labels apart when the lines are close. Above the average label
     // when there is room, so the peak label stays beside its own (higher) line;
     // on the top edge, stack it below instead of clipping it.
@@ -619,10 +688,14 @@ function drawLive(data) {
       labelY = above > pad ? above : avgLabelY + 13;
     }
     if (labelY > height - 2) labelY = (avgLabelY ?? labelY) - 13;
-    pieces.push(
-      `<line x1="0" y1="${y.toFixed(1)}" x2="${width}" y2="${y.toFixed(1)}" stroke="var(--oc-error)" stroke-width="1" stroke-dasharray="2 3" opacity="0.65" data-role="live-peak" />`,
-      `<text x="${width - 2}" y="${labelY.toFixed(1)}" text-anchor="end" fill="var(--oc-error)" font-size="9.5" opacity="0.95">${peakLabel}</text>`,
-    );
+    placeY(nodes.peak, y, width);
+    nodes['peak-label'].textContent = `peak ${Math.round(rates.peak)} t/s${age ? ` · ${age} ago` : ''}`;
+    nodes['peak-label'].setAttribute('y', labelY.toFixed(1));
+    showPart(nodes.peak, true);
+    showPart(nodes['peak-label'], true);
+  } else {
+    showPart(nodes.peak, false);
+    showPart(nodes['peak-label'], false);
   }
 
   // The sample nearest the pointer. Its rate is the smoothed value the curve
@@ -636,34 +709,52 @@ function drawLive(data) {
     }
     hovered = { x: xOf(visible[nearest]), y: lineY(smooth[nearest]), value: smooth[nearest], at: visible[nearest].t };
   }
+  if (hovered) {
+    const cross = nodes.cross;
+    cross.setAttribute('x1', hovered.x.toFixed(1));
+    cross.setAttribute('x2', hovered.x.toFixed(1));
+    cross.setAttribute('y1', String(pad));
+    cross.setAttribute('y2', baseline.toFixed(1));
+    nodes['cross-dot'].setAttribute('cx', hovered.x.toFixed(1));
+    nodes['cross-dot'].setAttribute('cy', hovered.y.toFixed(1));
+    showPart(cross, true);
+    showPart(nodes['cross-dot'], true);
+  } else {
+    showPart(nodes.cross, false);
+    showPart(nodes['cross-dot'], false);
+  }
 
   if (smooth.length > 1) {
     const points = smooth.map((value, index) => ({ x: xOf(visible[index]), y: lineY(value) }));
     const line = smoothPath(points);
     const first = points[0];
     const last = points[points.length - 1];
-    const baseline = height - pad;
-    pieces.push(
-      `<path d="${line} L ${last.x.toFixed(1)},${baseline.toFixed(1)} L ${first.x.toFixed(1)},${baseline.toFixed(1)} Z" fill="url(#tm-live-fill)" data-role="live-fill" />`,
-      `<path d="${line}" fill="none" stroke="var(--oc-primary)" stroke-width="1.6" stroke-linejoin="round" stroke-linecap="round" data-role="live-line" />`,
-      `<circle cx="${last.x.toFixed(1)}" cy="${last.y.toFixed(1)}" r="2.6" fill="var(--oc-primary)" />`,
+    nodes.line.setAttribute('d', line);
+    nodes.fill.setAttribute(
+      'd',
+      `${line} L ${last.x.toFixed(1)},${baseline.toFixed(1)} L ${first.x.toFixed(1)},${baseline.toFixed(1)} Z`,
     );
-    if (hovered) {
-      pieces.push(
-        `<line x1="${hovered.x.toFixed(1)}" y1="${pad}" x2="${hovered.x.toFixed(1)}" y2="${baseline.toFixed(1)}" stroke="var(--oc-fg)" opacity="0.35" stroke-width="1" data-role="live-cross" />`,
-        `<circle cx="${hovered.x.toFixed(1)}" cy="${hovered.y.toFixed(1)}" r="3" fill="var(--oc-fg)" data-role="live-cross-dot" />`,
-      );
-    }
+    nodes.dot.setAttribute('cx', last.x.toFixed(1));
+    nodes.dot.setAttribute('cy', last.y.toFixed(1));
+    showPart(nodes.line, true);
+    showPart(nodes.fill, true);
+    showPart(nodes.dot, true);
+    showPart(nodes.baseline, false);
   } else if (smooth.length === 1) {
     // One sample is not a baseline: draw the point where it actually sits.
-    const x = xOf(visible[0]);
-    pieces.push(`<circle cx="${x.toFixed(1)}" cy="${lineY(smooth[0]).toFixed(1)}" r="2.6" fill="var(--oc-primary)" />`);
+    nodes.dot.setAttribute('cx', xOf(visible[0]).toFixed(1));
+    nodes.dot.setAttribute('cy', lineY(smooth[0]).toFixed(1));
+    showPart(nodes.dot, true);
+    hidePath(nodes.line);
+    hidePath(nodes.fill);
+    showPart(nodes.baseline, false);
   } else {
-    pieces.push(
-      `<line x1="0" y1="${height - pad}" x2="${width}" y2="${height - pad}" stroke="var(--oc-primary)" stroke-width="1.6" opacity="0.45" />`,
-    );
+    showPart(nodes.dot, false);
+    hidePath(nodes.line);
+    hidePath(nodes.fill);
+    showPart(nodes.baseline, true);
   }
-  svg.innerHTML = pieces.join('');
+
   ui.peak.textContent = hovered
     ? `${Math.round(hovered.value)} t/s · ${Math.max(0, Math.round((now - hovered.at) / 1_000))} s ago`
     : peakValue > 0
@@ -1109,7 +1200,9 @@ host.onReady((ctx) => {
       if (ui && !document.hidden) {
         animateSpeed(dt);
         const moving = current && (current.status === 'streaming' || current.status === 'tool');
-        if (moving && stamp - lastPaint >= 80) {
+        // The update is a handful of attribute writes now, so the curve can
+        // follow the screen instead of stepping at 12.5 fps.
+        if (moving && stamp - lastPaint >= 16) {
           lastPaint = stamp;
           drawLive(current);
         }

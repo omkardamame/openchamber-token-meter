@@ -126,6 +126,17 @@ const harness = `<!doctype html><meta charset="utf-8"><title>page test</title>
   });
   window.__delayMs = 0;
   window.__setState = (next) => { window.__state = next; };
+  // How often the live curve is actually redrawn: count mutations of the path's
+  // own d attribute for a while. A 12.5 fps chart answers about 7 in 600 ms.
+  window.__drawRate = (ms) => new Promise((resolve) => {
+    const frame = document.getElementById('f');
+    const line = frame.contentDocument.querySelector('[data-chart="live"] path[data-role="live-line"]');
+    if (!line) { resolve(-1); return; }
+    let count = 0;
+    const observer = new MutationObserver(() => { count += 1; });
+    observer.observe(line, { attributeFilter: ['d'], attributes: true });
+    setTimeout(() => { observer.disconnect(); resolve(count); }, ms);
+  });
   // The service leaves the step list out when the frame already has this
   // sequence, which is what lets the frame keep one array object between polls.
   // Mimic it, so a poll that changed nothing can keep the bars it drew.
@@ -273,13 +284,21 @@ const harness = `<!doctype html><meta charset="utf-8"><title>page test</title>
         if (!line) return null;
         return Math.round(line.getBBox().y * 10) / 10;
       })(),
-      livePolyline: Boolean(doc.querySelector('[data-chart="live"] path[data-role="live-line"]')),
+      livePolyline: (() => {
+        const line = doc.querySelector('[data-chart="live"] path[data-role="live-line"]');
+        return Boolean(line && line.getAttribute('d'));
+      })(),
       liveCurve: (() => {
         const line = doc.querySelector('[data-chart="live"] path[data-role="live-line"]');
         return line ? String(line.getAttribute('d')).includes('C') : false;
       })(),
-      liveDots: doc.querySelectorAll('[data-chart="live"] circle:not([data-role])').length,
-      liveCross: Boolean(doc.querySelector('[data-chart="live"] [data-role="live-cross"]')),
+      liveDots: [...doc.querySelectorAll('[data-chart="live"] circle:not([data-role])')].filter(
+        (node) => node.getAttribute('visibility') !== 'hidden',
+      ).length,
+      liveCross: (() => {
+        const node = doc.querySelector('[data-chart="live"] [data-role="live-cross"]');
+        return Boolean(node && node.getAttribute('visibility') !== 'hidden');
+      })(),
       liveRight: (() => {
         const line = doc.querySelector('[data-chart="live"] path[data-role="live-line"]');
         if (!line) return null;
@@ -290,7 +309,9 @@ const harness = `<!doctype html><meta charset="utf-8"><title>page test</title>
         const svg = doc.querySelector('[data-chart="live"]');
         return svg ? svg.clientWidth : null;
       })(),
-      gridLabels: [...doc.querySelectorAll('[data-chart="live"] [data-role="grid-label"]')].map((n) => n.textContent),
+      gridLabels: [...doc.querySelectorAll('[data-chart="live"] [data-role="grid-label"]')]
+        .filter((node) => node.getAttribute('visibility') !== 'hidden')
+        .map((node) => node.textContent),
       peakLineY: (() => {
         const line = doc.querySelector('[data-chart="live"] line[data-role="live-peak"]');
         return line ? Number(line.getAttribute('y1')) : null;
@@ -391,6 +412,7 @@ const run = async (page) => {
       await browser(['eval', `window.__switchSession(${JSON.stringify(next)}, ${JSON.stringify(id)})`]);
       await new Promise((resolve) => setTimeout(resolve, 500));
     },
+    drawRate: async (ms = 600) => Number(JSON.parse(await browser(['eval', `window.__drawRate(${ms})`]))),
     delay: async (ms) => {
       await browser(['eval', `window.__delayMs = ${ms}`]);
     },
@@ -1257,6 +1279,12 @@ try {
   await panel.set(state({ status: 'streaming' }));
   const workingUi = await panel.read();
   check('UI-30 a working session says live', workingUi.totalsSource === 'live', String(workingUi.totalsSource));
+  const draws = await panel.drawRate(600);
+  check(
+    'UI-31 the live curve redraws at frame rate, not 12.5 fps',
+    draws >= 15,
+    `${draws} redraws in 600 ms (12.5 fps would give ~7)`,
+  );
   await panel.set(state({ totals: { ...state().totals, source: 'history' } }));
   const historyUi = await panel.read();
   check(
