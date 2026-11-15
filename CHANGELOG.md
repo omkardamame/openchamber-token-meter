@@ -2,6 +2,13 @@
 
 Every release of Token Meter, newest first; one or two concise bullets per release — what shipped in that tag.
 
+## [2.0.0] - 2026-11-16
+
+### Changed
+
+- **Breaking:** Cost now headlines API value at published rates, not the recorded bill; billed cost remains alongside it. Six-provider pricing includes context tiers, time tariffs, manual overrides and named gaps in partial totals. Optional session and turn budgets warn when their dollar limits are reached.
+- Both panel charts use a dynamic linear/log scale so burst spikes no longer flatten normal rates, with adaptive ticks and unchanged t/s measurements. Charts zoom out to an hour, pan through steps and filter by subagent; the panel adds a subagent roster, model breakdown, dated in/out readouts, copy stats and a local clock. Hardening fixes stale session displays, hidden sections, filter redraws, subagent labels and animation-loop recovery, with keyboard roster controls and reduced-motion support.
+
 ## [1.9.1] - 2026-11-13
 
 ### Fixed
