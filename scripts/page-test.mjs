@@ -231,6 +231,65 @@ const harness = `<!doctype html><meta charset="utf-8"><title>page test</title>
     observer.observe(line, { attributeFilter: ['d'], attributes: true });
     setTimeout(() => { observer.disconnect(); resolve(count); }, ms);
   });
+  // Count actual path changes against the browser's own animation frames,
+  // without a pointer event. Poll-only drawing can pass a mutation counter
+  // while still visibly stepping, so measure distinct geometry per frame.
+  window.__chartCadence = (ms) => new Promise((resolve) => {
+    const view = frame.contentWindow;
+    const line = frame.contentDocument.querySelector('[data-role="live-line"]');
+    let previous = line.getAttribute('d');
+    let frames = 0;
+    let changed = 0;
+    let started = null;
+    const sample = (stamp) => {
+      if (started === null) started = stamp;
+      const next = line.getAttribute('d');
+      if (next !== previous) changed += 1;
+      previous = next;
+      frames += 1;
+      if (stamp - started >= ms) resolve({ frames, changed });
+      else view.requestAnimationFrame(sample);
+    };
+    view.requestAnimationFrame(sample);
+  });
+  // Drive the existing frame loop with 120 Hz timestamps to catch a fixed
+  // 16 ms gate even on a test machine whose display only runs at 60 Hz.
+  window.__fastFrames = async () => {
+    const view = frame.contentWindow;
+    const original = view.requestAnimationFrame;
+    const queue = [];
+    view.requestAnimationFrame = (callback) => { queue.push(callback); return queue.length; };
+    const line = frame.contentDocument.querySelector('[data-role="live-line"]');
+    const set = line.setAttribute;
+    let draws = 0;
+    try {
+      // Let the already-booked real frame run and queue the next one here.
+      await new Promise((resolve) => original.call(view, resolve));
+      line.setAttribute = function(name, value) {
+        if (name === 'd') draws += 1;
+        return set.call(this, name, value);
+      };
+      const start = view.performance.now();
+      for (let index = 1; index <= 40; index += 1) {
+        for (const callback of queue.splice(0)) callback(start + index * 1000 / 120);
+      }
+      return draws;
+    } finally {
+      line.setAttribute = set;
+      view.requestAnimationFrame = original;
+      for (const callback of queue) original.call(view, callback);
+    }
+  };
+  window.__hiddenDraws = async (ms) => {
+    const doc = frame.contentDocument;
+    Object.defineProperty(doc, 'hidden', { configurable: true, value: true });
+    try {
+      await new Promise((resolve) => frame.contentWindow.requestAnimationFrame(resolve));
+      return await window.__drawRate(ms);
+    } finally {
+      delete doc.hidden;
+    }
+  };
   // The service leaves the step list out when the frame already has this
   // sequence, which is what lets the frame keep one array object between polls.
   // Mimic it, so a poll that changed nothing can keep the bars it drew.
@@ -555,6 +614,9 @@ const run = async (page) => {
       await new Promise((resolve) => setTimeout(resolve, 500));
     },
     drawRate: async (ms = 600) => Number(JSON.parse(await browser(['eval', `window.__drawRate(${ms})`]))),
+    chartCadence: async (ms = 600) => JSON.parse(JSON.parse(await browser(['eval', `(async () => JSON.stringify(await window.__chartCadence(${ms})))()`]))),
+    fastFrames: async () => Number(JSON.parse(await browser(['eval', 'window.__fastFrames()']))),
+    hiddenDraws: async (ms = 600) => Number(JSON.parse(await browser(['eval', `window.__hiddenDraws(${ms})`]))),
     fastZoomReset: async (ms) => {
       const done = Boolean(JSON.parse(await browser(['eval', `window.__fastZoomReset(${ms})`])));
       return done;
@@ -1549,6 +1611,15 @@ try {
     draws >= 15,
     `${draws} redraws in 600 ms (12.5 fps would give ~7)`,
   );
+  const busyCadence = await panel.chartCadence();
+  check('UI-31 generating scroll follows display frames without pointer input', busyCadence.frames >= 10 && busyCadence.changed >= busyCadence.frames * 0.8, JSON.stringify(busyCadence));
+  const highRefreshDraws = await panel.fastFrames();
+  check('UI-31 a 120 Hz display is not capped by a 16 ms redraw gate', highRefreshDraws === 40, `${highRefreshDraws} draws / 40 frames`);
+  await panel.set(state({ status: 'idle' }));
+  const idleCadence = await panel.chartCadence();
+  check('UI-31 idle history keeps scrolling at display cadence without the cursor', idleCadence.frames >= 10 && idleCadence.changed >= idleCadence.frames * 0.8, JSON.stringify(idleCadence));
+  const hiddenDraws = await panel.hiddenDraws();
+  check('UI-31 hidden frames do not redraw the live chart', hiddenDraws === 0, `${hiddenDraws} draws while hidden`);
   await panel.set(state({ totals: { ...state().totals, source: 'history' } }));
   const historyUi = await panel.read();
   check(
@@ -1954,6 +2025,8 @@ try {
     calmAxis === '71 s ago' && /^0s(, 0s)*$/.test(calmTransition),
     `${calmAxis} · transition ${calmTransition}`,
   );
+  const calmCadence = await calm.chartCadence();
+  check('panel respects reduced motion instead of continuously scrolling history', calmCadence.frames >= 10 && calmCadence.changed <= 2, JSON.stringify(calmCadence));
   await browser(['set', 'media', 'dark']);
 
   // --- the Work Status section --------------------------------------------

@@ -1685,8 +1685,8 @@ async function poll() {
     } else {
       data.steps = lastSteps;
     }
-    // Expanded once here: drawLive runs twelve times a second, and rebuilding
-    // 240 objects per frame was pure garbage for the collector to sweep.
+    // Expanded once per answer, not per display frame: polling updates the
+    // measurements while requestAnimationFrame scrolls their existing history.
     data.points = seriesPoints(data);
     // The coarse series carries its own offsets: a quiet collector stops
     // ticking, so its buckets are not a contiguous grid.
@@ -1877,10 +1877,9 @@ host.onReady((ctx) => {
     };
     ui.stepsChart.addEventListener('pointerup', endDrag);
     ui.stepsChart.addEventListener('pointercancel', endDrag);
-    // Redraw between polls against the projected clock, but only while tokens
-    // are moving and at a rate a 60 s curve needs: rebuilding the path at
-    // 60 fps bought nothing and burnt CPU on every idle session.
-    let lastPaint = 0;
+    // History still moves left when a session becomes idle. Follow the display
+    // clock, not the poll or pointer clock; a fixed 16 ms gate also skips half
+    // the callbacks on a 120 Hz display. Hidden frames do no drawing.
     let lastFrame = 0;
     const paint = (stamp) => {
       // The next frame is booked before any drawing: an exception below still
@@ -1891,24 +1890,20 @@ host.onReady((ctx) => {
       lastFrame = stamp;
       if (ui && !document.hidden) {
         animateSpeed(dt);
-        const moving = current && (current.status === 'streaming' || current.status === 'tool');
-        // The update is a handful of attribute writes now, so the curve can
-        // follow the screen instead of stepping at 12.5 fps.
-        if (moving && stamp - lastPaint >= 16) {
-          lastPaint = stamp;
-          drawLive(current);
-        }
         // Both charts ease towards their target every frame, so a gesture and
         // its reset are the same movement in opposite directions.
         const at = performance.now();
         if (!liveHovering && liveTargetMs !== ZOOM_MIN_MS && at > zoomResetAt) liveTargetMs = ZOOM_MIN_MS;
-        if (liveWindowMs !== liveTargetMs) {
+        const liveZoomChanged = liveWindowMs !== liveTargetMs;
+        if (liveZoomChanged) {
           // A reader who asked for less motion gets the new window at once.
           const k = REDUCED_MOTION ? 1 : 1 - Math.exp(-dt / ZOOM_EASE_MS);
           liveWindowMs += (liveTargetMs - liveWindowMs) * k;
           if (Math.abs(liveTargetMs - liveWindowMs) < 40) liveWindowMs = liveTargetMs;
-          if (current) drawLive(current);
         }
+        // One live draw per animation callback, including during zoom. Less
+        // motion keeps poll-based updates and an immediate zoom instead.
+        if (current && (!REDUCED_MOTION || liveZoomChanged)) drawLive(current);
         if (subsDetailOpen && !ui.subsDetail.matches(':hover') && at > subsDetailUntil) {
           subsDetailOpen = false;
           subsDetailKey = '';
