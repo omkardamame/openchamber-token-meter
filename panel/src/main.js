@@ -118,7 +118,7 @@ function build() {
     </section>
 
     <section class="block">
-      <div class="block-head" title="Every step since the session started, not one turn"><span>Session totals</span><span class="block-meta totals-source"></span></div>
+      <div class="block-head" title="Every step since the session started, not one turn"><span>Session details</span><span class="block-meta totals-source"></span></div>
       <div class="grid totals-grid"></div>
     </section>
 
@@ -140,7 +140,7 @@ function build() {
       <div class="legend" hidden><span><i class="swatch main"></i>session</span><span><i class="swatch sub"></i>subagent</span></div>
     </section>
 
-    <div class="foot"><span class="foot-text">reading OpenCode usage</span></div>
+    <div class="foot"><span class="foot-text">reading OpenCode usage</span><span class="foot-clock"></span></div>
   `;
   root.append(app);
   return {
@@ -162,6 +162,7 @@ function build() {
     costRate: app.querySelector('.cost-rate'),
     costRates: app.querySelector('.cost-rates'),
     apiBadge: app.querySelector('.api-badge'),
+    footClock: app.querySelector('.foot-clock'),
     subsBlock: app.querySelector('.subagents'),
     subsMeta: app.querySelector('.subs-meta'),
     subsList: app.querySelector('.subs-list'),
@@ -191,6 +192,18 @@ function clock(ms) {
   return [date.getHours(), date.getMinutes(), date.getSeconds()]
     .map((value) => String(value).padStart(2, '0'))
     .join(':');
+}
+
+/**
+ * The reader's own clock, in their timezone and their 12/24-hour habit: the
+ * locale decides both, so nothing here is configured.
+ */
+function localNow() {
+  const now = new Date();
+  return `${now.toLocaleDateString(undefined, { day: 'numeric', month: 'short', weekday: 'short' })} · ${now.toLocaleTimeString(
+    undefined,
+    { hour: '2-digit', minute: '2-digit', second: '2-digit' },
+  )}`;
 }
 
 /** A per-million rate, where the interesting digits are small. */
@@ -607,7 +620,7 @@ function drawLive(data) {
     }
     if (labelY > height - 2) labelY = (avgLabelY ?? labelY) - 13;
     pieces.push(
-      `<line x1="0" y1="${y.toFixed(1)}" x2="${width}" y2="${y.toFixed(1)}" stroke="var(--oc-error)" stroke-width="1" stroke-dasharray="6 3 2 3" opacity="0.65" data-role="live-peak" />`,
+      `<line x1="0" y1="${y.toFixed(1)}" x2="${width}" y2="${y.toFixed(1)}" stroke="var(--oc-error)" stroke-width="1" stroke-dasharray="2 3" opacity="0.65" data-role="live-peak" />`,
       `<text x="${width - 2}" y="${labelY.toFixed(1)}" text-anchor="end" fill="var(--oc-error)" font-size="9.5" opacity="0.95">${peakLabel}</text>`,
     );
   }
@@ -944,7 +957,12 @@ function render(data) {
   paintCells(rowNodes, data);
   paintCost(data);
   const totals = data.totals ?? {};
-  ui.source.textContent = `${totals.source === 'usage' ? 'live' : 'from history'}${subLabel ? ` · ${subLabel}` : ''}`;
+  // `live` says the session is working right now, not where the numbers came
+  // from: an idle session keeps its usage record, and labelling a frozen number
+  // "live" is the one thing a dashboard must not do.
+  const working = data.status === 'streaming' || data.status === 'tool' || data.status === 'waiting-permission';
+  const origin = working ? 'live' : totals.source === 'history' ? 'from history' : '';
+  ui.source.textContent = [origin, subLabel].filter(Boolean).join(' · ');
   ui.foot.textContent = data.error
     ? `cannot read history: ${data.error}`
     : loadingSubs > 0
@@ -1099,6 +1117,17 @@ host.onReady((ctx) => {
       requestAnimationFrame(paint);
     };
     requestAnimationFrame(paint);
+    // The reader's own clock at the bottom: the rail doubles as a dashboard, and
+    // a screenshot of it should say when it was taken.
+    if (ui.footClock) {
+      const zone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+      ui.footClock.title = zone ? `your time · ${zone}` : 'your time';
+      const tickClock = () => {
+        if (ui) ui.footClock.textContent = localNow();
+      };
+      tickClock();
+      setInterval(tickClock, 1_000);
+    }
   }
   const model = ctx.session?.model;
   modelLabel = typeof model === 'string' ? model.replace(/^.*\//, '') : typeof model?.name === 'string' ? model.name : '';

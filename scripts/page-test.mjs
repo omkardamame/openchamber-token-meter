@@ -295,6 +295,13 @@ const harness = `<!doctype html><meta charset="utf-8"><title>page test</title>
         const line = doc.querySelector('[data-chart="live"] line[data-role="live-peak"]');
         return line ? Number(line.getAttribute('y1')) : null;
       })(),
+      peakDash: (() => {
+        const line = doc.querySelector('[data-chart="live"] line[data-role="live-peak"]');
+        return line ? line.getAttribute('stroke-dasharray') : null;
+      })(),
+      totalsSource: (doc.querySelector('.totals-source') || {}).textContent ?? null,
+      sectionHead: [...doc.querySelectorAll('.block-head span')].map((n) => n.textContent),
+      footClock: (doc.querySelector('.foot-clock') || {}).textContent ?? null,
       avgLineY: (() => {
         const line = doc.querySelector('[data-chart="live"] line[data-role="live-avg"]');
         return line ? Number(line.getAttribute('y1')) : null;
@@ -1227,6 +1234,35 @@ try {
     'UI-26 the peak says how old it is',
     /peak 334 t\/s · 8m 00s ago/.test(steady.text),
     String(steady.text).slice(0, 90),
+  );
+  check('UI-27 the peak line is dotted like the step chart', steady.peakDash === '2 3', String(steady.peakDash));
+  check(
+    'UI-28 the section is called Session details',
+    steady.sectionHead.includes('Session details') && !steady.sectionHead.includes('Session totals'),
+    steady.sectionHead.join(' | '),
+  );
+  check(
+    'UI-29 the foot carries the reader’s clock',
+    /^.+ · \d{1,2}:\d{2}:\d{2}(\s?[AP]M)?$/.test(steady.footClock ?? ''),
+    String(steady.footClock),
+  );
+  await panel.set(state({ status: 'idle' }));
+  const idleUi = await panel.read();
+  check(
+    'UI-30 an idle session does not say live',
+    idleUi.totalsSource === '' || idleUi.totalsSource === null,
+    JSON.stringify(idleUi.totalsSource),
+  );
+
+  await panel.set(state({ status: 'streaming' }));
+  const workingUi = await panel.read();
+  check('UI-30 a working session says live', workingUi.totalsSource === 'live', String(workingUi.totalsSource));
+  await panel.set(state({ totals: { ...state().totals, source: 'history' } }));
+  const historyUi = await panel.read();
+  check(
+    'UI-30 a cold read says from history',
+    historyUi.totalsSource === 'from history',
+    String(historyUi.totalsSource),
   );
   // A sustained burst, not one sample: the curve is smoothed, so a single
   // 250 ms spike never reaches the peak and must not move the line.
