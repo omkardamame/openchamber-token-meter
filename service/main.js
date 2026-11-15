@@ -1268,7 +1268,7 @@ function snapshot(collector, now = Date.now(), tree = [collector], priceBook = n
       avgTps: Math.round(memberRates.avg * 10) / 10,
       peakTps: Math.round(memberRates.peak * 10) / 10,
       lastAt,
-      steps: member.totals.steps
+      steps: Math.max(member.totals.steps, member.steps.length, member.knownSteps ?? 0)
     });
   }
   roster.sort((a, b) => {

@@ -64,7 +64,6 @@ let sessionTitle = '';
 // The detail list is a look, not a fixture: it closes itself a minute after the
 // last hover, and the running-subagent block above is never touched by it.
 let subsDetailOpen = false;
-let subsDetailHover = false;
 let subsDetailUntil = 0;
 let subsDetailKey = '';
 let stepHover = null;
@@ -708,9 +707,10 @@ function drawLive(data) {
   const series = Array.isArray(wide ? data.pointsLong : data.points) ? (wide ? data.pointsLong : data.points) : [];
   const now = projectedNow(data);
   const from = now - liveWindowMs;
-  const seconds = Math.round(liveWindowMs / 1_000);
+  const windowSeconds = Math.round(liveWindowMs / 1_000);
   // Seconds up close, minutes once the number would be noise.
-  ui.axisFrom.textContent = seconds >= 120 ? `${Math.floor(seconds / 60)} min ago` : `${seconds} s ago`;
+  ui.axisFrom.textContent =
+    windowSeconds >= 120 ? `${Math.floor(windowSeconds / 60)} min ago` : `${windowSeconds} s ago`;
   const visible = series.filter((point) => point.t >= from && point.t <= now);
   const peakValue = visible.reduce((max, point) => Math.max(max, point.v), 0);
   // References drawn on the chart: the session's average and its best step,
@@ -909,8 +909,11 @@ function drawSteps(data) {
   const all = Array.isArray(data.steps) ? data.steps : [];
   const rated = all.filter((step) => step.tps && step.tps > 0 && !step.aborted);
   // Zooming in here means drawing fewer bars, never fewer numbers in the header.
+  // A step arriving grows the list; the eased count has to grow with it, or the
+  // chart draws one bar fewer than it has for a beat and re-lays out twice.
+  const grew = Math.max(0, rated.length - stepFull);
+  stepShown = stepShown === 0 ? rated.length : Math.min(rated.length, stepShown + grew);
   stepFull = rated.length;
-  if (stepShown === 0) stepShown = rated.length;
   const shownBars = Math.min(rated.length, Math.max(1, Math.round(stepShown)));
   const limit = shownBars >= rated.length ? 0 : shownBars;
   const steps = limit ? rated.slice(-limit) : rated;
@@ -1062,8 +1065,8 @@ function paintSubsDetail(members) {
     return;
   }
   ui.subsDetail.hidden = false;
-  ui.subsDetailMeta.textContent = `${list.length} in this tree`;
-  const key = list.map((item) => `${item.id}:${item.steps}:${item.lastAt}:${item.cost}`).join('|');
+  ui.subsDetailMeta.textContent = `${Math.max(list.length, list.count ?? 0)} in this tree`;
+  const key = list.map((item) => `${item.id}:${item.steps}:${item.lastAt}:${item.cost}:${item.status}:${item.consumed}`).join('|');
   if (key === subsDetailKey) return;
   subsDetailKey = key;
   const now = Date.now();
@@ -1075,7 +1078,8 @@ function paintSubsDetail(members) {
     dot.dataset.state = dotState(item.status);
     const title = el('span', 'sub-detail-title', item.title || item.id || 'subagent');
     title.title = item.title || item.id || '';
-    const when = el('span', 'sub-detail-when', item.lastAt ? `${duration(now - item.lastAt)} ago` : 'never');
+    const age = item.lastAt ? duration(now - item.lastAt) : '';
+    const when = el('span', 'sub-detail-when', !item.lastAt ? 'never' : age ? `${age} ago` : 'just now');
     head.append(dot, title, when);
     const stats = el('div', 'sub-detail-stats');
     stats.textContent = `${compact(item.consumed ?? 0)} tok · ${item.cost > 0 ? money4(item.cost) : '$0'} · avg ${Math.round(item.avgTps ?? 0)} t/s · peak ${Math.round(item.peakTps ?? 0)} t/s · ${item.steps ?? 0} step${item.steps === 1 ? '' : 's'}`;
@@ -1259,6 +1263,7 @@ function render(data) {
   // What the turn has consumed so far, not what the last step generated: the
   // line answers "what did this turn cost", and the step answers a different one.
   const turnConsumed = Number.isFinite(data.turn?.consumed) ? data.turn.consumed : null;
+  const consumedText = turnConsumed === null ? '' : ` · ${compact(turnConsumed)} tok`;
   const lastSub = lastStep?.sub ? ' · subagent' : '';
   const lastCost = typeof data.cost?.lastTurn === 'number' ? ` · ${money4(data.cost.lastTurn)}` : '';
   if (lastStep?.tps) {
@@ -1266,12 +1271,12 @@ function render(data) {
     // Classify the digits on screen, exactly like the headline, so a 19.6 t/s
     // step printed as "20" is not coloured as a slow rate.
     ui.lastRate.dataset.tier = speedTier(Math.round(lastStep.tps));
-    ui.lastRest.textContent = ` · ${seconds(lastStep.ms)}${turnConsumed === null ? '' : ` · ${compact(turnConsumed)} tok`}${lastSub}${lastCost}`;
+    ui.lastRest.textContent = ` · ${seconds(lastStep.ms)}${consumedText}${lastSub}${lastCost}`;
   } else {
     ui.lastRate.textContent = '';
     delete ui.lastRate.dataset.tier;
     ui.lastRest.textContent = lastStep
-      ? `last step ${seconds(lastStep.ms)} · ${compact(turnConsumed)} tok · too short to rate${lastSub}${lastCost}`
+      ? `last step ${seconds(lastStep.ms)}${consumedText} · too short to rate${lastSub}${lastCost}`
       : 'no finished step yet';
   }
 
@@ -1475,13 +1480,6 @@ host.onReady((ctx) => {
       subsDetailUntil = performance.now() + ZOOM_RESET_MS;
       if (current) paintSubsDetail(current.subagents?.members ?? []);
     });
-    ui.subsDetail.addEventListener('pointerenter', () => {
-      subsDetailHover = true;
-    });
-    ui.subsDetail.addEventListener('pointerleave', () => {
-      subsDetailHover = false;
-      subsDetailUntil = performance.now() + ZOOM_RESET_MS;
-    });
     ui.footCopy.addEventListener('click', async () => {
       if (!current) return;
       const text = statsMarkdown(current);
@@ -1543,7 +1541,7 @@ host.onReady((ctx) => {
           if (Math.abs(liveTargetMs - liveWindowMs) < 40) liveWindowMs = liveTargetMs;
           if (current) drawLive(current);
         }
-        if (subsDetailOpen && !subsDetailHover && at > subsDetailUntil) {
+        if (subsDetailOpen && !ui.subsDetail.matches(':hover') && at > subsDetailUntil) {
           subsDetailOpen = false;
           subsDetailKey = '';
           ui.subsDetail.hidden = true;
@@ -1601,7 +1599,6 @@ host.onReady((ctx) => {
   stepFull = 0;
   subsDetailOpen = false;
   subsDetailKey = '';
-  subsDetailHover = false;
   ui.subsDetail.hidden = true;
   ui.subsDetailList.replaceChildren();
   ui.subsDetailMeta.textContent = '';
@@ -1610,6 +1607,8 @@ host.onReady((ctx) => {
   lastDrawnSteps = null;
   stepHover = null;
   liveHoverX = null;
+  liveHoverY = null;
+  peakHover = false;
   sessionId = nextSession;
   current = null;
   clearNotice();

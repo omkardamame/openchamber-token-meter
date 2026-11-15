@@ -1405,14 +1405,18 @@ try {
   const early = await panel.read();
   await panel.wait(60);
   const later = await panel.read();
+  await panel.wait(400);
+  const eased = await panel.read();
   check(
     'UI-34 a wheel notch eases out over several frames',
     /^\d+ s ago$/.test(early.axisFrom ?? '') &&
       /^\d+ s ago$/.test(later.axisFrom ?? '') &&
       Number.parseInt(early.axisFrom, 10) > 60 &&
       Number.parseInt(later.axisFrom, 10) >= Number.parseInt(early.axisFrom, 10) &&
-      Number.parseInt(later.axisFrom, 10) <= 71,
-    `${early.axisFrom} → ${later.axisFrom}`,
+      Number.parseInt(later.axisFrom, 10) <= 71 &&
+      Number.parseInt(eased.axisFrom, 10) > Number.parseInt(early.axisFrom, 10) &&
+      Number.parseInt(eased.axisFrom, 10) === 71,
+    `${early.axisFrom} → ${later.axisFrom} → ${eased.axisFrom}`,
   );
   for (let notch = 0; notch < 14; notch += 1) await panel.wheel('[data-chart="live"]', 120);
   const widest = await panel.read();
@@ -1484,7 +1488,7 @@ try {
   const subsOpen = await panel.read();
   check(
     'UI-41 clicking it lists every subagent session with its own numbers',
-    subsOpen.subsDetailShown === true &&
+    subsOpen.subsDetailShown === true && subsOpen.subsDetailDisplay === 'flex' &&
       /reading the spec/.test(subsOpen.subsDetailText ?? '') &&
       /4\.2M tok/.test(subsOpen.subsDetailText ?? '') &&
       /avg 120 t\/s/.test(subsOpen.subsDetailText ?? '') &&
