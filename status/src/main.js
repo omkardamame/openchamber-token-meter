@@ -325,6 +325,8 @@ host.onReady((ctx) => {
   ui.lastRate.textContent = '';
   ui.lastRest.textContent = 'no finished step yet';
   delete ui.lastRate.dataset.tier;
+  // A breathing dot belongs to the session that left until the first answer.
+  ui.dot.dataset.state = dotState('idle');
   lastStepsSeq = -1;
   sessionId = nextSession;
   current = null;

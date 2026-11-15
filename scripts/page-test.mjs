@@ -1160,6 +1160,40 @@ try {
   const finalRead = await panel.read();
   check('panel draws the session it switched to', /7\.0k/.test(finalRead.text), finalRead.text.slice(0, 60));
 
+  // The header and the Models block belong to the session too: a generating,
+  // two-model session must not leave its dot, its turn timer or its model list
+  // under the next session's name while that one's first answer is on its way.
+  const twoModels = state({
+    status: 'streaming',
+    turn: { active: true, consumed: 10, startedAt: Date.now() - 125_000, steps: 1, tokens: 5 },
+    cost: {
+      ...state().cost,
+      mode: 'api',
+      models: [
+        { apiValue: 3, billed: 0, consumed: 1000, drift: null, model: 'claude-opus-5-5', name: 'Claude Opus 5.5', provider: 'anthropic' },
+        { apiValue: 1, billed: 0, consumed: 1000, drift: null, model: 'claude-haiku-5-5', name: 'Claude Haiku 5.5', provider: 'anthropic' },
+      ],
+    },
+  });
+  await panel.set(twoModels);
+  const twoRead = await panel.read();
+  check(
+    'panel lists two models and times a running turn before a switch',
+    twoRead.modelsDisplay === 'flex' && /Claude Haiku 5\.5/.test(twoRead.modelsText ?? '') && /^generating · 2m/.test(twoRead.statusLabel ?? ''),
+    `${twoRead.modelsDisplay} ${twoRead.statusLabel}`,
+  );
+  await panel.delay(1500);
+  await new Promise((resolve) => setTimeout(resolve, 400));
+  await panel.switchSession(state({ status: 'idle' }), 'ses_header');
+  const headerSwitch = await panel.read();
+  check(
+    'panel clears the header and the Models block the moment the session switches',
+    headerSwitch.dotStateNow === 'idle' && headerSwitch.statusLabel === 'idle' && headerSwitch.modelsDisplay === 'none',
+    `${headerSwitch.dotStateNow} "${headerSwitch.statusLabel}" models ${headerSwitch.modelsDisplay}`,
+  );
+  await panel.delay(0);
+  await new Promise((resolve) => setTimeout(resolve, 1800));
+
   // an answer that leaves the step list off must keep the bars already drawn
   const cached = state({ status: 'streaming' });
   delete cached.steps;
@@ -1694,6 +1728,21 @@ try {
   );
   const statusFinal = await status.read();
   check('status draws the session it switched to', /7\.0k/.test(statusFinal.text), statusFinal.text.slice(0, 60));
+
+  // The dot as well: a generating session's breathing dot is not the next one's.
+  await status.set(state({ status: 'streaming' }));
+  const statusHot = await status.read();
+  await status.delay(1500);
+  await new Promise((resolve) => setTimeout(resolve, 620));
+  await status.switchSession(state({ status: 'idle' }), 'ses_dot');
+  const statusDot = await status.read();
+  check(
+    'status rests the dot the moment the session switches',
+    statusHot.dotState === 'streaming' && statusDot.dotState === 'idle',
+    `${statusHot.dotState} -> ${statusDot.dotState}`,
+  );
+  await status.delay(0);
+  await new Promise((resolve) => setTimeout(resolve, 1800));
 
   // A section with no chat open says why it is empty instead of drawing a box.
   await status.switchSession(state(), null);

@@ -1807,6 +1807,13 @@ host.onReady((ctx) => {
   // new session's name until its first answer lands.
   paintCells(rowNodes, {});
   paintCost({});
+  paintModels({});
+  // The header too: the session that left may have been generating, and its
+  // breathing dot and turn timer must not sit under the new session's name
+  // for the first load (up to six seconds on a long history).
+  ui.dot.dataset.state = dotState('idle');
+  ui.statusLabel.textContent = STATUS.idle;
+  ui.tpsSub.textContent = 'no generation right now';
   paintSubagents([], 0, 0);
   drawSteps({ steps: [], stepsKnown: 0 });
   drawLive({ points: [], rates: { avg: 0, peak: 0 } });
