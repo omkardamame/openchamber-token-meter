@@ -1,6 +1,7 @@
 // Pure checks for the price book, the resolver and the API-value computation.
 // No OpenCode, no browser, no network: runs anywhere, deterministic.
 import { computeApiValue, resolvePrice } from '../shared/price-resolve.js';
+import { diffBooks } from './price-diff.mjs';
 import { FIXTURE_BOOK as book, FIXTURE_OVERRIDES, step, SATURDAY_NOON, MONDAY_PEAK, CN_HOLIDAY } from './fixtures/price-book.js';
 
 const results = [];
@@ -181,6 +182,34 @@ const started = performance.now();
 const manyValue = value(many, { turnStartedAt: 500 * 1000 });
 const elapsed = performance.now() - started;
 check('CV-20 1,000 steps under 50 ms', elapsed < 50 && near(manyValue.total, manyValue.models.reduce((sum, m) => sum + m.apiValue, 0)), `${elapsed.toFixed(1)} ms`);
+
+// --- price-book drift ----------------------------------------------------------
+// `sync-prices --check` names what moved; a scheduled check is read by a person.
+
+const clone = (value) => JSON.parse(JSON.stringify(value));
+check('PD-01 the same book has no drift', diffBooks(book, clone(book)).length === 0, JSON.stringify(diffBooks(book, clone(book))));
+const moved = clone(book);
+moved.providers.anthropic.models['claude-opus-5-5'].cost.input = 3.5;
+moved.providers.anthropic.models['claude-opus-5-5'].tiers = [
+  ...(moved.providers.anthropic.models['claude-opus-5-5'].tiers ?? []),
+  { cost: { cacheRead: 0.4, cacheWrite: 10, input: 8, output: 40 }, minContext: 900_000 },
+];
+moved.providers.anthropic.models['claude-zz-test'] = { cost: { cacheRead: 0.1, cacheWrite: 1, input: 1, output: 5 }, name: 'ZZ', tiers: [] };
+const goneId = Object.keys(moved.providers.openai.models)[0];
+delete moved.providers.openai.models[goneId];
+const drift = diffBooks(book, moved);
+check(
+  'PD-02 drift names a moved rate and tier, a new model and a gone one',
+  same(drift, [
+    '~ anthropic/claude-opus-5-5  input 4 → 3.5, context >900000 added (in 8 · out 40 · read 0.4 · write 10)',
+    '+ anthropic/claude-zz-test  in 1 · out 5 · read 0.1 · write 1',
+    `- openai/${goneId}`,
+  ]),
+  JSON.stringify(drift),
+);
+const freed = clone(book);
+delete freed.providers.deepseek;
+check('PD-03 a provider that left is one line', same(diffBooks(book, freed), ['- deepseek (provider gone)']), JSON.stringify(diffBooks(book, freed)));
 
 const passed = results.filter((result) => result.ok).length;
 console.log(`\n${passed}/${results.length} price checks passed`);

@@ -1,7 +1,9 @@
 // Generate the committed price snapshot from models.dev.
 //
 //   node scripts/sync-prices.mjs          rewrite shared/price-book.js
-//   node scripts/sync-prices.mjs --check  exit 1 when the committed file differs
+//   node scripts/sync-prices.mjs --check  exit 1 when the committed file differs,
+//                                         naming each model that moved (exit 2:
+//                                         models.dev did not answer)
 //
 // The service never touches the network: a price change is a release, and this
 // script is run by hand when one happens. It is not part of `npm run verify`.
@@ -11,7 +13,8 @@
 // no conversation data, no runtime URLs.
 import { readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+import { diffBooks } from './price-diff.mjs';
 
 const SOURCE = 'https://models.dev/api.json';
 const TIMEOUT_MS = 15_000;
@@ -144,7 +147,13 @@ if (check) {
     console.log('sync-prices: committed book matches models.dev');
     process.exit(0);
   }
-  console.error('sync-prices: committed book is stale (run node scripts/sync-prices.mjs)');
+  // Say what moved, not only that something did: a scheduled check is read by
+  // a person deciding whether a price change is worth a release.
+  const committed = existing ? (await import(pathToFileURL(TARGET).href)).PRICE_BOOK : null;
+  const lines = diffBooks(committed, build(api, checkedAt));
+  for (const line of lines) console.error(line);
+  if (!lines.length) console.error('(no rate, model or tier moved: the file differs in aliases, labels or layout)');
+  console.error(`sync-prices: committed book is stale, ${lines.length} model line(s) (run node scripts/sync-prices.mjs)`);
   process.exit(1);
 }
 
