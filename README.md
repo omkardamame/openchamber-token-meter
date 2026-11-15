@@ -28,11 +28,15 @@ https://github.com/omkardamame/openchamber-token-meter.git
 - **Live `t/s`** — the sum of the session and every streaming subagent, coloured
   by speed tier (matte red, green, blue, golden, violet); the last measured step sits
   underneath in the same tier colours.
-- **Graph** — the last 60 seconds. The plot is scaled to the session's peak
-  step, so the red `peak` line is the ceiling and carries the age of the step
-  that set it; the green `avg` line sits below. Above both is the live estimate.
+- **Graph** — the last 60 seconds, zoomable with the wheel out to an hour (the
+  service keeps 250 ms samples, then one-second and ten-second buckets). The
+  plot is scaled to the peak, so the red `peak` line is the ceiling and carries
+  its age; the green `avg` line sits below. Above both is the live estimate.
 - **Subagents** — each subagent still working, its own live rate, and how many
-  of the tree are running.
+  of the tree are running. `N subagents` opens a roster of every subagent
+  session in the tree (an hour wide) with what each consumed, cost, its average
+  and peak rate and when it last moved; clicking one filters the step chart to
+  it.
 - **Totals** — In, Out, Think, Total out, Cache, Cache hit, TTFT, Consumed.
 - **Cost** — the session's **API value**: what its tokens would cost at the
   model's published list rates, for the session and its subagents. The recorded
@@ -42,8 +46,15 @@ https://github.com/omkardamame/openchamber-token-meter.git
   first. The last turn's value also sits at the end of the last measured step's
   line.
 - **Per step** — the session's step count and its last 1,000 steps, with a
-  start/now time axis, orange for the session and blue for a subagent, the green
-  average and the red best step.
+  start/now axis carrying the date, orange for the session and blue for a
+  subagent, the green average and the red best step. The wheel thins the bars,
+  dragging moves the window back through history, and hovering a bar names its
+  rate, input and output, duration, date and cost.
+- **Models** — when the tree ran more than one model, each one's tokens, API
+  value, billed cost and drift, side by side.
+- **Footer** — `copy stats` (the session and its subagents as a markdown table),
+  the ceiling toggle (session or this turn), and the reader's own clock in their
+  timezone.
 - **Work Status** — the same speed and totals as a compact strip in the chat
   panel, so the speed sits next to the conversation.
 

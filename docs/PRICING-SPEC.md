@@ -1,7 +1,9 @@
 # API Value Pricing — Spec and Plan
 
-Status: **approved 2026-11-14; Phase 1 built** — committed book, resolver,
-compute, 55 pure checks. Phase 2 (snapshot wiring) not started.
+Status: **approved 2026-11-14; implemented** — book, resolver, snapshot wiring,
+panel and live reconciliation are on `main`; the release (CHANGELOG, version, tag,
+GitHub Release) is pending the owner's `stable`. The test tables below name the
+cases; the suites also carry later additions (SN-17..24, UI-21..41).
 Owner: Omkar.
 Scope: the rail panel's `Cost` block (OpenChamber extension `token-meter`).
 Providers in scope: **Anthropic** (`anthropic`, `claude-agent`), **OpenAI**
