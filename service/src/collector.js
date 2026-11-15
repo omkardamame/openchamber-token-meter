@@ -8,7 +8,14 @@ const HISTORY_PAGES = 20;
 const HISTORY_PAGE_SIZE = 100;
 const MAX_STEPS = 1000;
 const SERIES_POINTS = 240;
+// The coarse ring behind the live one: one bucket per second, five minutes of
+// it, so the panel can zoom the chart out from 60 s to 5 min.
+const LONG_POINTS = 300;
+// Below a minute of buckets the live series already covers the window, and the
+// coarse one would only repeat it.
+const LONG_MIN_POINTS = 61;
 const SERIES_INTERVAL_MS = 250;
+const LONG_BUCKET_MS = 1000;
 const LIVE_WINDOW_MS = 3_000;
 const DEFAULT_CHARS_PER_TOKEN = 0.28;
 // A tool's argument JSON follows a schema, not a thought: past this many
@@ -87,6 +94,9 @@ export function createCollector(id) {
     // The full history count, even when steps is capped at 400.
     knownSteps: 0,
     series: [],
+    // One bucket per second: { t: start of that second, sum, n }. The average
+    // is worked out when the snapshot is built, so a bucket stays one object.
+    seriesLong: [],
     chars: [],
     charsPerToken: DEFAULT_CHARS_PER_TOKEN,
     stream: null, // { started, streamed, messageID, chars, firstOutputAt, startedAt, toolChars, deltaParts }
@@ -626,6 +636,26 @@ function memberRate(collector, now) {
 }
 
 /**
+ * Add one live sample to the coarse ring. The bucket is the second the sample
+ * fell in, and its value is the average of the samples that landed there: a
+ * faster or slower tick cadence changes how many samples a bucket holds, never
+ * how long the ring covers.
+ */
+function addLongBucket(collector, now, value) {
+  const t = now - (now % LONG_BUCKET_MS);
+  const last = collector.seriesLong[collector.seriesLong.length - 1];
+  if (last && last.t === t) {
+    last.sum += value;
+    last.n += 1;
+    return;
+  }
+  collector.seriesLong.push({ t, sum: value, n: 1 });
+  if (collector.seriesLong.length > LONG_POINTS) {
+    collector.seriesLong.splice(0, collector.seriesLong.length - LONG_POINTS);
+  }
+}
+
+/**
  * `tree` is the session itself followed by every known descendant. A parent's
  * headline follows what its subagents stream, so a turn spent delegating does
  * not read as zero; hold it to one session by passing nothing.
@@ -635,8 +665,10 @@ export function tick(collector, now = Date.now(), tree = [collector]) {
   const rate = streaming ? tree.reduce((sum, member) => sum + memberRate(member, now), 0) : 0;
   const last = collector.series[collector.series.length - 1];
   if (!last || now - last.t >= SERIES_INTERVAL_MS) {
-    collector.series.push({ t: now, v: Math.round(rate * 10) / 10 });
+    const value = Math.round(rate * 10) / 10;
+    collector.series.push({ t: now, v: value });
     if (collector.series.length > SERIES_POINTS) collector.series.splice(0, collector.series.length - SERIES_POINTS);
+    addLongBucket(collector, now, value);
   }
   return rate;
 }
@@ -979,6 +1011,10 @@ export function snapshot(collector, now = Date.now(), tree = [collector], priceB
   // drift, and squeeze that much extra history into the window.
   const series = collector.series.slice(-SERIES_POINTS);
   const seriesT0 = series.length ? series[0].t : now;
+  // The coarse series travels as bare values on a nominal 1 s grid: the frame
+  // places them on index × step, so no per-point offsets go on the wire. Under
+  // a minute it would only repeat the live series, so it is left out.
+  const longSeries = collector.seriesLong.length >= LONG_MIN_POINTS ? collector.seriesLong : null;
   return {
     ok: true,
     session: collector.id,
@@ -1132,6 +1168,18 @@ export function snapshot(collector, now = Date.now(), tree = [collector], priceB
       d: series.map((point) => point.t - seriesT0),
       v: series.map((point) => point.v),
     },
+    // The same curve an octave down: one average per second, five minutes at
+    // most, values only. Present once there is more history than the live
+    // series holds.
+    ...(longSeries
+      ? {
+          seriesLong: {
+            t0: longSeries[0].t,
+            step: LONG_BUCKET_MS,
+            v: longSeries.map((bucket) => Math.round((bucket.sum / bucket.n) * 10) / 10),
+          },
+        }
+      : {}),
     // Every member's counter only grows, so their sum changes as soon as a
     // step arrives anywhere in the tree and the client knows to fetch the list.
     stepsSeq: members.reduce((sum, member) => sum + member.stepsSeq, 0),

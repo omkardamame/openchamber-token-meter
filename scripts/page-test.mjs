@@ -126,6 +126,28 @@ const harness = `<!doctype html><meta charset="utf-8"><title>page test</title>
   });
   window.__delayMs = 0;
   window.__setState = (next) => { window.__state = next; };
+  window.__click = (selector) => {
+    const node = document.getElementById('f').contentDocument.querySelector(selector);
+    if (!node) return false;
+    node.click();
+    return true;
+  };
+  window.__wheel = (selector, deltaY) => {
+    const frame = document.getElementById('f');
+    const node = frame.contentDocument.querySelector(selector);
+    if (!node) return false;
+    node.dispatchEvent(new frame.contentWindow.WheelEvent('wheel', { bubbles: true, cancelable: true, deltaY }));
+    return true;
+  };
+  window.__hoverAt = (selector, x, y) => {
+    const frame = document.getElementById('f');
+    const node = frame.contentDocument.querySelector(selector);
+    if (!node) return false;
+    node.dispatchEvent(
+      new frame.contentWindow.PointerEvent('pointermove', { bubbles: true, clientX: x, clientY: y }),
+    );
+    return true;
+  };
   // How often the live curve is actually redrawn: count mutations of the path's
   // own d attribute for a while. A 12.5 fps chart answers about 7 in 600 ms.
   window.__drawRate = (ms) => new Promise((resolve) => {
@@ -324,6 +346,15 @@ const harness = `<!doctype html><meta charset="utf-8"><title>page test</title>
       sectionHead: [...doc.querySelectorAll('.block-head span')].map((n) => n.textContent),
       footClock: (doc.querySelector('.foot-clock') || {}).textContent ?? null,
       footText: (doc.querySelector('.foot-text') || {}).textContent ?? null,
+      axisFrom: (doc.querySelector('.axis-from') || {}).textContent ?? null,
+      peakLabelText: (doc.querySelector('.axis-peak') || {}).textContent ?? null,
+      ceilingChip: (doc.querySelector('.foot-ceiling') || {}).textContent ?? null,
+      pngChip: (doc.querySelector('.foot-png') || {}).textContent ?? null,
+      pngTitle: (doc.querySelector('.foot-png') || {}).title ?? null,
+      livePathD: (() => {
+        const line = doc.querySelector('[data-chart="live"] path[data-role="live-line"]');
+        return line ? line.getAttribute('d') : null;
+      })(),
       subIds: [...doc.querySelectorAll('.sub-row[data-sub]')].map((node) => node.dataset.sub),
       subOut: doc.querySelectorAll('.sub-row.sub-out').length,
       avgLineY: (() => {
@@ -416,6 +447,23 @@ const run = async (page) => {
       await new Promise((resolve) => setTimeout(resolve, 500));
     },
     drawRate: async (ms = 600) => Number(JSON.parse(await browser(['eval', `window.__drawRate(${ms})`]))),
+    click: async (selector) => Boolean(JSON.parse(await browser(['eval', `window.__click(${JSON.stringify(selector)})`]))),
+    wheel: async (selector, deltaY) => {
+      const done = Boolean(JSON.parse(await browser(['eval', `window.__wheel(${JSON.stringify(selector)}, ${deltaY})`])));
+      await new Promise((resolve) => setTimeout(resolve, 120));
+      return done;
+    },
+    hoverPeak: async () => {
+      const done = Boolean(JSON.parse(await browser(['eval', 'window.__hoverPeak()'])));
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      return done;
+    },
+    hoverAt: async (selector, x, y) => {
+      const done = Boolean(JSON.parse(await browser(['eval', `window.__hoverAt(${JSON.stringify(selector)}, ${x}, ${y})`])));
+      await new Promise((resolve) => setTimeout(resolve, 120));
+      return done;
+    },
+    wait: async (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
     delay: async (ms) => {
       await browser(['eval', `window.__delayMs = ${ms}`]);
     },
@@ -1325,6 +1373,74 @@ try {
     'UI-30 a cold read says from history',
     historyUi.totalsSource === 'from history',
     String(historyUi.totalsSource),
+  );
+
+  // The long series the zoom needs: one value per second for five minutes.
+  const longSeries = {
+    t0: Date.now() - 300_000,
+    step: 1_000,
+    v: Array.from({ length: 300 }, (_, index) => 20 + (index % 7) * 3),
+  };
+  await panel.set(state({ seriesLong: longSeries }));
+  const atRest = await panel.read();
+  check('UI-34 the live chart starts on the 60 s window', atRest.axisFrom === '60 s ago', String(atRest.axisFrom));
+  await panel.wheel('[data-chart="live"]', 120);
+  const zoomed = await panel.read();
+  check('UI-34 the wheel widens the live chart', zoomed.axisFrom === '2 min ago', String(zoomed.axisFrom));
+  await panel.wheel('[data-chart="live"]', 120);
+  const widest = await panel.read();
+  check(
+    'UI-34 it widens to five minutes and draws the coarse series',
+    widest.axisFrom === '5 min ago' && Boolean(widest.livePathD),
+    `${widest.axisFrom} d=${String(widest.livePathD).slice(0, 24)}`,
+  );
+  await panel.wheel('[data-chart="live"]', -120);
+  const back = await panel.read();
+  check('UI-34 the wheel narrows it again', back.axisFrom === '2 min ago', String(back.axisFrom));
+  await panel.wait(4_600);
+  const reset = await panel.read();
+  check('UI-34 it eases back to 60 s on its own', reset.axisFrom === '60 s ago', String(reset.axisFrom));
+
+  const manySteps = Array.from({ length: 150 }, (_, index) => ({
+    at: Date.now() - (150 - index) * 1_000,
+    cost: 0,
+    ms: 900,
+    tokens: 60 + (index % 5) * 10,
+    tps: 60 + (index % 5) * 10,
+    aborted: false,
+  }));
+  await panel.set(state({ steps: manySteps, stepsKnown: manySteps.length, stepsSeq: 9 }));
+  const manyBars = await panel.read();
+  await panel.wheel('[data-chart="steps"]', -120);
+  const fewBars = await panel.read();
+  check(
+    'UI-35 the per-step chart zooms in to the last 100 steps',
+    manyBars.bars === 150 && fewBars.bars === 100,
+    `${manyBars.bars} then ${fewBars.bars} bars`,
+  );
+  await panel.wait(4_600);
+  const barsBack = await panel.read();
+  check('UI-35 it comes back to every step on its own', barsBack.bars === 150, `${barsBack.bars} bars`);
+
+  await panel.set(state({ status: 'streaming', steps: manySteps, stepsKnown: manySteps.length, stepsSeq: 9 }));
+  await panel.click('.foot-ceiling');
+  const turnMode = await panel.read();
+  check(
+    'UI-36 the ceiling can follow this turn instead of the session',
+    turnMode.ceilingChip === 'turn peak' && /turn peak/.test(turnMode.text),
+    `${turnMode.ceilingChip} · ${turnMode.text.slice(0, 70)}`,
+  );
+  await panel.click('.foot-ceiling');
+
+  await panel.click('.foot-png');
+  await panel.wait(600);
+  const saving = await panel.read();
+  await panel.wait(1_800);
+  const shot = await panel.read();
+  check(
+    'UI-37 the panel saves itself as a PNG',
+    saving.pngChip === 'saved' && shot.pngChip === 'PNG' && !/failed/i.test(shot.pngTitle ?? ''),
+    `${saving.pngChip} then ${shot.pngChip}, title=${String(shot.pngTitle).slice(0, 60)}`,
   );
 
   await panel.set(state({ stream: { state: 'retrying', error: 'socket closed' } }));

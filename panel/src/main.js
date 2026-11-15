@@ -1,6 +1,7 @@
 import { HostRequestError, connectHost } from '@openchamber/sdk';
 import { applyHostReady, mountBanner, mountEmpty } from '@openchamber/sdk/ui';
-import { compact, duration, seconds } from '../../shared/summary.js';
+import { compact, duration, percent, seconds } from '../../shared/summary.js';
+import { capturePng, downloadBlob } from './screenshot.js';
 import { easeToward, seriesPoints, smoothPath } from '../../shared/chart.js';
 import { dotState, mountCells, paintCells } from '../../shared/cells.js';
 import { el } from '../../shared/dom.js';
@@ -31,11 +32,30 @@ let streamingNow = false;
 let lastTier = '';
 let modelLabel = '';
 let liveHoverX = null;
-// How much history the live chart draws. Zoom (wheel) widens this; the service
-// keeps enough samples to fill it.
+// How much history the live chart draws. The wheel widens it; the service keeps
+// a coarse five-minute series beside the 60 s one so there is something to show.
+const LIVE_LEVELS = [60_000, 120_000, 300_000];
 let liveWindowMs = 60_000;
+let liveLevel = 0;
+// When the reader stops zooming, the chart goes back on its own: a zoomed-out
+// graph left behind is a graph read as if it were the default.
+const ZOOM_RESET_MS = 4_000;
+const ZOOM_EASE_MS = 260;
+let zoomResetAt = 0;
+let zoomAnim = null;
+// Per step zooms the other way: bars are thinned, not widened.
+const STEP_LEVELS = [null, 100, 25];
+let stepLimit = 0;
+let stepResetAt = 0;
+let peakLineY = null;
+let peakHover = false;
+// The chart's ceiling is the session's best step by default; the other mode
+// scales to this turn, which is what a long session needs to stay readable.
+let ceilingMode = 'session';
+let sessionTitle = '';
 let stepHover = null;
 let lastDrawnSteps = null;
+let lastDrawnLimit = null;
 let lastDrawnW = 0;
 let lastDrawnH = 0;
 let lastDrawnHover = null;
@@ -112,7 +132,7 @@ function build() {
         <span class="speed-last last-line"><span class="last-rate"></span><span class="last-rest"></span></span>
       </div>
       <div class="chart-wrap"><svg class="chart" data-chart="live" aria-hidden="true"></svg></div>
-      <div class="axis"><span>60 s ago</span><span class="axis-peak"></span><span>now</span></div>
+      <div class="axis"><span class="axis-from">60 s ago</span><span class="axis-peak"></span><span>now</span></div>
     </section>
 
     <section class="block subagents" hidden>
@@ -143,7 +163,15 @@ function build() {
       <div class="legend" hidden><span><i class="swatch main"></i>session</span><span><i class="swatch sub"></i>subagent</span></div>
     </section>
 
-    <div class="foot"><span class="foot-text">reading OpenCode usage</span><span class="foot-clock"></span></div>
+    <div class="foot">
+      <span class="foot-text">reading OpenCode usage</span>
+      <span class="foot-actions">
+        <button type="button" class="chip foot-copy" title="this session's numbers as a markdown table">copy stats</button>
+        <button type="button" class="chip foot-ceiling" title="the chart's ceiling: the whole session, or this turn">session peak</button>
+        <button type="button" class="chip foot-png" title="save this panel as a PNG">PNG</button>
+      </span>
+      <span class="foot-clock"></span>
+    </div>
   `;
   root.append(app);
   return {
@@ -157,6 +185,7 @@ function build() {
     lastRest: app.querySelector('.last-rest'),
     live: app.querySelector('[data-chart="live"]'),
     peak: app.querySelector('.axis-peak'),
+    axisFrom: app.querySelector('.axis-from'),
     grid: app.querySelector('.grid'),
     source: app.querySelector('.totals-source'),
     costTotal: app.querySelector('.cost-total'),
@@ -179,6 +208,9 @@ function build() {
     stepsNow: app.querySelector('.steps-now'),
     stepsHover: app.querySelector('.steps-hover'),
     foot: app.querySelector('.foot-text'),
+    footCopy: app.querySelector('.foot-copy'),
+    footCeiling: app.querySelector('.foot-ceiling'),
+    footPng: app.querySelector('.foot-png'),
   };
 }
 
@@ -596,6 +628,50 @@ const placeY = (node, y, width) => {
   node.setAttribute('x2', width);
 };
 
+/** The best step of this turn, 0 when there is no turn to measure. */
+function turnPeakOf(data) {
+  const from = data.turn?.startedAt;
+  if (!from) return 0;
+  let best = 0;
+  for (const step of data.steps ?? []) {
+    if ((step.at ?? 0) >= from && step.tps > best) best = step.tps;
+  }
+  return best;
+}
+
+/** A button that says what it did for a moment, then goes back to its name. */
+function flash(node, text) {
+  if (!node.dataset.label) node.dataset.label = node.textContent;
+  node.textContent = text;
+  setTimeout(() => {
+    if (node.dataset.label) node.textContent = node.dataset.label;
+  }, 1_200);
+}
+
+/** This session's numbers as a markdown table, for a note or a PR. */
+function statsMarkdown(data) {
+  const t = data.totals ?? {};
+  const c = data.cost ?? {};
+  const lines = [
+    `**Token meter — ${sessionTitle || data.session || 'session'}**`,
+    '',
+    '| | |',
+    '|---|---|',
+    `| In | ${compact(t.input)} |`,
+    `| Out | ${compact(t.output)} |`,
+    `| Think | ${compact(t.reasoning)} |`,
+    `| Total out | ${compact((t.output ?? 0) + (t.reasoning ?? 0))} |`,
+    `| Cache | ${compact(t.cacheRead)} |`,
+    `| Cache hit | ${percent(t.cacheHitRate ?? 0, 2)} |`,
+    `| TTFT | ${seconds(data.live?.ttftMs ?? 0) || '—'} |`,
+    `| Consumed | ${compact(t.consumed ?? 0)} |`,
+  ];
+  if (c.rates?.name) lines.push(`| Model | ${c.rates.name} |`);
+  if (c.mode === 'api' && typeof c.total === 'number') lines.push(`| API value | $${c.total.toFixed(4)} |`);
+  if (typeof c.billed?.total === 'number') lines.push(`| Billed | $${c.billed.total.toFixed(4)} |`);
+  return lines.join('\n');
+}
+
 function drawLive(data) {
   const svg = ui.live;
   const width = Math.max(140, svg.clientWidth || 300);
@@ -603,9 +679,14 @@ function drawLive(data) {
   const pad = 8;
   svg.setAttribute('viewBox', `0 0 ${width} ${height}`);
   const nodes = ensureLive(svg, width, height, pad);
-  const series = Array.isArray(data.points) ? data.points : [];
+  const wide = liveWindowMs > LIVE_LEVELS[0] && Array.isArray(data.pointsLong);
+  const series = Array.isArray(wide ? data.pointsLong : data.points) ? (wide ? data.pointsLong : data.points) : [];
   const now = projectedNow(data);
   const from = now - liveWindowMs;
+  const seconds = Math.round(liveWindowMs / 1_000);
+  // The default window reads as "60 s ago", not "1 min ago": it is the label
+  // the panel has always shown, and one minute is exactly what it means.
+  ui.axisFrom.textContent = seconds > 60 ? `${Math.round(seconds / 60)} min ago` : `${seconds} s ago`;
   const visible = series.filter((point) => point.t >= from && point.t <= now);
   const peakValue = visible.reduce((max, point) => Math.max(max, point.v), 0);
   // References drawn on the chart: the session's average and its best step,
@@ -631,7 +712,9 @@ function drawLive(data) {
   // live estimate is allowed to exceed the best finished step, and that sample
   // must not be drawn above the plot. The 8 t/s floor is for an empty window,
   // where every value on the axis would otherwise be zero.
-  const max = Math.max(8, rates.peak, liveTop);
+  const turnPeak = ceilingMode === 'turn' ? turnPeakOf(data) : 0;
+  const ceilingPeak = ceilingMode === 'turn' && turnPeak > 0 ? turnPeak : rates.peak;
+  const max = Math.max(8, ceilingPeak, liveTop);
   const share = (value) => Math.min(1, Math.max(0, value) / max);
   const lineY = (value) => height - pad - share(value) * (height - pad * 2);
   const xOf = (point) => ((point.t - from) / liveWindowMs) * width;
@@ -674,11 +757,12 @@ function drawLive(data) {
     showPart(nodes['avg-label'], false);
   }
 
-  if (rates.peak > 0) {
-    const y = lineY(rates.peak);
+  if (ceilingPeak > 0) {
+    const y = lineY(ceilingPeak);
+    peakLineY = y;
     // How old the best step is: the scale is pinned to it, so "peak 337" beside
     // a 20 t/s stream needs the date to make sense.
-    const age = rates.peakAt ? duration(now - rates.peakAt) : '';
+    const age = rates.peakAt && ceilingMode === 'session' ? duration(now - rates.peakAt) : '';
     // Keep the labels apart when the lines are close. Above the average label
     // when there is room, so the peak label stays beside its own (higher) line;
     // on the top edge, stack it below instead of clipping it.
@@ -689,11 +773,12 @@ function drawLive(data) {
     }
     if (labelY > height - 2) labelY = (avgLabelY ?? labelY) - 13;
     placeY(nodes.peak, y, width);
-    nodes['peak-label'].textContent = `peak ${Math.round(rates.peak)} t/s${age ? ` · ${age} ago` : ''}`;
+    nodes['peak-label'].textContent = `${ceilingMode === 'turn' ? 'turn peak' : 'peak'} ${Math.round(ceilingPeak)} t/s${age ? ` · ${age} ago` : ''}`;
     nodes['peak-label'].setAttribute('y', labelY.toFixed(1));
     showPart(nodes.peak, true);
     showPart(nodes['peak-label'], true);
   } else {
+    peakLineY = null;
     showPart(nodes.peak, false);
     showPart(nodes['peak-label'], false);
   }
@@ -755,11 +840,20 @@ function drawLive(data) {
     showPart(nodes.baseline, true);
   }
 
-  ui.peak.textContent = hovered
-    ? `${Math.round(hovered.value)} t/s · ${Math.max(0, Math.round((now - hovered.at) / 1_000))} s ago`
-    : peakValue > 0
-      ? `live peak ${compact(peakValue)} t/s`
-      : '';
+  if (peakHover && ceilingPeak > 0) {
+    // The line's own step: the label above it already carries the age, this
+    // adds the shape of the step that set the ceiling.
+    const step = (data.steps ?? []).find((item) => Math.abs(item.tps - ceilingPeak) < 0.05);
+    ui.peak.textContent = step
+      ? `peak ${Math.round(ceilingPeak)} t/s · ${compact(step.tokens)} tok in ${seconds(step.ms)}${step.sub ? ' · subagent' : ''}`
+      : `peak ${Math.round(ceilingPeak)} t/s`;
+  } else {
+    ui.peak.textContent = hovered
+      ? `${Math.round(hovered.value)} t/s · ${Math.max(0, Math.round((now - hovered.at) / 1_000))} s ago`
+      : peakValue > 0
+        ? `live peak ${compact(peakValue)} t/s`
+        : '';
+  }
 }
 
 /**
@@ -783,7 +877,10 @@ function drawSteps(data) {
   const pad = 6;
   svg.setAttribute('viewBox', `0 0 ${width} ${height}`);
   const all = Array.isArray(data.steps) ? data.steps : [];
-  const steps = all.filter((step) => step.tps && step.tps > 0 && !step.aborted);
+  const rated = all.filter((step) => step.tps && step.tps > 0 && !step.aborted);
+  // Zooming in here means drawing fewer bars, never fewer numbers in the header.
+  const limit = STEP_LEVELS[stepLimit];
+  const steps = limit ? rated.slice(-limit) : rated;
   // The count is every step the session and its subagents ran, not only the
   // bars the meter can draw or rate.
   const known = data.stepsKnown ?? all.length;
@@ -793,7 +890,9 @@ function drawSteps(data) {
       ? 'history is partial; the count is a lower bound'
       : known > all.length
         ? `the last ${all.length} steps are drawn`
-        : 'every step the meter keeps';
+        : limit
+          ? `zoomed in: the last ${limit} of ${all.length} steps are drawn`
+          : 'every step the meter keeps';
   // A list that shrank under the pointer has no bar at that index any more.
   if (stepHover !== null && stepHover >= steps.length) stepHover = null;
   const hover = stepHover;
@@ -805,8 +904,9 @@ function drawSteps(data) {
     ui.stepsHover.textContent = '';
     drawnSteps = [];
     drawnSlot = 0;
-    if (data.steps === lastDrawnSteps && width === lastDrawnW && height === lastDrawnH) return;
+    if (data.steps === lastDrawnSteps && limit === lastDrawnLimit && width === lastDrawnW && height === lastDrawnH) return;
     lastDrawnSteps = data.steps;
+    lastDrawnLimit = limit;
     lastDrawnW = width;
     lastDrawnH = height;
     lastDrawnHover = null;
@@ -854,8 +954,9 @@ function drawSteps(data) {
   // Nothing changed: keep the bars, and with them the column the pointer is
   // reading. This runs four times a second and rebuilding a thousand rects each
   // time was the most expensive thing on the page.
-  if (data.steps === lastDrawnSteps && width === lastDrawnW && height === lastDrawnH && hover === lastDrawnHover) return;
+  if (data.steps === lastDrawnSteps && limit === lastDrawnLimit && width === lastDrawnW && height === lastDrawnH && hover === lastDrawnHover) return;
   lastDrawnSteps = data.steps;
+  lastDrawnLimit = limit;
   lastDrawnW = width;
   lastDrawnH = height;
   lastDrawnHover = hover;
@@ -1180,6 +1281,14 @@ async function poll() {
     // Expanded once here: drawLive runs twelve times a second, and rebuilding
     // 240 objects per frame was pure garbage for the collector to sweep.
     data.points = seriesPoints(data);
+    // The coarse series has no per-point offsets: a fixed one-second grid is
+    // what it is, and sending 300 offsets for it would be pure wire.
+    data.pointsLong = Array.isArray(data.seriesLong?.v)
+      ? data.seriesLong.v.map((value, index) => ({
+          t: data.seriesLong.t0 + index * (data.seriesLong.step || 1_000),
+          v: value,
+        }))
+      : null;
     current = data;
     receivedAt = performance.now();
     failures = 0;
@@ -1212,12 +1321,79 @@ host.onReady((ctx) => {
     // takes a second to open, cannot be styled and cannot hold the whole
     // readout. Both handlers stay attached for the life of the frame.
     ui.live.addEventListener('pointermove', (event) => {
-      liveHoverX = event.clientX - ui.live.getBoundingClientRect().left;
+      const rect = ui.live.getBoundingClientRect();
+      liveHoverX = event.clientX - rect.left;
+      // A few pixels around the ceiling line read out the step behind it: the
+      // label gives the age, this gives the step that set it.
+      peakHover = peakLineY !== null && Math.abs(event.clientY - rect.top - peakLineY) < 6;
       if (current) drawLive(current);
     });
     ui.live.addEventListener('pointerleave', () => {
       liveHoverX = null;
+      peakHover = false;
       if (current) drawLive(current);
+    });
+    // The wheel widens the live window and thins the step bars. Both are
+    // temporary views: the reset timer puts them back on its own.
+    ui.live.addEventListener(
+      'wheel',
+      (event) => {
+        if (!current) return;
+        event.preventDefault();
+        const next = event.deltaY > 0 ? Math.min(LIVE_LEVELS.length - 1, liveLevel + 1) : Math.max(0, liveLevel - 1);
+        liveLevel = next;
+        liveWindowMs = LIVE_LEVELS[next];
+        zoomAnim = null;
+        zoomResetAt = performance.now() + ZOOM_RESET_MS;
+        drawLive(current);
+      },
+      { passive: false },
+    );
+    ui.stepsChart.addEventListener(
+      'wheel',
+      (event) => {
+        if (!current) return;
+        event.preventDefault();
+        const next = event.deltaY < 0 ? Math.min(STEP_LEVELS.length - 1, stepLimit + 1) : Math.max(0, stepLimit - 1);
+        if (next === stepLimit) return;
+        stepLimit = next;
+        stepResetAt = performance.now() + ZOOM_RESET_MS;
+        drawSteps(current);
+      },
+      { passive: false },
+    );
+    ui.footCopy.addEventListener('click', async () => {
+      if (!current) return;
+      try {
+        await navigator.clipboard.writeText(statsMarkdown(current));
+        flash(ui.footCopy, 'copied');
+      } catch {
+        flash(ui.footCopy, 'copy failed');
+      }
+    });
+    ui.footCeiling.addEventListener('click', () => {
+      ceilingMode = ceilingMode === 'session' ? 'turn' : 'session';
+      ui.footCeiling.textContent = ceilingMode === 'turn' ? 'turn peak' : 'session peak';
+      if (current) drawLive(current);
+    });
+    // The chip's own name is what it goes back to, so flash() must not capture
+    // the "saving…" it is about to replace.
+    ui.footPng.dataset.label = 'PNG';
+    ui.footCopy.dataset.label = 'copy stats';
+    ui.footPng.addEventListener('click', async () => {
+      ui.footPng.disabled = true;
+      ui.footPng.textContent = 'saving…';
+      try {
+        const { blob } = await capturePng(ui.app, { scale: 2 });
+        const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+        downloadBlob(blob, `token-meter-${current?.session ?? 'session'}-${stamp}.png`);
+        flash(ui.footPng, 'saved');
+      } catch (error) {
+        ui.footPng.title = String(error?.message ?? error);
+        flash(ui.footPng, 'PNG failed');
+      } finally {
+        ui.footPng.disabled = false;
+      }
     });
     ui.stepsChart.addEventListener('pointermove', (event) => {
       if (drawnSteps.length === 0 || !(drawnSlot > 0)) return;
@@ -1249,6 +1425,24 @@ host.onReady((ctx) => {
           lastPaint = stamp;
           drawLive(current);
         }
+        // A zoom eases back to the default once the reader has stopped: the
+        // width is a real number, so it can be animated honestly.
+        const at = performance.now();
+        if (zoomAnim) {
+          const k = Math.min(1, (at - zoomAnim.startedAt) / ZOOM_EASE_MS);
+          liveWindowMs = zoomAnim.from + (zoomAnim.to - zoomAnim.from) * (1 - (1 - k) ** 3);
+          if (current) drawLive(current);
+          if (k >= 1) {
+            zoomAnim = null;
+            liveLevel = 0;
+          }
+        } else if (liveLevel > 0 && at > zoomResetAt) {
+          zoomAnim = { from: liveWindowMs, startedAt: at, to: LIVE_LEVELS[0] };
+        }
+        if (stepLimit > 0 && at > stepResetAt) {
+          stepLimit = 0;
+          if (current) drawSteps(current);
+        }
       }
       requestAnimationFrame(paint);
     };
@@ -1266,6 +1460,8 @@ host.onReady((ctx) => {
     }
   }
   const model = ctx.session?.model;
+  sessionTitle = typeof ctx.session?.title === 'string' ? ctx.session.title : '';
+  ui.eyebrow.title = sessionTitle || '';
   modelLabel = typeof model === 'string' ? model.replace(/^.*\//, '') : typeof model?.name === 'string' ? model.name : '';
   ui.eyebrow.textContent = modelLabel;
   const nextSession = ctx.session?.id ?? null;
@@ -1285,6 +1481,10 @@ host.onReady((ctx) => {
   delete ui.lastRate.dataset.tier;
   lastSteps = [];
   lastStepsSeq = -1;
+  liveLevel = 0;
+  liveWindowMs = LIVE_LEVELS[0];
+  zoomAnim = null;
+  stepLimit = 0;
   // The drawn chart belongs to the session that left: force the empty one.
   lastDrawnSteps = null;
   stepHover = null;

@@ -967,6 +967,58 @@ check(
   JSON.stringify(peakAgeSnap.rates),
 );
 
+// The live series stops at 60 s. The coarse ring behind it keeps five minutes as
+// one average per second, so the panel can zoom out without 1200 samples on the
+// wire; the frame places values on index × step, so no offsets travel.
+const longRun = createCollector('ses_series_long');
+const longAt = Date.UTC(2026, 10, 15, 9, 0, 0); // a whole second
+applyEvent(longRun, { created: longAt, data: { sessionID: longRun.id }, type: 'session.execution.started' });
+applyEvent(longRun, {
+  created: longAt,
+  data: { assistantMessageID: 'msg_long', sessionID: longRun.id, started: longAt },
+  type: 'session.step.started',
+});
+const longSamples = [];
+// 400 s in 250 ms steps: four samples a second, 401 buckets, so the ring caps.
+for (let index = 0; index <= 1600; index += 1) {
+  const t = longAt + index * 250;
+  applyEvent(longRun, {
+    created: t,
+    data: { assistantMessageID: 'msg_long', delta: 'x'.repeat(40 + (index % 7) * 10), ordinal: 0, sessionID: longRun.id },
+    type: 'session.text.delta',
+  });
+  longSamples.push({ t, v: Math.round(tick(longRun, t) * 10) / 10 });
+}
+// The average the ring should hold, worked out from the samples it was handed.
+const longBuckets = [];
+for (const sample of longSamples) {
+  const t = sample.t - (sample.t % 1000);
+  const bucket = longBuckets[longBuckets.length - 1];
+  if (bucket && bucket.t === t) {
+    bucket.sum += sample.v;
+    bucket.n += 1;
+  } else {
+    longBuckets.push({ n: 1, sum: sample.v, t });
+  }
+}
+const keptBuckets = longBuckets.slice(-300);
+const longSnap = snapshot(longRun, longAt + 400_000).seriesLong;
+// A minute of samples is the live series' own window: the coarse one stays off
+// the wire until it says more than the 240 points already there.
+const shortRun = createCollector('ses_series_short');
+for (let index = 0; index < 240; index += 1) tick(shortRun, longAt + index * 250);
+const shortSnap = snapshot(shortRun, longAt + 60_000);
+check(
+  'SN-21 the coarse series keeps five minutes of one-second averages',
+  longSnap?.step === 1000 &&
+    longSnap.v.length === 300 &&
+    longSnap.t0 === keptBuckets[0].t &&
+    longSnap.v.at(-1) === longSamples.at(-1).v &&
+    longSnap.v.every((value, index) => value === Math.round((keptBuckets[index].sum / keptBuckets[index].n) * 10) / 10) &&
+    shortSnap.seriesLong === undefined,
+  `${longSnap?.v.length} of ${longBuckets.length} buckets kept, t0 +${longSnap ? (longSnap.t0 - longAt) / 1000 : '?'} s, 60 s ${shortSnap.seriesLong === undefined ? 'omitted' : 'sent'}`,
+);
+
 // A subagent whose history is longer than the kept list still counts in full.
 const knownRun = createCollector('ses_known_test');
 knownRun.knownSteps = 450;

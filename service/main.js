@@ -439,7 +439,10 @@ var HISTORY_PAGES = 20;
 var HISTORY_PAGE_SIZE = 100;
 var MAX_STEPS = 1000;
 var SERIES_POINTS = 240;
+var LONG_POINTS = 300;
+var LONG_MIN_POINTS = 61;
 var SERIES_INTERVAL_MS = 250;
+var LONG_BUCKET_MS = 1000;
 var LIVE_WINDOW_MS = 3000;
 var DEFAULT_CHARS_PER_TOKEN = 0.28;
 var TOOL_CHARS_MAX = 200;
@@ -503,6 +506,7 @@ function createCollector(id) {
     stepsSeq: 0,
     knownSteps: 0,
     series: [],
+    seriesLong: [],
     chars: [],
     charsPerToken: DEFAULT_CHARS_PER_TOKEN,
     stream: null,
@@ -964,14 +968,29 @@ function memberRate(collector, now) {
     return 0;
   return charsInWindow(collector, now) / (LIVE_WINDOW_MS / 1000) * collector.charsPerToken;
 }
+function addLongBucket(collector, now, value) {
+  const t = now - now % LONG_BUCKET_MS;
+  const last = collector.seriesLong[collector.seriesLong.length - 1];
+  if (last && last.t === t) {
+    last.sum += value;
+    last.n += 1;
+    return;
+  }
+  collector.seriesLong.push({ t, sum: value, n: 1 });
+  if (collector.seriesLong.length > LONG_POINTS) {
+    collector.seriesLong.splice(0, collector.seriesLong.length - LONG_POINTS);
+  }
+}
 function tick(collector, now = Date.now(), tree = [collector]) {
   const streaming = tree.some((member) => member.status === "streaming");
   const rate = streaming ? tree.reduce((sum, member) => sum + memberRate(member, now), 0) : 0;
   const last = collector.series[collector.series.length - 1];
   if (!last || now - last.t >= SERIES_INTERVAL_MS) {
-    collector.series.push({ t: now, v: Math.round(rate * 10) / 10 });
+    const value = Math.round(rate * 10) / 10;
+    collector.series.push({ t: now, v: value });
     if (collector.series.length > SERIES_POINTS)
       collector.series.splice(0, collector.series.length - SERIES_POINTS);
+    addLongBucket(collector, now, value);
   }
   return rate;
 }
@@ -1234,6 +1253,7 @@ function snapshot(collector, now = Date.now(), tree = [collector], priceBook = n
   };
   const series = collector.series.slice(-SERIES_POINTS);
   const seriesT0 = series.length ? series[0].t : now;
+  const longSeries = collector.seriesLong.length >= LONG_MIN_POINTS ? collector.seriesLong : null;
   return {
     ok: true,
     session: collector.id,
@@ -1350,6 +1370,13 @@ function snapshot(collector, now = Date.now(), tree = [collector], priceBook = n
       d: series.map((point) => point.t - seriesT0),
       v: series.map((point) => point.v)
     },
+    ...longSeries ? {
+      seriesLong: {
+        t0: longSeries[0].t,
+        step: LONG_BUCKET_MS,
+        v: longSeries.map((bucket) => Math.round(bucket.sum / bucket.n * 10) / 10)
+      }
+    } : {},
     stepsSeq: members.reduce((sum, member) => sum + member.stepsSeq, 0),
     steps: wire,
     stepsFrom: shownSteps[0]?.at ?? null,

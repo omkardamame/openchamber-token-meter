@@ -572,6 +572,28 @@
         font-variant-numeric: tabular-nums;
         white-space: nowrap;
       }
+      .foot-actions {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 4px;
+      }
+      .chip {
+        font: inherit;
+        font-size: 10.5px;
+        color: var(--oc-muted);
+        background: none;
+        border: 1px solid var(--oc-border);
+        border-radius: 999px;
+        padding: 0 6px;
+        cursor: pointer;
+      }
+      .chip:hover {
+        color: var(--oc-fg);
+      }
+      .chip:disabled {
+        opacity: 0.6;
+        cursor: default;
+      }
     </style>
   </head>
   <body>
