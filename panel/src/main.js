@@ -269,6 +269,20 @@ function clock(ms) {
     .join(':');
 }
 
+const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
+/**
+ * A day and a time, in that order: a step chart can span midnight, and an hour
+ * on its own then names two different bars. Built by hand rather than by locale
+ * so the axis reads the same width everywhere.
+ */
+function dateClock(ms) {
+  const at = Number(ms);
+  if (!Number.isFinite(at) || at <= 0) return '';
+  const date = new Date(at);
+  return `${date.getDate()} ${MONTHS[date.getMonth()]} ${clock(at)}`;
+}
+
 /**
  * The reader's own clock, in their timezone and their 12/24-hour habit: the
  * locale decides both, so nothing here is configured.
@@ -943,7 +957,7 @@ function stepReadout(step) {
   // In and out apart, in the order the step spent them: a step that read 90k
   // and wrote 2k is a different animal from one that read 2k and wrote 90k.
   let text = `${Math.round(step.tps)} t/s${Number.isFinite(step.in) ? ` · in ${compact(step.in)}` : ''} · out ${compact(step.tokens)} in ${seconds(step.ms)}`;
-  const at = clock(step.at);
+  const at = dateClock(step.at);
   if (at) text += ` · ${at}`;
   if (step.cost > 0) text += ` · ${money4(step.cost)}`;
   if (step.sub) text += ' · subagent';
@@ -1011,9 +1025,9 @@ function drawSteps(data) {
   }
   ui.stepsAxis.hidden = false;
   const firstDrawn = steps[0]?.at ?? data.stepsFrom;
-  ui.stepsStart.textContent = firstDrawn ? `start ${clock(firstDrawn)}` : '';
+  ui.stepsStart.textContent = firstDrawn ? `start ${dateClock(firstDrawn)}` : '';
   ui.stepsStart.title = 'the first step on the chart';
-  ui.stepsNow.textContent = `now ${clock(Date.now())}`;
+  ui.stepsNow.textContent = `now ${dateClock(Date.now())}`;
   ui.stepsNow.title = 'the current time';
   // Tokens over stream time across the bars on screen: the green line and the
   // label describe the same steps the chart draws.

@@ -646,7 +646,7 @@ try {
   check('panel colours the peak red', idle.stepsPeakColor === 'rgb(239, 68, 68)', String(idle.stepsPeakColor));
   check(
     'panel shows the steps start and current time',
-    /start \d\d:\d\d:\d\d/.test(idle.stepsAxisText ?? '') && /now \d\d:\d\d:\d\d/.test(idle.stepsAxisText ?? ''),
+    /start \d{1,2} [A-Z][a-z]{2} \d\d:\d\d:\d\d/.test(idle.stepsAxisText ?? '') && /now \d{1,2} [A-Z][a-z]{2} \d\d:\d\d:\d\d/.test(idle.stepsAxisText ?? ''),
     String(idle.stepsAxisText),
   );
   check('panel sets Consumed to the same size as the other stats', idle.consumedFont === idle.inFont, `${idle.consumedFont}/${idle.inFont}`);
@@ -1168,7 +1168,7 @@ try {
   check('panel counts both bars while one is hovered', stepHover.bars === 2, `${stepHover.bars} bars`);
   check(
     'panel reads the hovered step under the pointer',
-    /^180 t\/s · out 900 in 5\.0 s · \d\d:\d\d:\d\d · \$0\.0034$/.test(stepHover.stepsHoverText ?? ''),
+    /^180 t\/s · out 900 in 5\.0 s · \d{1,2} [A-Z][a-z]{2} \d\d:\d\d:\d\d · \$0\.0034$/.test(stepHover.stepsHoverText ?? ''),
     String(stepHover.stepsHoverText),
   );
   check(
@@ -1183,8 +1183,8 @@ try {
     stepLeft.stepsHoverHidden === true &&
       stepLeft.stepsStartHidden === false &&
       stepLeft.stepsNowHidden === false &&
-      /start \d\d:\d\d:\d\d/.test(stepLeft.stepsAxisText ?? '') &&
-      /now \d\d:\d\d:\d\d/.test(stepLeft.stepsAxisText ?? ''),
+      /start \d{1,2} [A-Z][a-z]{2} \d\d:\d\d:\d\d/.test(stepLeft.stepsAxisText ?? '') &&
+      /now \d{1,2} [A-Z][a-z]{2} \d\d:\d\d:\d\d/.test(stepLeft.stepsAxisText ?? ''),
     `${stepLeft.stepsHoverHidden}/${stepLeft.stepsStartHidden}/${stepLeft.stepsNowHidden} ${stepLeft.stepsAxisText}`,
   );
   await panel.set(state({ steps: [{ tokens: 900, ms: 5000, tps: 180, aborted: false }] }));
@@ -1488,7 +1488,7 @@ try {
   const readout = await panel.read();
   check(
     'UI-39 the step readout names in and out apart',
-    /^\d+ t\/s · in 4\.[01]k · out \d+ in \d+(\.\d)? (s|ms) · \d\d:\d\d:\d\d( · \$[\d.]+)?$/.test(readout.stepsHoverText ?? ''),
+    /^\d+ t\/s · in 4\.[01]k · out \d+ in \d+(\.\d)? (s|ms) · \d{1,2} [A-Z][a-z]{2} \d\d:\d\d:\d\d( · \$[\d.]+)?$/.test(readout.stepsHoverText ?? ''),
     String(readout.stepsHoverText).slice(0, 90),
   );
   await panel.leave('[data-chart="steps"]');
