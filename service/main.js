@@ -1171,7 +1171,14 @@ function snapshot(collector, now = Date.now(), tree = [collector], priceBook = n
   lastTurnCost = Math.round(lastTurnCost * 1e6) / 1e6;
   const live = collector.series[collector.series.length - 1]?.v ?? 0;
   const streamer = members.find((member) => member.status === "streaming" && member.ttftMs != null);
-  const lastStepRaw = members.reduce((best, member) => member.lastStep && (!best || member.lastStep.at > best.at) ? member.lastStep : best, null);
+  let lastStepRaw = null;
+  let lastStepOwner = null;
+  for (const member of members) {
+    if (member.lastStep && (!lastStepRaw || member.lastStep.at > lastStepRaw.at)) {
+      lastStepRaw = member.lastStep;
+      lastStepOwner = member;
+    }
+  }
   const model = collector.model ?? lastStepRaw?.model ?? null;
   const modelKey = `${collector.provider ?? ""}|${model ?? ""}`;
   let modelCostRates;
@@ -1428,7 +1435,7 @@ function snapshot(collector, now = Date.now(), tree = [collector], priceBook = n
       charsPerSecond: Math.round(members.reduce((sum, member) => sum + (member.status === "streaming" ? charsInWindow(member, now) : 0), 0) / (LIVE_WINDOW_MS / 1000)),
       charsPerToken: Math.round(collector.charsPerToken * 1000) / 1000,
       ttftMs: streamer?.ttftMs ?? collector.ttftMs ?? collector.lastTtftMs ?? lastStepRaw?.ttftMs ?? null,
-      lastStep: lastStepRaw ? { ...lastStepRaw, sub: subOwner.get(lastStepRaw) || undefined } : null,
+      lastStep: lastStepRaw ? { ...lastStepRaw, sub: lastStepOwner && lastStepOwner !== collector ? lastStepOwner.id : undefined } : null,
       subagent: status.subagent,
       estimated: true
     },

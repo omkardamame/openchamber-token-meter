@@ -897,10 +897,18 @@ export function snapshot(collector, now = Date.now(), tree = [collector], priceB
   lastTurnCost = Math.round(lastTurnCost * 1e6) / 1e6;
   const live = collector.series[collector.series.length - 1]?.v ?? 0;
   const streamer = members.find((member) => member.status === 'streaming' && member.ttftMs != null);
-  const lastStepRaw = members.reduce(
-    (best, member) => (member.lastStep && (!best || member.lastStep.at > best.at) ? member.lastStep : best),
-    null,
-  );
+  // The owner travels with the step. Looking it up in the step list missed a
+  // subagent's step the list never held: one with no output (not charted) or a
+  // re-delivered end event, whose object is a copy. Both read as the main
+  // session's.
+  let lastStepRaw = null;
+  let lastStepOwner = null;
+  for (const member of members) {
+    if (member.lastStep && (!lastStepRaw || member.lastStep.at > lastStepRaw.at)) {
+      lastStepRaw = member.lastStep;
+      lastStepOwner = member;
+    }
+  }
   const model = collector.model ?? lastStepRaw?.model ?? null;
   // A least-squares solve over every step is the most expensive thing here, and
   // its inputs are the steps plus the model name, both already keyed above.
@@ -1250,7 +1258,9 @@ export function snapshot(collector, now = Date.now(), tree = [collector], priceB
       // between steps the cell holds the last measured first-token wait instead
       // of blinking to a dash.
       ttftMs: streamer?.ttftMs ?? collector.ttftMs ?? collector.lastTtftMs ?? lastStepRaw?.ttftMs ?? null,
-      lastStep: lastStepRaw ? { ...lastStepRaw, sub: subOwner.get(lastStepRaw) || undefined } : null,
+      lastStep: lastStepRaw
+        ? { ...lastStepRaw, sub: lastStepOwner && lastStepOwner !== collector ? lastStepOwner.id : undefined }
+        : null,
       subagent: status.subagent,
       estimated: true,
     },

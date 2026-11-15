@@ -322,6 +322,28 @@ check(
     typeof afterChildStep.live.lastStep?.sub === 'string',
   JSON.stringify(afterChildStep.steps.at(-1)),
 );
+// The owner of the last step is the member that ended it, even when the step
+// never reached the chart's list: a step with no output is not charted, and a
+// re-delivered end event is a copy of one that is. Both read as "main" before.
+{
+  const ownerRoot = createCollector('ses_owner_root');
+  const ownerChild = createCollector('ses_owner_child');
+  ownerChild.parentId = ownerRoot.id;
+  const at = Date.now();
+  applyEvent(ownerRoot, { type: 'session.step.ended', created: at - 9_000, data: { sessionID: ownerRoot.id, assistantMessageID: 'msg_r', tokens: { input: 10, output: 50 } } });
+  applyEvent(ownerChild, { type: 'session.step.ended', created: at - 1_000, data: { sessionID: ownerChild.id, assistantMessageID: 'msg_empty', tokens: { input: 900, output: 0 }, error: { type: 'aborted' } } });
+  const empty = snapshot(ownerRoot, at, [ownerRoot, ownerChild]);
+  const again = { type: 'session.step.ended', created: at - 500, data: { sessionID: ownerChild.id, assistantMessageID: 'msg_twice', tokens: { input: 5, output: 40 } } };
+  applyEvent(ownerChild, again);
+  applyEvent(ownerChild, again);
+  const twice = snapshot(ownerRoot, at, [ownerRoot, ownerChild]);
+  const own = snapshot(ownerRoot, at, [ownerRoot]);
+  check(
+    'the last step names its subagent even when the chart never held it',
+    empty.live.lastStep?.sub === ownerChild.id && twice.live.lastStep?.sub === ownerChild.id && own.live.lastStep?.sub === undefined,
+    `${empty.live.lastStep?.sub} · ${twice.live.lastStep?.sub} · ${own.live.lastStep?.sub}`,
+  );
+}
 check(
   'the step sequence sums the tree so the client refetches the list',
   afterChildStep.stepsSeq === treeParent.stepsSeq + treeChild.stepsSeq,
