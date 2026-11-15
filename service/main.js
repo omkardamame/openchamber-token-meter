@@ -972,6 +972,8 @@ function memberRate(collector, now) {
 function addLongBucket(collector, now, value) {
   const t = now - now % LONG_BUCKET_MS;
   const last = collector.seriesLong[collector.seriesLong.length - 1];
+  if (last && last.t > t)
+    return;
   if (last && last.t === t) {
     last.sum += value;
     last.n += 1;
@@ -1110,7 +1112,7 @@ function snapshot(collector, now = Date.now(), tree = [collector], priceBook = n
       rates: ratesOf(steps2),
       wire: shownSteps2.map((step) => ({
         tokens: step.tokens,
-        in: step.total - step.tokens,
+        in: Math.max(0, (step.total ?? step.tokens) - step.tokens),
         ms: step.ms,
         tps: step.tps,
         aborted: step.aborted,

@@ -647,6 +647,9 @@ function memberRate(collector, now) {
 function addLongBucket(collector, now, value) {
   const t = now - (now % LONG_BUCKET_MS);
   const last = collector.seriesLong[collector.seriesLong.length - 1];
+  // A backwards clock step must not append a second bucket with the same t: the
+  // curve's tangents divide by dx, so one duplicate erases the whole path.
+  if (last && last.t > t) return;
   if (last && last.t === t) {
     last.sum += value;
     last.n += 1;
@@ -816,7 +819,7 @@ export function snapshot(collector, now = Date.now(), tree = [collector], priceB
       // from its own answer object but never sort or cut the array itself.
       wire: shownSteps.map((step) => ({
         tokens: step.tokens,
-        in: step.total - step.tokens,
+        in: Math.max(0, (step.total ?? step.tokens) - step.tokens),
         ms: step.ms,
         tps: step.tps,
         aborted: step.aborted,
@@ -1061,9 +1064,9 @@ export function snapshot(collector, now = Date.now(), tree = [collector], priceB
   // drift, and squeeze that much extra history into the window.
   const series = collector.series.slice(-SERIES_POINTS);
   const seriesT0 = series.length ? series[0].t : now;
-  // The coarse series travels as bare values on a nominal 1 s grid: the frame
-  // places them on index × step, so no per-point offsets go on the wire. Under
-  // a minute it would only repeat the live series, so it is left out.
+  // The coarse series travels as values plus its own offsets: the ticker stops
+  // for a quiet collector, so the buckets are not a contiguous grid. Under a
+  // minute it would only repeat the live series, so it is left out.
   const longSeries = collector.seriesLong.length >= LONG_MIN_POINTS ? collector.seriesLong : null;
   return {
     ok: true,
@@ -1220,8 +1223,8 @@ export function snapshot(collector, now = Date.now(), tree = [collector], priceB
       v: series.map((point) => point.v),
     },
     // The same curve an octave down: one average per second, five minutes at
-    // most, values only. Present once there is more history than the live
-    // series holds.
+    // most, with the offsets its own gaps need. Present once there is more
+    // history than the live series holds.
     ...(longSeries
       ? {
           seriesLong: {

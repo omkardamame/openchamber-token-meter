@@ -74,7 +74,7 @@ const state = (over = {}) =>
       { tokens: 1100, ms: 7800, tps: 141, aborted: false, at: Date.now() - 60_000, cost: 0.0012 },
       { tokens: 900, ms: 5000, tps: 180, aborted: false, at: Date.now() - 30_000, cost: 0.0034 },
     ],
-    turn: { active: false, startedAt: Date.now() - 90_000, tokens: 2000, steps: 2 },
+    turn: { active: false, consumed: 2_000, startedAt: Date.now() - 90_000, steps: 2, tokens: 2000 },
     rates: { avg: 79, peak: 334, peakAt: Date.now() - 8 * 60_000 },
     stream: { state: 'open' },
     loading: false,
@@ -298,6 +298,7 @@ const harness = `<!doctype html><meta charset="utf-8"><title>page test</title>
       lastRateColor: lastStyle ? lastStyle.color : null,
       lastRateShadow: lastStyle ? lastStyle.textShadow : null,
       lastRateText: last ? last.textContent : null,
+      lastRestText: (doc.querySelector('.last-rest') || {}).textContent ?? null,
       stepsAvgSep: doc.querySelector('.steps-avg') ? getComputedStyle(doc.querySelector('.steps-avg'), '::before').content : null,
       stepsPeakSep: doc.querySelector('.steps-peak') ? getComputedStyle(doc.querySelector('.steps-peak'), '::before').content : null,
       stepsAxisText: doc.querySelector('.steps-axis') ? doc.querySelector('.steps-axis').innerText.replace(/\\s+/g, ' ').trim() : null,
@@ -348,6 +349,7 @@ const harness = `<!doctype html><meta charset="utf-8"><title>page test</title>
       footText: (doc.querySelector('.foot-text') || {}).textContent ?? null,
       subsToggle: (doc.querySelector('.subs-toggle') || {}).textContent ?? null,
       subsDetailShown: doc.querySelector('.subs-detail') ? !doc.querySelector('.subs-detail').hidden : null,
+      subsDetailDisplay: doc.querySelector('.subs-detail') ? getComputedStyle(doc.querySelector('.subs-detail')).display : null,
       subsDetailText: (() => {
         const section = doc.querySelector('.subs-detail');
         if (!section) return null;
@@ -1156,7 +1158,7 @@ try {
   check('panel counts both bars while one is hovered', stepHover.bars === 2, `${stepHover.bars} bars`);
   check(
     'panel reads the hovered step under the pointer',
-    /^180 t\/s · in 0 · out 900 in 5\.0 s · \d\d:\d\d:\d\d · \$0\.0034$/.test(stepHover.stepsHoverText ?? ''),
+    /^180 t\/s · out 900 in 5\.0 s · \d\d:\d\d:\d\d · \$0\.0034$/.test(stepHover.stepsHoverText ?? ''),
     String(stepHover.stepsHoverText),
   );
   check(
@@ -1180,7 +1182,7 @@ try {
   const oldStore = await panel.read();
   check(
     'panel reads a step from an older service without a time or a cost',
-    oldStore.stepsHoverText === '180 t/s · in 0 · out 900 in 5.0 s',
+    oldStore.stepsHoverText === '180 t/s · out 900 in 5.0 s',
     String(oldStore.stepsHoverText),
   );
   await panel.leave('[data-chart="steps"]');
@@ -1400,11 +1402,17 @@ try {
   const atRest = await panel.read();
   check('UI-34 the live chart starts on the 60 s window', atRest.axisFrom === '60 s ago', String(atRest.axisFrom));
   await panel.wheel('[data-chart="live"]', 120);
-  const oneNotch = await panel.read();
+  const early = await panel.read();
+  await panel.wait(60);
+  const later = await panel.read();
   check(
-    'UI-34 a wheel notch widens the live chart gradually',
-    oneNotch.axisFrom !== '60 s ago' && Number.parseInt(oneNotch.axisFrom, 10) < 120 && Boolean(oneNotch.livePathD),
-    String(oneNotch.axisFrom),
+    'UI-34 a wheel notch eases out over several frames',
+    /^\d+ s ago$/.test(early.axisFrom ?? '') &&
+      /^\d+ s ago$/.test(later.axisFrom ?? '') &&
+      Number.parseInt(early.axisFrom, 10) > 60 &&
+      Number.parseInt(later.axisFrom, 10) >= Number.parseInt(early.axisFrom, 10) &&
+      Number.parseInt(later.axisFrom, 10) <= 71,
+    `${early.axisFrom} → ${later.axisFrom}`,
   );
   for (let notch = 0; notch < 14; notch += 1) await panel.wheel('[data-chart="live"]', 120);
   const widest = await panel.read();
@@ -1439,7 +1447,7 @@ try {
   const readout = await panel.read();
   check(
     'UI-39 the step readout names in and out apart',
-    /^\d+ t\/s · in \S+ · out \S+ in \d+(\.\d)? (s|ms) · \d\d:\d\d:\d\d( · \$[\d.]+)?$/.test(readout.stepsHoverText ?? ''),
+    /^\d+ t\/s · in 4\.[01]k · out \d+ in \d+(\.\d)? (s|ms) · \d\d:\d\d:\d\d( · \$[\d.]+)?$/.test(readout.stepsHoverText ?? ''),
     String(readout.stepsHoverText).slice(0, 90),
   );
   await panel.leave('[data-chart="steps"]');
@@ -1448,7 +1456,7 @@ try {
   const turnLine = await panel.read();
   check(
     'UI-40 the last line carries the turn’s consumed tokens',
-    /· 5\.5M tok/.test(turnLine.text),
+    /· 5\.5M tok/.test(turnLine.lastRestText ?? ''),
     String(turnLine.text).slice(0, 80),
   );
 
@@ -1470,6 +1478,7 @@ try {
     }),
   );
   const subsClosed = await panel.read();
+  check('UI-41 a closed roster draws nothing', subsClosed.subsDetailDisplay === 'none', String(subsClosed.subsDetailDisplay));
   check('UI-41 the tree count is a chip beside Session details', subsClosed.subsToggle === '2 subagents', String(subsClosed.subsToggle));
   await panel.click('.subs-toggle');
   const subsOpen = await panel.read();

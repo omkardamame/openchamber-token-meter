@@ -156,7 +156,7 @@ function build() {
 
     <section class="block">
       <section class="block subs-detail" hidden>
-        <div class="block-head" title="Every subagent session in this tree"><span>Subagents</span><span class="block-meta subs-detail-meta"></span></div>
+        <div class="block-head" title="Every subagent session in this tree"><span>Subagent sessions</span><span class="block-meta subs-detail-meta"></span></div>
         <div class="subs-detail-list"></div>
       </section>
       <div class="block-head" title="Every step since the session started, not one turn"><span>Session details</span><span class="block-meta totals-source"></span><button type="button" class="chip subs-toggle" hidden></button></div>
@@ -710,7 +710,7 @@ function drawLive(data) {
   const from = now - liveWindowMs;
   const seconds = Math.round(liveWindowMs / 1_000);
   // Seconds up close, minutes once the number would be noise.
-  ui.axisFrom.textContent = seconds >= 120 ? `${Math.round(seconds / 60)} min ago` : `${seconds} s ago`;
+  ui.axisFrom.textContent = seconds >= 120 ? `${Math.floor(seconds / 60)} min ago` : `${seconds} s ago`;
   const visible = series.filter((point) => point.t >= from && point.t <= now);
   const peakValue = visible.reduce((max, point) => Math.max(max, point.v), 0);
   // References drawn on the chart: the session's average and its best step,
@@ -892,7 +892,7 @@ function drawLive(data) {
 function stepReadout(step) {
   // In and out apart, in the order the step spent them: a step that read 90k
   // and wrote 2k is a different animal from one that read 2k and wrote 90k.
-  let text = `${Math.round(step.tps)} t/s · in ${compact(step.in ?? 0)} · out ${compact(step.tokens)} in ${seconds(step.ms)}`;
+  let text = `${Math.round(step.tps)} t/s${Number.isFinite(step.in) ? ` · in ${compact(step.in)}` : ''} · out ${compact(step.tokens)} in ${seconds(step.ms)}`;
   const at = clock(step.at);
   if (at) text += ` · ${at}`;
   if (step.cost > 0) text += ` · ${money4(step.cost)}`;
@@ -911,7 +911,8 @@ function drawSteps(data) {
   // Zooming in here means drawing fewer bars, never fewer numbers in the header.
   stepFull = rated.length;
   if (stepShown === 0) stepShown = rated.length;
-  const limit = stepTarget > 0 ? Math.max(1, Math.round(stepShown)) : 0;
+  const shownBars = Math.min(rated.length, Math.max(1, Math.round(stepShown)));
+  const limit = shownBars >= rated.length ? 0 : shownBars;
   const steps = limit ? rated.slice(-limit) : rated;
   // The count is every step the session and its subagents ran, not only the
   // bars the meter can draw or rate.
@@ -1053,6 +1054,11 @@ function paintSubsDetail(members) {
   const list = Array.isArray(members) ? members : [];
   if (!subsDetailOpen || list.length === 0) {
     ui.subsDetail.hidden = true;
+    if (!subsDetailOpen) {
+      ui.subsDetailList.replaceChildren();
+      ui.subsDetailMeta.textContent = '';
+      subsDetailKey = '';
+    }
     return;
   }
   ui.subsDetail.hidden = false;
@@ -1244,7 +1250,7 @@ function render(data) {
   drawSteps(data);
   paintSubagents(activeSubs, runningSubs, subagents.count ?? 0);
   const members = Array.isArray(subagents.members) ? subagents.members : [];
-  const roster = members.length || (subagents.count ?? 0);
+  const roster = Math.max(members.length, subagents.count ?? 0);
   ui.subsToggle.hidden = roster === 0;
   ui.subsToggle.textContent = `${roster} subagent${roster === 1 ? '' : 's'}`;
   paintSubsDetail(members);
@@ -1252,7 +1258,7 @@ function render(data) {
   const lastStep = data.live?.lastStep;
   // What the turn has consumed so far, not what the last step generated: the
   // line answers "what did this turn cost", and the step answers a different one.
-  const turnConsumed = Number.isFinite(data.turn?.consumed) ? data.turn.consumed : (data.turn?.tokens ?? 0);
+  const turnConsumed = Number.isFinite(data.turn?.consumed) ? data.turn.consumed : null;
   const lastSub = lastStep?.sub ? ' · subagent' : '';
   const lastCost = typeof data.cost?.lastTurn === 'number' ? ` · ${money4(data.cost.lastTurn)}` : '';
   if (lastStep?.tps) {
@@ -1260,12 +1266,12 @@ function render(data) {
     // Classify the digits on screen, exactly like the headline, so a 19.6 t/s
     // step printed as "20" is not coloured as a slow rate.
     ui.lastRate.dataset.tier = speedTier(Math.round(lastStep.tps));
-    ui.lastRest.textContent = ` · ${seconds(lastStep.ms)} · ${compact(turnConsumed)} tok${lastSub}${lastCost}`;
+    ui.lastRest.textContent = ` · ${seconds(lastStep.ms)}${turnConsumed === null ? '' : ` · ${compact(turnConsumed)} tok`}${lastSub}${lastCost}`;
   } else {
     ui.lastRate.textContent = '';
     delete ui.lastRate.dataset.tier;
     ui.lastRest.textContent = lastStep
-      ? `last step ${seconds(lastStep.ms)} · ${compact(lastStep.tokens)} tok · too short to rate${lastSub}${lastCost}`
+      ? `last step ${seconds(lastStep.ms)} · ${compact(turnConsumed)} tok · too short to rate${lastSub}${lastCost}`
       : 'no finished step yet';
   }
 
@@ -1365,8 +1371,8 @@ async function poll() {
     // Expanded once here: drawLive runs twelve times a second, and rebuilding
     // 240 objects per frame was pure garbage for the collector to sweep.
     data.points = seriesPoints(data);
-    // The coarse series has no per-point offsets: a fixed one-second grid is
-    // what it is, and sending 300 offsets for it would be pure wire.
+    // The coarse series carries its own offsets: a quiet collector stops
+    // ticking, so its buckets are not a contiguous grid.
     const long = data.seriesLong;
     data.pointsLong = Array.isArray(long?.v)
       ? long.v.map((value, index) => ({
@@ -1416,6 +1422,7 @@ host.onReady((ctx) => {
     });
     ui.live.addEventListener('pointerleave', () => {
       liveHoverX = null;
+      liveHoverY = null;
       peakHover = false;
       if (current) drawLive(current);
     });
@@ -1427,6 +1434,7 @@ host.onReady((ctx) => {
       (event) => {
         if (!current) return;
         event.preventDefault();
+        liveHovering = true;
         const ratio = event.deltaY > 0 ? ZOOM_STEP : 1 / ZOOM_STEP;
         liveTargetMs = Math.min(ZOOM_MAX_MS, Math.max(ZOOM_MIN_MS, liveTargetMs * ratio));
         zoomResetAt = performance.now() + ZOOM_RESET_MS;
@@ -1445,6 +1453,7 @@ host.onReady((ctx) => {
       (event) => {
         if (!current) return;
         event.preventDefault();
+        stepHovering = true;
         const floor = Math.min(STEP_MIN_BARS, stepFull || STEP_MIN_BARS);
         const from = stepTarget > 0 ? stepTarget : stepFull || floor;
         const next = event.deltaY < 0 ? Math.max(floor, from * 0.8) : Math.min(stepFull || floor, from * 1.25);
@@ -1529,7 +1538,7 @@ host.onReady((ctx) => {
         const at = performance.now();
         if (!liveHovering && liveTargetMs !== ZOOM_MIN_MS && at > zoomResetAt) liveTargetMs = ZOOM_MIN_MS;
         if (liveWindowMs !== liveTargetMs) {
-          const k = 1 - Math.exp(-Math.max(1, stamp - lastPaint) / ZOOM_EASE_MS);
+          const k = 1 - Math.exp(-dt / ZOOM_EASE_MS);
           liveWindowMs += (liveTargetMs - liveWindowMs) * k;
           if (Math.abs(liveTargetMs - liveWindowMs) < 40) liveWindowMs = liveTargetMs;
           if (current) drawLive(current);
@@ -1542,7 +1551,7 @@ host.onReady((ctx) => {
         if (!stepHovering && stepTarget !== 0 && at > stepResetAt) stepTarget = 0;
         const wanted = stepTarget > 0 ? stepTarget : stepFull;
         if (stepFull > 0 && Math.abs(stepShown - wanted) > 0.5) {
-          const k = 1 - Math.exp(-Math.max(1, stamp - lastPaint) / ZOOM_EASE_MS);
+          const k = 1 - Math.exp(-dt / ZOOM_EASE_MS);
           stepShown += (wanted - stepShown) * k;
           if (Math.abs(stepShown - wanted) < 0.5) stepShown = wanted;
           if (current) drawSteps(current);
@@ -1592,7 +1601,11 @@ host.onReady((ctx) => {
   stepFull = 0;
   subsDetailOpen = false;
   subsDetailKey = '';
+  subsDetailHover = false;
   ui.subsDetail.hidden = true;
+  ui.subsDetailList.replaceChildren();
+  ui.subsDetailMeta.textContent = '';
+  ui.subsToggle.hidden = true;
   // The drawn chart belongs to the session that left: force the empty one.
   lastDrawnSteps = null;
   stepHover = null;
