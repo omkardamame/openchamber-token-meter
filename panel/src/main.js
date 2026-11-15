@@ -41,7 +41,9 @@ const ZOOM_STEP = 1.18;
 const ZOOM_EASE_MS = 170;
 // Long enough to read the wider view, short enough that it is a passing look.
 // Hovering the chart holds it; leaving starts the clock again.
-const ZOOM_RESET_MS = 60_000;
+// One minute in use. A page test sets window.__zoomResetMs to watch the reset
+// happen without making every run wait a minute.
+const zoomResetMs = () => Number(window.__zoomResetMs) || 60_000;
 let liveWindowMs = ZOOM_MIN_MS;
 let liveTargetMs = ZOOM_MIN_MS;
 let liveHovering = false;
@@ -58,6 +60,11 @@ let stepResetAt = 0;
 let stepPan = 0;
 let stepDrag = null;
 let peakLineY = null;
+// When the ceiling last rose. A live burst moves it as surely as a finished
+// step does, so the age describes the peak on screen, not the last step.
+let peakSince = 0;
+let peakSinceValue = 0;
+let peakSeeded = false;
 let liveHoverY = null;
 let peakHover = false;
 // The chart's ceiling is the session's best step by default; the other mode
@@ -184,12 +191,12 @@ function build() {
     </section>
 
     <div class="foot">
+      <span class="foot-text">reading OpenCode usage</span>
       <span class="foot-actions">
         <button type="button" class="chip foot-copy" title="this session's numbers as a markdown table">copy stats</button>
         <button type="button" class="chip foot-ceiling" title="the chart's ceiling: the whole session, or this turn">session peak</button>
       </span>
       <span class="foot-clock"></span>
-      <span class="foot-text">reading OpenCode usage</span>
     </div>
   `;
   root.append(app);
@@ -797,10 +804,16 @@ function drawLive(data) {
     peakLineY = y;
     // How old the best step is: the scale is pinned to it, so "peak 337" beside
     // a 20 t/s stream needs the date to make sense.
-    // The age belongs to a finished step; a ceiling that the live curve set has
-    // no step to name.
-    const fromStep = ceilingPeak <= (turnMode ? turnPeak : rates.peak) + 0.05;
-    const age = rates.peakAt && !turnMode && fromStep ? duration(now - rates.peakAt) : '';
+    if (!peakSeeded) {
+      peakSeeded = true;
+      peakSinceValue = ceilingPeak;
+      peakSince = rates.peakAt ?? now;
+    }
+    if (ceilingPeak > peakSinceValue + 0.05) {
+      peakSinceValue = ceilingPeak;
+      peakSince = now;
+    }
+    const age = peakSince ? duration(now - peakSince) : '';
     // Keep the labels apart when the lines are close. Above the average label
     // when there is room, so the peak label stays beside its own (higher) line;
     // on the top edge, stack it below instead of clipping it.
@@ -1123,7 +1136,7 @@ function paintSubsDetail(members) {
   subsDetailKey = key;
   const now = Date.now();
   const nodes = [];
-  for (const item of list.slice(0, 12)) {
+  for (const item of list) {
     const row = el('div', 'sub-detail');
     const head = el('div', 'sub-detail-head');
     const dot = el('i', 'dot');
@@ -1138,7 +1151,6 @@ function paintSubsDetail(members) {
     row.append(head, stats);
     nodes.push(row);
   }
-  if (list.length > 12) nodes.push(el('div', 'sub-detail-stats', `and ${list.length - 12} more`));
   ui.subsDetailList.replaceChildren(...nodes);
 }
 
@@ -1495,7 +1507,7 @@ host.onReady((ctx) => {
         liveHovering = true;
         const ratio = event.deltaY > 0 ? ZOOM_STEP : 1 / ZOOM_STEP;
         liveTargetMs = Math.min(ZOOM_MAX_MS, Math.max(ZOOM_MIN_MS, liveTargetMs * ratio));
-        zoomResetAt = performance.now() + ZOOM_RESET_MS;
+        zoomResetAt = performance.now() + zoomResetMs();
       },
       { passive: false },
     );
@@ -1504,7 +1516,7 @@ host.onReady((ctx) => {
     });
     ui.live.addEventListener('pointerleave', () => {
       liveHovering = false;
-      zoomResetAt = performance.now() + ZOOM_RESET_MS;
+      zoomResetAt = performance.now() + zoomResetMs();
     });
     ui.stepsChart.addEventListener(
       'wheel',
@@ -1516,7 +1528,7 @@ host.onReady((ctx) => {
         const from = stepTarget > 0 ? stepTarget : stepFull || floor;
         const next = event.deltaY < 0 ? Math.max(floor, from * 0.8) : Math.min(stepFull || floor, from * 1.25);
         stepTarget = next >= (stepFull || floor) - 0.5 ? 0 : next;
-        stepResetAt = performance.now() + ZOOM_RESET_MS;
+        stepResetAt = performance.now() + zoomResetMs();
       },
       { passive: false },
     );
@@ -1525,12 +1537,12 @@ host.onReady((ctx) => {
     });
     ui.stepsChart.addEventListener('pointerleave', () => {
       stepHovering = false;
-      stepResetAt = performance.now() + ZOOM_RESET_MS;
+      stepResetAt = performance.now() + zoomResetMs();
     });
     ui.subsToggle.addEventListener('click', () => {
       subsDetailOpen = !subsDetailOpen;
       subsDetailKey = '';
-      subsDetailUntil = performance.now() + ZOOM_RESET_MS;
+      subsDetailUntil = performance.now() + zoomResetMs();
       if (current) paintSubsDetail(current.subagents?.members ?? []);
       if (subsDetailOpen) openSubsDetail();
       else closeSubsDetail();
@@ -1587,7 +1599,7 @@ host.onReady((ctx) => {
     const endDrag = () => {
       if (!stepDrag) return;
       stepDrag = null;
-      stepResetAt = performance.now() + ZOOM_RESET_MS;
+      stepResetAt = performance.now() + zoomResetMs();
     };
     ui.stepsChart.addEventListener('pointerup', endDrag);
     ui.stepsChart.addEventListener('pointercancel', endDrag);
@@ -1693,6 +1705,9 @@ host.onReady((ctx) => {
   liveHoverX = null;
   liveHoverY = null;
   peakHover = false;
+  peakSeeded = false;
+  peakSince = 0;
+  peakSinceValue = 0;
   sessionId = nextSession;
   current = null;
   clearNotice();

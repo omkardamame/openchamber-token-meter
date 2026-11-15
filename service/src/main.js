@@ -39,7 +39,10 @@ const MAX_COLLECTORS = 6;
 const LINEAGE_MS = 30_000;
 const LINEAGE_RETRY_MS = 60_000;
 const LINEAGE_DEPTH = 4;
-const MAX_SUBAGENTS = 40;
+// Every subagent costs one read per lineage pass, so this is a ceiling on
+// requests, not on the tree: 200 covers any real tree and still bounds a run
+// away tree. "Unlimited" would let one session hold the service open.
+const MAX_SUBAGENTS = 200;
 const SUBAGENT_HISTORY_RETRY_MS = 15_000;
 const TICK_MS = 250;
 

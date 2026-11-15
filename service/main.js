@@ -447,7 +447,7 @@ var LIVE_WINDOW_MS = 3000;
 var DEFAULT_CHARS_PER_TOKEN = 0.28;
 var TOOL_CHARS_MAX = 200;
 var SUBAGENT_RANK = { streaming: 0, tool: 1, "waiting-permission": 2, "waiting-question": 2 };
-var ROSTER_CAP = 40;
+var ROSTER_CAP = 200;
 var LIVE_TYPES = new Set([
   "session.execution.started",
   "session.execution.succeeded",
@@ -5624,7 +5624,7 @@ var MAX_COLLECTORS = 6;
 var LINEAGE_MS = 30000;
 var LINEAGE_RETRY_MS = 60000;
 var LINEAGE_DEPTH = 4;
-var MAX_SUBAGENTS = 40;
+var MAX_SUBAGENTS = 200;
 var SUBAGENT_HISTORY_RETRY_MS = 15000;
 var TICK_MS = 250;
 if (!PORT || !TOKEN) {

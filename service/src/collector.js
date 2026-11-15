@@ -25,7 +25,7 @@ const TOOL_CHARS_MAX = 200;
 const SUBAGENT_RANK = { streaming: 0, tool: 1, 'waiting-permission': 2, 'waiting-question': 2 };
 // How many tree members the roster carries. The list is drawn, not scrolled to
 // the end, and a delegating turn can name dozens.
-const ROSTER_CAP = 40;
+const ROSTER_CAP = 200;
 
 export const LIVE_TYPES = new Set([
   'session.execution.started',

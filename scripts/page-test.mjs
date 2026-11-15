@@ -126,6 +126,11 @@ const harness = `<!doctype html><meta charset="utf-8"><title>page test</title>
   });
   window.__delayMs = 0;
   window.__setState = (next) => { window.__state = next; };
+  // The reset is a minute in use; the frame reads this at call time.
+  window.__fastZoomReset = (ms) => {
+    document.getElementById('f').contentWindow.__zoomResetMs = ms;
+    return true;
+  };
   window.__click = (selector) => {
     const node = document.getElementById('f').contentDocument.querySelector(selector);
     if (!node) return false;
@@ -460,6 +465,10 @@ const run = async (page) => {
       await new Promise((resolve) => setTimeout(resolve, 500));
     },
     drawRate: async (ms = 600) => Number(JSON.parse(await browser(['eval', `window.__drawRate(${ms})`]))),
+    fastZoomReset: async (ms) => {
+      const done = Boolean(JSON.parse(await browser(['eval', `window.__fastZoomReset(${ms})`])));
+      return done;
+    },
     click: async (selector) => Boolean(JSON.parse(await browser(['eval', `window.__click(${JSON.stringify(selector)})`]))),
     wheel: async (selector, deltaY) => {
       const done = Boolean(JSON.parse(await browser(['eval', `window.__wheel(${JSON.stringify(selector)}, ${deltaY})`])));
@@ -1429,6 +1438,20 @@ try {
   for (let notch = 0; notch < 16; notch += 1) await panel.wheel('[data-chart="live"]', -120);
   const closest = await panel.read();
   check('UI-34 the wheel narrows it back to the floor', closest.axisFrom === '60 s ago', String(closest.axisFrom));
+  // The reset path itself, with its minute shortened to what a test can wait.
+  await panel.fastZoomReset(400);
+  await panel.wheel('[data-chart="live"]', 120);
+  const armed = await panel.read();
+  // The reset waits for the pointer to leave: that is what "not hovering" means.
+  await panel.leave('[data-chart="live"]');
+  await panel.wait(1_400);
+  const resetUi = await panel.read();
+  check(
+    'UI-34 the zoom resets itself once the pointer is away',
+    armed.axisFrom !== '60 s ago' && resetUi.axisFrom === '60 s ago',
+    `${armed.axisFrom} then ${resetUi.axisFrom}`,
+  );
+  await panel.fastZoomReset(60_000);
 
   const manySteps = Array.from({ length: 150 }, (_, index) => ({
     aborted: false,
