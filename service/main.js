@@ -1118,12 +1118,12 @@ function snapshot(collector, now = Date.now(), tree = [collector], priceBook = n
   let derived = collector.derived;
   if (derived?.key !== stepsKey) {
     const steps2 = [];
-    const subSteps2 = new Set;
+    const subOwner2 = new Map;
     for (const member of members) {
       for (const step of member.steps) {
         steps2.push(step);
         if (member !== collector)
-          subSteps2.add(step);
+          subOwner2.set(step, member.id);
       }
     }
     steps2.sort((a, b) => a.at - b.at);
@@ -1131,7 +1131,7 @@ function snapshot(collector, now = Date.now(), tree = [collector], priceBook = n
     derived = {
       key: stepsKey,
       steps: steps2,
-      subSteps: subSteps2,
+      subOwner: subOwner2,
       shownSteps: shownSteps2,
       rates: ratesOf(steps2),
       wire: shownSteps2.map((step) => ({
@@ -1142,13 +1142,13 @@ function snapshot(collector, now = Date.now(), tree = [collector], priceBook = n
         aborted: step.aborted,
         at: step.at,
         cost: Math.round((step.cost ?? 0) * 1e6) / 1e6,
-        ...subSteps2.has(step) ? { sub: true } : {}
+        ...subOwner2.has(step) ? { sub: subOwner2.get(step) } : {}
       })),
       ratesByModel: new Map
     };
     collector.derived = derived;
   }
-  const { steps, subSteps, shownSteps, rates, wire } = derived;
+  const { steps, subOwner, shownSteps, rates, wire } = derived;
   const prompt = totals.input + totals.cacheRead + totals.cacheWrite;
   const generated = totals.output + totals.reasoning;
   const consumed = prompt + generated;
@@ -1428,7 +1428,7 @@ function snapshot(collector, now = Date.now(), tree = [collector], priceBook = n
       charsPerSecond: Math.round(members.reduce((sum, member) => sum + (member.status === "streaming" ? charsInWindow(member, now) : 0), 0) / (LIVE_WINDOW_MS / 1000)),
       charsPerToken: Math.round(collector.charsPerToken * 1000) / 1000,
       ttftMs: streamer?.ttftMs ?? collector.ttftMs ?? collector.lastTtftMs ?? lastStepRaw?.ttftMs ?? null,
-      lastStep: lastStepRaw ? { ...lastStepRaw, sub: subSteps.has(lastStepRaw) || undefined } : null,
+      lastStep: lastStepRaw ? { ...lastStepRaw, sub: subOwner.get(lastStepRaw) || undefined } : null,
       subagent: status.subagent,
       estimated: true
     },

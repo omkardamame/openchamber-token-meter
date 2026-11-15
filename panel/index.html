@@ -373,6 +373,32 @@
           animation: none;
         }
       }
+      .models .model-row {
+        display: grid;
+        grid-template-columns: minmax(80px, 1fr) auto;
+        gap: 6px;
+        padding: 2px 0;
+        font-variant-numeric: tabular-nums;
+      }
+      .model-name {
+        overflow: hidden;
+        font-size: 12px;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .model-value {
+        font-size: 12px;
+        text-align: right;
+      }
+      .model-meta {
+        grid-column: 1 / -1;
+        font-size: 10.5px;
+        color: var(--oc-muted);
+      }
+      .sub-detail[data-selected='true'] {
+        background: var(--oc-border);
+        border-radius: 4px;
+      }
       .subs-toggle {
         margin-left: 8px;
       }

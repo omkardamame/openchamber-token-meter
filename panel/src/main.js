@@ -58,6 +58,9 @@ let stepHovering = false;
 let stepResetAt = 0;
 // Bars the per-step window is scrolled back from the newest one.
 let stepPan = 0;
+// A member id, or null for the whole tree: the step chart shows one subagent at
+// a time when a roster row is selected.
+let stepFilter = null;
 let stepDrag = null;
 let peakLineY = null;
 // When the ceiling last rose. A live burst moves it as surely as a finished
@@ -183,6 +186,11 @@ function build() {
       <div class="cost-rates"></div>
     </section>
 
+    <section class="block models" hidden>
+      <div class="block-head" title="Every model this tree ran, with its own value"><span>Models</span><span class="block-meta models-meta"></span></div>
+      <div class="models-list"></div>
+    </section>
+
     <section class="block steps">
       <div class="block-head"><span>Per step</span><span class="block-meta"><span class="steps-count"></span> <span class="steps-avg"></span> <span class="steps-peak"></span></span></div>
       <div class="chart-wrap"><svg class="chart" data-chart="steps" aria-hidden="true"></svg></div>
@@ -224,6 +232,9 @@ function build() {
     subsBlock: app.querySelector('.subagents'),
     subsMeta: app.querySelector('.subs-meta'),
     subsList: app.querySelector('.subs-list'),
+    models: app.querySelector('.models'),
+    modelsMeta: app.querySelector('.models-meta'),
+    modelsList: app.querySelector('.models-list'),
     subsToggle: app.querySelector('.subs-toggle'),
     subsDetail: app.querySelector('.subs-detail'),
     subsDetailMeta: app.querySelector('.subs-detail-meta'),
@@ -391,6 +402,11 @@ function paintCost(data) {
 
   ui.apiBadge.hidden = !api;
   ui.costTotal.textContent = priced ? `${floor}${money(cost.total)}` : '—';
+  ui.costRate.title = `${ui.costRate.title}${
+    data.stepsKnown && data.steps?.length && data.stepsKnown > data.steps.length
+      ? ` · the record holds ${compact(data.stepsKnown)} steps, ${compact(data.steps.length)} priced`
+      : ''
+  }`;
   ui.costTotal.title = api
     ? priced
       ? [
@@ -437,7 +453,7 @@ function paintCost(data) {
   ui.costRate.textContent = cost.lowerBound && typeof cost.perMillion === 'number' ? `~${effective}` : effective;
   ui.costRate.title = api
     ? `API value divided by ${
-        cost.lowerBound ? 'the tokens that have a published rate' : 'every token this tree processed'
+        cost.lowerBound ? 'the tokens that have a published rate' : 'the tokens in the priced steps'
       } · billed ${rateMoney(cost.billed?.perMillion ?? 0)} / 1M`
     : 'effective: this session’s cost divided by every token it processed';
 
@@ -941,7 +957,9 @@ function drawSteps(data) {
   const pad = 6;
   svg.setAttribute('viewBox', `0 0 ${width} ${height}`);
   const all = Array.isArray(data.steps) ? data.steps : [];
-  const rated = all.filter((step) => step.tps && step.tps > 0 && !step.aborted);
+  const rated = all
+    .filter((step) => step.tps && step.tps > 0 && !step.aborted)
+    .filter((step) => !stepFilter || step.sub === stepFilter);
   // Zooming in here means drawing fewer bars, never fewer numbers in the header.
   // A step arriving grows the list; the eased count has to grow with it, or the
   // chart draws one bar fewer than it has for a beat and re-lays out twice.
@@ -960,7 +978,9 @@ function drawSteps(data) {
   // bars the meter can draw or rate.
   const known = data.stepsKnown ?? all.length;
   ui.stepsCount.textContent = `${known} step${known === 1 ? '' : 's'}`;
-  ui.stepsCount.title =
+  if (stepFilter) {
+    ui.stepsCount.title = `showing one subagent's steps`;
+  } else ui.stepsCount.title =
     (data.subagents?.loading ?? 0) > 0 || (data.subagents?.partial ?? 0) > 0 || data.historyPartial
       ? 'history is partial; the count is a lower bound'
       : limit
@@ -1129,6 +1149,30 @@ function closeSubsDetail() {
   }, 220);
 }
 
+/** Every model the tree ran, with what it contributed and what was billed. */
+function paintModels(cost) {
+  const models = Array.isArray(cost?.models) ? cost.models : [];
+  if (models.length < 2) {
+    ui.models.hidden = true;
+    return;
+  }
+  ui.models.hidden = false;
+  ui.modelsMeta.textContent = `${models.length} models`;
+  const nodes = [];
+  for (const model of models) {
+    const row = el('div', 'model-row');
+    const name = el('span', 'model-name', model.name || model.model || 'model');
+    name.title = `${model.provider}/${model.model}`;
+    const value = el('span', 'model-value', `$${(model.apiValue ?? 0).toFixed(2)}`);
+    const meta = el('span', 'model-meta');
+    const drift = model.drift ? ` · drift ${(model.drift * 100).toFixed(1)}%` : '';
+    meta.textContent = `${compact(model.consumed ?? 0)} tok · billed ${money4(model.billed ?? 0)}${drift}`;
+    row.append(name, value, meta);
+    nodes.push(row);
+  }
+  ui.modelsList.replaceChildren(...nodes);
+}
+
 function paintSubsDetail(members) {
   const list = Array.isArray(members) ? members : [];
   if (!subsDetailOpen || list.length === 0) {
@@ -1148,6 +1192,16 @@ function paintSubsDetail(members) {
   const nodes = [];
   for (const item of list) {
     const row = el('div', 'sub-detail');
+    row.dataset.member = item.id;
+    if (stepFilter === item.id) row.dataset.selected = 'true';
+    row.addEventListener('click', () => {
+      stepFilter = stepFilter === item.id ? null : item.id;
+      subsDetailKey = '';
+      if (current) {
+        paintSubsDetail(current.subagents?.members ?? []);
+        drawSteps(current);
+      }
+    });
     const head = el('div', 'sub-detail-head');
     const dot = el('i', 'dot');
     dot.dataset.state = dotState(item.status);
@@ -1357,6 +1411,7 @@ function render(data) {
 
   paintCells(rowNodes, data);
   paintCost(data);
+  paintModels(data.cost);
   const totals = data.totals ?? {};
   // `live` says the session is working right now, not where the numbers came
   // from: an idle session keeps its usage record, and labelling a frozen number
@@ -1421,7 +1476,11 @@ function startPolling() {
     if (generation !== pollGeneration) return;
     await poll();
     if (generation !== pollGeneration || !sessionId) return;
-    const delay = failures > 0 ? Math.min(5_000, POLL_MS * 2 ** Math.min(4, failures)) : POLL_MS;
+    // A quarter second while a turn runs, a second when nothing does: the panel
+    // sits open all day, and an idle one has nothing new to read.
+    const busy = current && (current.status === 'streaming' || current.status === 'tool');
+    const base = busy ? POLL_MS : 1_000;
+    const delay = failures > 0 ? Math.min(5_000, POLL_MS * 2 ** Math.min(4, failures)) : base;
     timer = setTimeout(() => void loop(), delay);
   };
   void loop();
@@ -1708,6 +1767,7 @@ host.onReady((ctx) => {
   stepFull = 0;
   stepPan = 0;
   stepDrag = null;
+  stepFilter = null;
   subsDetailOpen = false;
   subsDetailKey = '';
   ui.subsDetail.hidden = true;

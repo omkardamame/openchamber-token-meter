@@ -822,11 +822,13 @@ export function snapshot(collector, now = Date.now(), tree = [collector], priceB
   let derived = collector.derived;
   if (derived?.key !== stepsKey) {
     const steps = [];
-    const subSteps = new Set();
+    // Which member owns each child step, not just whether it is one: the panel
+    // filters the chart by member, so the id has to travel.
+    const subOwner = new Map();
     for (const member of members) {
       for (const step of member.steps) {
         steps.push(step);
-        if (member !== collector) subSteps.add(step);
+        if (member !== collector) subOwner.set(step, member.id);
       }
     }
     steps.sort((a, b) => a.at - b.at);
@@ -834,7 +836,7 @@ export function snapshot(collector, now = Date.now(), tree = [collector], priceB
     derived = {
       key: stepsKey,
       steps,
-      subSteps,
+      subOwner,
       shownSteps,
       rates: ratesOf(steps),
       // The chart draws every step the meter keeps (1000 at most), and only when
@@ -856,13 +858,13 @@ export function snapshot(collector, now = Date.now(), tree = [collector], priceB
         aborted: step.aborted,
         at: step.at,
         cost: Math.round((step.cost ?? 0) * 1e6) / 1e6,
-        ...(subSteps.has(step) ? { sub: true } : {}),
+        ...(subOwner.has(step) ? { sub: subOwner.get(step) } : {}),
       })),
       ratesByModel: new Map(),
     };
     collector.derived = derived;
   }
-  const { steps, subSteps, shownSteps, rates, wire } = derived;
+  const { steps, subOwner, shownSteps, rates, wire } = derived;
   const prompt = totals.input + totals.cacheRead + totals.cacheWrite;
   const generated = totals.output + totals.reasoning;
   const consumed = prompt + generated;
@@ -1248,7 +1250,7 @@ export function snapshot(collector, now = Date.now(), tree = [collector], priceB
       // between steps the cell holds the last measured first-token wait instead
       // of blinking to a dash.
       ttftMs: streamer?.ttftMs ?? collector.ttftMs ?? collector.lastTtftMs ?? lastStepRaw?.ttftMs ?? null,
-      lastStep: lastStepRaw ? { ...lastStepRaw, sub: subSteps.has(lastStepRaw) || undefined } : null,
+      lastStep: lastStepRaw ? { ...lastStepRaw, sub: subOwner.get(lastStepRaw) || undefined } : null,
       subagent: status.subagent,
       estimated: true,
     },

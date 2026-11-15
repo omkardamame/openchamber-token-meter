@@ -318,7 +318,8 @@ emitTree(
 const afterChildStep = snapshot(treeParent, treeAt + 2600, [treeParent, treeChild]);
 check(
   'a subagent step reaches the parent chart, marked as one',
-  afterChildStep.steps.some((step) => step.sub === true && step.tps > 0) && afterChildStep.live.lastStep?.sub === true,
+  afterChildStep.steps.some((step) => typeof step.sub === 'string' && step.tps > 0) &&
+    typeof afterChildStep.live.lastStep?.sub === 'string',
   JSON.stringify(afterChildStep.steps.at(-1)),
 );
 check(
@@ -1871,7 +1872,7 @@ const childStep = await treeGet();
 check('a subagent step is not counted twice on a cumulative record', childStep.totals.output === 13, `${childStep.totals.output} out`);
 check(
   'a subagent step is drawn as one',
-  Array.isArray(childStep.steps) && childStep.steps.some((step) => step.sub === true),
+  Array.isArray(childStep.steps) && childStep.steps.some((step) => step.sub === 'ses_st_child'),
   JSON.stringify(childStep.steps?.at(-1)),
 );
 pushTree({
