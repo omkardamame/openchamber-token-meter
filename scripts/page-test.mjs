@@ -145,6 +145,21 @@ const harness = `<!doctype html><meta charset="utf-8"><title>page test</title>
     node.dispatchEvent(new frame.contentWindow.KeyboardEvent('keydown', { bubbles: true, cancelable: true, key }));
     return frame.contentDocument.activeElement === frame.contentDocument.querySelector(selector);
   };
+  // One wheel notch, then the axis label after a fixed number of frames: what a
+  // reader sees right after the gesture, eased or not.
+  window.__wheelFrames = (selector, deltaY, frames) => new Promise((resolve) => {
+    const frame = document.getElementById('f');
+    const view = frame.contentWindow;
+    const node = frame.contentDocument.querySelector(selector);
+    if (!node) { resolve(null); return; }
+    node.dispatchEvent(new view.WheelEvent('wheel', { bubbles: true, cancelable: true, deltaY }));
+    let left = frames;
+    const next = () => {
+      if (left-- <= 0) { resolve(frame.contentDocument.querySelector('.axis-from').textContent); return; }
+      view.requestAnimationFrame(next);
+    };
+    view.requestAnimationFrame(next);
+  });
   window.__wheel = (selector, deltaY) => {
     const frame = document.getElementById('f');
     const node = frame.contentDocument.querySelector(selector);
@@ -489,6 +504,8 @@ const run = async (page) => {
       return done;
     },
     click: async (selector) => Boolean(JSON.parse(await browser(['eval', `window.__click(${JSON.stringify(selector)})`]))),
+    wheelFrames: async (selector, deltaY, frames) =>
+      JSON.parse(await browser(['eval', `window.__wheelFrames(${JSON.stringify(selector)}, ${deltaY}, ${frames})`])),
     key: async (selector, key) => Boolean(JSON.parse(await browser(['eval', `window.__key(${JSON.stringify(selector)}, ${JSON.stringify(key)})`]))),
     wheel: async (selector, deltaY) => {
       const done = Boolean(JSON.parse(await browser(['eval', `window.__wheel(${JSON.stringify(selector)}, ${deltaY})`])));
@@ -1695,6 +1712,51 @@ try {
     settled.peakLineY === 8,
     `y ${settled.peakLineY}`,
   );
+
+  // --- robustness -----------------------------------------------------------
+  // An exception inside a frame must not stop the frame loop: the headline,
+  // the zoom and the reset clocks all live there. A step list with a hole in it
+  // makes the bar easing throw on every frame; the next good answer must still
+  // move the headline.
+  const holeSteps = Array.from({ length: 30 }, (_, index) => ({
+    aborted: false,
+    at: Date.now() - (30 - index) * 10_000,
+    cost: 0.001,
+    ms: 2_000,
+    tokens: 200,
+    tps: 100,
+  }));
+  await panel.set(state({ status: 'streaming', live: { ...state().live, tps: 120 }, stepsSeq: 900, stepsKnown: 30, steps: holeSteps }));
+  const beforeHole = await settle(panel, 'tps', '120');
+  await panel.set(state({ status: 'streaming', live: { ...state().live, tps: 120 }, stepsSeq: 901, stepsKnown: 31, steps: [null, ...holeSteps] }));
+  await panel.wheel('[data-chart="steps"]', -100);
+  await panel.wait(400);
+  await panel.set(state({ status: 'streaming', live: { ...state().live, tps: 40 }, stepsSeq: 902, stepsKnown: 30, steps: holeSteps }));
+  const afterHole = await settle(panel, 'tps', '40');
+  check(
+    'panel keeps its frame loop through an exception in a frame',
+    beforeHole.tps === '120' && afterHole.tps === '40',
+    `${beforeHole.tps} -> ${afterHole.tps}`,
+  );
+  await panel.leave('[data-chart="steps"]');
+
+  // The wheel eases the live window over a few frames; a reader who asked for
+  // less motion gets the new window on the next frame.
+  const easedPage = await run('panel');
+  const easedAxis = await easedPage.wheelFrames('[data-chart="live"]', 100, 2);
+  check('panel eases the live zoom by default', easedAxis !== '71 s ago' && /^6\d s ago$/.test(easedAxis ?? ''), String(easedAxis));
+  await browser(['set', 'media', 'dark', 'reduced-motion']);
+  const calm = await run('panel');
+  const calmAxis = await calm.wheelFrames('[data-chart="live"]', 100, 2);
+  const calmTransition = JSON.parse(
+    await browser(['eval', `getComputedStyle(document.getElementById('f').contentDocument.querySelector('.subs-detail')).transitionDuration`]),
+  );
+  check(
+    'panel snaps the zoom and the roster for a reader who asked for less motion',
+    calmAxis === '71 s ago' && /^0s(, 0s)*$/.test(calmTransition),
+    `${calmAxis} · transition ${calmTransition}`,
+  );
+  await browser(['set', 'media', 'dark']);
 
   // --- the Work Status section --------------------------------------------
   const status = await run('status');

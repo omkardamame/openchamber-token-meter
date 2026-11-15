@@ -1735,6 +1735,10 @@ host.onReady((ctx) => {
     let lastPaint = 0;
     let lastFrame = 0;
     const paint = (stamp) => {
+      // The next frame is booked before any drawing: an exception below still
+      // reaches the console, but it can no longer stop the headline, the zoom
+      // and the reset clocks for the life of the frame.
+      requestAnimationFrame(paint);
       const dt = lastFrame ? Math.min(200, stamp - lastFrame) : 16;
       lastFrame = stamp;
       if (ui && !document.hidden) {
@@ -1751,7 +1755,8 @@ host.onReady((ctx) => {
         const at = performance.now();
         if (!liveHovering && liveTargetMs !== ZOOM_MIN_MS && at > zoomResetAt) liveTargetMs = ZOOM_MIN_MS;
         if (liveWindowMs !== liveTargetMs) {
-          const k = 1 - Math.exp(-dt / ZOOM_EASE_MS);
+          // A reader who asked for less motion gets the new window at once.
+          const k = REDUCED_MOTION ? 1 : 1 - Math.exp(-dt / ZOOM_EASE_MS);
           liveWindowMs += (liveTargetMs - liveWindowMs) * k;
           if (Math.abs(liveTargetMs - liveWindowMs) < 40) liveWindowMs = liveTargetMs;
           if (current) drawLive(current);
@@ -1767,13 +1772,12 @@ host.onReady((ctx) => {
         }
         const wanted = stepTarget > 0 ? stepTarget : stepFull;
         if (stepFull > 0 && Math.abs(stepShown - wanted) > 0.5) {
-          const k = 1 - Math.exp(-dt / ZOOM_EASE_MS);
+          const k = REDUCED_MOTION ? 1 : 1 - Math.exp(-dt / ZOOM_EASE_MS);
           stepShown += (wanted - stepShown) * k;
           if (Math.abs(stepShown - wanted) < 0.5) stepShown = wanted;
           if (current) drawSteps(current);
         }
       }
-      requestAnimationFrame(paint);
     };
     requestAnimationFrame(paint);
     // The reader's own clock at the bottom: the rail doubles as a dashboard, and

@@ -420,6 +420,11 @@
         overflow: hidden;
         transition: max-height 200ms ease, opacity 160ms ease;
       }
+      @media (prefers-reduced-motion: reduce) {
+        .subs-detail {
+          transition: none;
+        }
+      }
       .subs-detail .sub-detail {
         padding: 3px 0;
       }
