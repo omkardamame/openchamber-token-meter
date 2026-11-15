@@ -377,6 +377,7 @@ const harness = `<!doctype html><meta charset="utf-8"><title>page test</title>
       cells: [...doc.querySelectorAll('.totals-grid .cell-label')].map((n) => n.textContent),
       values: [...doc.querySelectorAll('.totals-grid .cell-value')].map((n) => n.textContent.trim()),
       tps: (doc.querySelector('.tps-value') || doc.querySelector('.tps') || {}).textContent,
+      liveCaption: (doc.querySelector('.stat-label') || {}).textContent ?? null,
       bars: doc.querySelectorAll('[data-chart="steps"] rect:not([data-role="step-hover-col"])').length,
       stepSvg: (doc.querySelector('[data-chart="steps"]') || {}).innerHTML ?? '',
       chartGeometry: ['live', 'steps'].map((name) => {
@@ -387,6 +388,7 @@ const harness = `<!doctype html><meta charset="utf-8"><title>page test</title>
           ticks: [...svg.querySelectorAll('[data-role="grid-label"]')].map((n) => ({ label: n.textContent, y: Number(n.getAttribute('y')) })),
           bars: [...svg.querySelectorAll('rect:not([data-role])')].map((n) => ({ y: Number(n.getAttribute('y')), h: Number(n.getAttribute('height')) })),
           dotY: Number(svg.querySelector('[data-n="dot"]')?.getAttribute('cy')),
+          dotX: Number(svg.querySelector('[data-n="dot"]')?.getAttribute('cx')),
           avgY: Number(svg.querySelector('[data-role="live-avg"], [data-role="step-avg"]')?.getAttribute('y1')),
           peakY: Number(svg.querySelector('[data-role="live-peak"], [data-role="step-peak"]')?.getAttribute('y1')),
         };
@@ -737,6 +739,9 @@ try {
   // --- the panel -----------------------------------------------------------
   const panel = await run('panel');
   const idle = await panel.read();
+  check('panel keeps the live caption uncluttered', idle.liveCaption === 'live', JSON.stringify(idle.liveCaption));
+  check('panel removes the first-token sentence but retains TTFT in the grid', !/first token took/.test(idle.text) && idle.values.includes('6.5 s'), idle.text.slice(0, 130));
+  check('the live dot is anchored to now even between idle polls', idle.chartGeometry[0].dotX === idle.liveWidth && idle.liveRight === idle.liveWidth, `${idle.chartGeometry[0].dotX}/${idle.liveRight} of ${idle.liveWidth}`);
   check('panel draws all eight cells', idle.cells.join(',') === 'In,Out,Think,Total out,Cache,Cache hit,TTFT,Consumed', idle.cells.join(','));
   // `.block` sets display: flex, which outranks the browser's own [hidden]
   // rule: a single-model session drew an empty "Models" heading.
@@ -794,6 +799,16 @@ try {
     onePoint.liveDots === 1 && onePoint.livePolyline === false,
     `${onePoint.liveDots} dots, line ${onePoint.livePolyline}`,
   );
+  check('a single live sample is held at the now edge', onePoint.chartGeometry[0].dotX === onePoint.liveWidth, `${onePoint.chartGeometry[0].dotX} of ${onePoint.liveWidth}`);
+  // A held tail is not a rescaled timeline: older samples keep their real X
+  // positions, and only a horizontal extension reaches the current edge.
+  const heldNow = Date.now();
+  await panel.set(state({ generatedAt: heldNow, series: { t0: heldNow - 15_000, step: 1000, v: [60, 120, 180] } }));
+  const held = await panel.read();
+  const historyPart = held.livePathD.split(' L ')[0];
+  const coordinates = historyPart.match(/-?[\d]+(?:\.[\d]+)?/g).map(Number);
+  const oldEndX = coordinates.at(-2);
+  check('the curve holds its latest value to now without stretching old samples', held.liveRight === held.liveWidth && oldEndX < held.liveWidth * 0.85 && held.livePathD.includes(` L ${held.liveWidth.toFixed(1)},`), `${oldEndX} historical end, ${held.liveRight} held end of ${held.liveWidth}`);
 
   // A resting session samples zeros; the axis floor is not a measured scale.
   await panel.set({ ...oneBase, series: { t0: Date.now() - 2000, step: 250, v: [0, 0, 0, 0] } });
@@ -1872,7 +1887,7 @@ try {
   check('graph: live average and peak use the same mapping', Math.abs(liveG.avgY - expectedY(150, liveG, 8)) < 0.11 && liveG.peakY === 8);
   check('graph: every history bar uses the same linear/log mapping', stepG.bars.length === 4 && stepG.bars.every((bar, i) => Math.abs(bar.y - expectedY(graphRates[i], stepG, 6)) < 0.11), JSON.stringify(stepG.bars));
   check('graph: history average is transformed after averaging raw rates', Math.abs(stepG.avgY - expectedY(850, stepG, 6)) < 0.11 && stepG.peakY === 6, JSON.stringify(stepG));
-  check('graph: both charts show non-overlapping ticks and name the scale', [liveG, stepG].every((g) => g.ticks.every((t, i) => i === 0 || g.ticks[i - 1].y - t.y >= 21.9)) && (graphRead.text.match(/linear\/log/g) ?? []).length >= 2);
+  check('graph: both charts show non-overlapping ticks with a clean live caption', [liveG, stepG].every((g) => g.ticks.every((t, i) => i === 0 || g.ticks[i - 1].y - t.y >= 21.9)) && graphRead.liveCaption === 'live');
   await panel.hover('[data-chart="live"]', 0.99);
   const rawLive = await panel.read();
   check('graph: live hover still reads raw t/s, not the transformed coordinate', /^250 t\/s ·/.test(rawLive.peakText ?? ''), rawLive.peakText);

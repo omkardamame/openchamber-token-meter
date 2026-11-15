@@ -153,7 +153,7 @@ function build() {
 
     <section class="live">
       <div class="speed">
-        <span class="stat-label">live <em>est · linear/log</em></span>
+        <span class="stat-label" title="Estimated from streamed characters; the latest value is held to now between updates">live</span>
         <span class="speed-value" title="the session and every streaming subagent, added together"><b class="tps-value">0</b><i>t/s</i></span>
         <span class="speed-note tps-sub">no generation right now</span>
         <span class="speed-last last-line"><span class="last-rate"></span><span class="last-rest"></span></span>
@@ -1037,20 +1037,23 @@ function drawLive(data) {
     const line = smoothPath(points);
     const first = points[0];
     const last = points[points.length - 1];
-    nodes.line.setAttribute('d', line);
+    // Hold the latest known value to the now edge. Do not stretch the sample
+    // timeline or append invented measurements to the history/hover data.
+    const heldLine = last.x < width ? `${line} L ${width.toFixed(1)},${last.y.toFixed(1)}` : line;
+    nodes.line.setAttribute('d', heldLine);
     nodes.fill.setAttribute(
       'd',
-      `${line} L ${last.x.toFixed(1)},${baseline.toFixed(1)} L ${first.x.toFixed(1)},${baseline.toFixed(1)} Z`,
+      `${heldLine} L ${width.toFixed(1)},${baseline.toFixed(1)} L ${first.x.toFixed(1)},${baseline.toFixed(1)} Z`,
     );
-    nodes.dot.setAttribute('cx', last.x.toFixed(1));
+    nodes.dot.setAttribute('cx', width.toFixed(1));
     nodes.dot.setAttribute('cy', last.y.toFixed(1));
     showPart(nodes.line, true);
     showPart(nodes.fill, true);
     showPart(nodes.dot, true);
     showPart(nodes.baseline, false);
   } else if (smooth.length === 1) {
-    // One sample is not a baseline: draw the point where it actually sits.
-    nodes.dot.setAttribute('cx', xOf(visible[0]).toFixed(1));
+    // A single sample has no history curve, but its held value still sits at now.
+    nodes.dot.setAttribute('cx', width.toFixed(1));
     nodes.dot.setAttribute('cy', lineY(smooth[0]).toFixed(1));
     showPart(nodes.dot, true);
     hidePath(nodes.line);
@@ -1546,8 +1549,6 @@ function render(data) {
           ? 'paused on a permission request'
           : data.status === 'waiting-question'
             ? 'paused on a question'
-            : data.live?.ttftMs
-            ? `first token took ${seconds(data.live.ttftMs)}`
             : data.loading
               ? 'reading this session’s history'
               : 'no generation right now';

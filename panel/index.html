@@ -297,6 +297,11 @@
         width: 100%;
         height: 100%;
       }
+      /* The dot is centred on now, at the SVG's right edge. Let its outer half
+         use the existing rail padding instead of clipping it to a semicircle. */
+      .chart[data-chart='live'] {
+        overflow: visible;
+      }
       .axis {
         display: flex;
         justify-content: space-between;
