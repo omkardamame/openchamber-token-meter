@@ -323,6 +323,8 @@ const harness = `<!doctype html><meta charset="utf-8"><title>page test</title>
       totalsSource: (doc.querySelector('.totals-source') || {}).textContent ?? null,
       sectionHead: [...doc.querySelectorAll('.block-head span')].map((n) => n.textContent),
       footClock: (doc.querySelector('.foot-clock') || {}).textContent ?? null,
+      subIds: [...doc.querySelectorAll('.sub-row[data-sub]')].map((node) => node.dataset.sub),
+      subOut: doc.querySelectorAll('.sub-row.sub-out').length,
       avgLineY: (() => {
         const line = doc.querySelector('[data-chart="live"] line[data-role="live-avg"]');
         return line ? Number(line.getAttribute('y1')) : null;
@@ -1274,6 +1276,37 @@ try {
     'UI-30 an idle session does not say live',
     idleUi.totalsSource === '' || idleUi.totalsSource === null,
     JSON.stringify(idleUi.totalsSource),
+  );
+
+  const twoSubs = {
+    ...state(),
+    subagents: {
+      active: [
+        { id: 'ses_sub_a', status: 'streaming', title: 'reading the spec', tps: 40 },
+        { id: 'ses_sub_b', status: 'streaming', title: 'writing tests', tps: 22 },
+      ],
+      count: 2,
+      loading: 0,
+      partial: 0,
+      running: 2,
+      streaming: 2,
+      tool: 0,
+    },
+  };
+  await panel.set(twoSubs);
+  const subsA = await panel.read();
+  await panel.set({
+    ...twoSubs,
+    subagents: { ...twoSubs.subagents, active: twoSubs.subagents.active.map((item) => ({ ...item, tps: item.tps + 5 })) },
+  });
+  const subsB = await panel.read();
+  check(
+    'UI-32 subagent rows are keyed, not rebuilt, so they can animate',
+    subsA.subIds.join(',') === 'ses_sub_a,ses_sub_b' &&
+      subsB.subIds.join(',') === subsA.subIds.join(',') &&
+      subsB.subOut === 0 &&
+      subsA.text.includes('reading the spec'),
+    `${subsA.subIds.join(',')} then ${subsB.subIds.join(',')}`,
   );
 
   await panel.set(state({ status: 'streaming' }));

@@ -905,47 +905,90 @@ function subRateText(item) {
  * is their sum plus the session's own rate, so each row says what it adds. Six
  * rows fit; the rest are counted.
  */
-let subRowNodes = new Map();
-let subSignature = '';
+// One row per running subagent, keyed by id, so a new one can slide in and a
+// finished one can fade out instead of the list being rebuilt under the reader.
+let subRows = new Map();
 
 function paintSubagents(active, running, total) {
   ui.legend.hidden = total === 0;
   if (active.length === 0) {
-    ui.subsBlock.hidden = true;
-    if (subSignature) {
-      ui.subsList.textContent = '';
-      subRowNodes = new Map();
-      subSignature = '';
+    // Every row leaves at once. The block stays up until the last one has
+    // finished fading: hiding it first would cut the animation off.
+    const leaving = subRows.size;
+    for (const [id, row] of subRows) {
+      retireSubRow(id, row.node);
+      subRows.delete(id);
     }
+    if (ui.subsMore?.parentNode) ui.subsMore.remove();
+    if (!leaving) ui.subsBlock.hidden = true;
+    else setTimeout(() => {
+      if (subRows.size === 0) ui.subsBlock.hidden = true;
+    }, 160);
     return;
   }
   ui.subsBlock.hidden = false;
   ui.subsMeta.textContent = running < total ? `${running} running · ${total} total` : `${running} running`;
   const shown = active.slice(0, 6);
-  // Rebuild only when who is working changes; a rate ticks every poll and only
-  // its text is replaced, so a row can be read or hovered without flicker.
-  const signature = `${running}:${total}:${shown.map((item) => `${item.id}:${item.status}:${item.title ?? ''}`).join('|')}`;
-  if (signature !== subSignature) {
-    subSignature = signature;
-    subRowNodes = new Map();
-    ui.subsList.textContent = '';
-    for (const item of shown) {
-      const row = el('div', 'sub-row');
-      const dot = el('i', 'dot');
-      dot.dataset.state = dotState(item.status);
-      const title = el('span', 'sub-title', item.title || 'subagent');
-      title.title = item.title || item.id || '';
-      const rate = el('span', 'sub-rate', subRateText(item));
-      row.append(dot, title, rate);
-      subRowNodes.set(item.id, rate);
-      ui.subsList.append(row);
-    }
-    if (running > shown.length) ui.subsList.append(el('div', 'sub-more', `+${running - shown.length} more`));
+  const keep = new Set(shown.map((item) => item.id));
+
+  // A row that is gone fades out where it was; the block keeps its height until
+  // the animation ends, so the list does not jump under the pointer.
+  for (const [id, row] of subRows) {
+    if (keep.has(id)) continue;
+    retireSubRow(id, row.node);
+    subRows.delete(id);
   }
+
   for (const item of shown) {
-    const rate = subRowNodes.get(item.id);
-    if (rate) rate.textContent = subRateText(item);
+    // A subagent that comes back while its row is still fading takes the row
+    // over instead of leaving a ghost behind.
+    const ghost = ui.subsList.querySelector(`[data-sub="${item.id}"]`);
+    let row = subRows.get(item.id);
+    if (row && row.node !== ghost) {
+      row = undefined;
+      subRows.delete(item.id);
+    }
+    if (ghost && !row) ghost.remove();
+    if (!row) {
+      const node = el('div', 'sub-row');
+      node.dataset.sub = item.id;
+      const dot = el('i', 'dot');
+      const title = el('span', 'sub-title');
+      const rate = el('span', 'sub-rate');
+      node.append(dot, title, rate);
+      row = { dot, node, rate, title };
+      subRows.set(item.id, row);
+      // The enter animation lives in CSS, so a reduced-motion reader gets none.
+      node.classList.add('sub-in');
+      node.addEventListener('animationend', () => node.classList.remove('sub-in'), { once: true });
+    }
+    row.dot.dataset.state = dotState(item.status);
+    row.title.textContent = item.title || 'subagent';
+    row.title.title = item.title || item.id || '';
+    row.rate.textContent = subRateText(item);
+    // appendChild moves an existing node, which is the whole reorder.
+    ui.subsList.append(row.node);
   }
+
+  const more = running > shown.length ? `+${running - shown.length} more` : '';
+  if (more) {
+    if (!ui.subsMore) ui.subsMore = el('div', 'sub-more');
+    ui.subsMore.textContent = more;
+    ui.subsList.append(ui.subsMore);
+  } else if (ui.subsMore?.parentNode) {
+    ui.subsMore.remove();
+  }
+}
+
+/** Fade a row out, then drop it. Removing it at once would make the list snap. */
+function retireSubRow(id, node) {
+  if (node.dataset.leaving === id) return;
+  node.dataset.leaving = id;
+  node.classList.add('sub-out');
+  const drop = () => node.remove();
+  node.addEventListener('animationend', drop, { once: true });
+  // A reader who asked for no motion gets no animationend: drop it on a timer.
+  setTimeout(drop, 200);
 }
 
 function clearNotice() {
