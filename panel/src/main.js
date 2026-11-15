@@ -82,6 +82,7 @@ let subsDetailKey = '';
 let stepHover = null;
 let lastDrawnSteps = null;
 let lastDrawnLimit = null;
+let lastDrawnKey = '';
 let lastDrawnW = 0;
 let lastDrawnH = 0;
 let lastDrawnHover = null;
@@ -987,7 +988,11 @@ function drawSteps(data) {
   const panMax = Math.max(0, rated.length - shownBars);
   stepPan = Math.min(panMax, Math.max(0, stepPan));
   const endIndex = rated.length - Math.round(stepPan);
-  const steps = rated.slice(Math.max(0, endIndex - shownBars), endIndex);
+  const startIndex = Math.max(0, endIndex - shownBars);
+  const steps = rated.slice(startIndex, endIndex);
+  // What the bars depend on besides the list itself: a filter or a pan picks a
+  // different slice of the same list, and the cache below must see that.
+  const drawKey = `${stepFilter ?? ''}|${startIndex}|${endIndex}`;
   // The count is every step the session and its subagents ran, not only the
   // bars the meter can draw or rate.
   const known = data.stepsKnown ?? all.length;
@@ -1014,9 +1019,10 @@ function drawSteps(data) {
     drawnSteps = [];
     drawnSlot = 0;
     stepHover = null;
-    if (data.steps === lastDrawnSteps && limit === lastDrawnLimit && width === lastDrawnW && height === lastDrawnH) return;
+    if (data.steps === lastDrawnSteps && limit === lastDrawnLimit && drawKey === lastDrawnKey && width === lastDrawnW && height === lastDrawnH) return;
     lastDrawnSteps = data.steps;
     lastDrawnLimit = limit;
+    lastDrawnKey = drawKey;
     lastDrawnW = width;
     lastDrawnH = height;
     lastDrawnHover = null;
@@ -1065,9 +1071,18 @@ function drawSteps(data) {
   // Nothing changed: keep the bars, and with them the column the pointer is
   // reading. This runs four times a second and rebuilding a thousand rects each
   // time was the most expensive thing on the page.
-  if (data.steps === lastDrawnSteps && limit === lastDrawnLimit && width === lastDrawnW && height === lastDrawnH && hover === lastDrawnHover) return;
+  if (
+    data.steps === lastDrawnSteps &&
+    limit === lastDrawnLimit &&
+    drawKey === lastDrawnKey &&
+    width === lastDrawnW &&
+    height === lastDrawnH &&
+    hover === lastDrawnHover
+  )
+    return;
   lastDrawnSteps = data.steps;
   lastDrawnLimit = limit;
+  lastDrawnKey = drawKey;
   lastDrawnW = width;
   lastDrawnH = height;
   lastDrawnHover = hover;
@@ -1392,10 +1407,13 @@ function render(data) {
               ? 'reading this session’s history'
               : 'no generation right now';
 
+  const members = Array.isArray(subagents.members) ? subagents.members : [];
+  // A filter on a member that has left the tree (an hour quiet) has no row
+  // left to click it off with, and would hold the chart empty: let it go.
+  if (stepFilter && !members.some((item) => item.id === stepFilter)) stepFilter = null;
   drawLive(data);
   drawSteps(data);
   paintSubagents(activeSubs, runningSubs, subagents.count ?? 0);
-  const members = Array.isArray(subagents.members) ? subagents.members : [];
   const roster = Math.max(members.length, subagents.count ?? 0);
   ui.subsToggle.hidden = roster === 0;
   ui.subsToggle.textContent = `${roster} subagent${roster === 1 ? '' : 's'}`;

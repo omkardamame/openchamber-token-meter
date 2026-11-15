@@ -1582,6 +1582,51 @@ try {
     `${subsOpen.subsDetailShown} ${String(subsOpen.subsDetailText).slice(0, 200)}`,
   );
   await panel.click('.subs-toggle');
+  await panel.wait(400);
+
+  // Clicking a roster row filters the step chart at once. The bars were cached
+  // on the list object alone, so the filter waited for the next step to land:
+  // on a quiet session it never showed.
+  const filterBase = state();
+  const filtered = {
+    ...filterBase,
+    stepsSeq: 40,
+    steps: [...filterBase.steps, { aborted: false, at: Date.now() - 10_000, cost: 0.002, ms: 4000, sub: 'ses_sub_a', tokens: 400, tps: 100 }],
+    subagents: { ...state().subagents, count: 2, members: [
+      { avgTps: 100, consumed: 4_000, cost: 0.002, id: 'ses_sub_a', lastAt: Date.now() - 10_000, peakTps: 100, status: 'idle', steps: 1, title: 'reading the spec', tps: 0 },
+      { avgTps: 80, consumed: 1_100, cost: 0.004, id: 'ses_sub_b', lastAt: Date.now() - 300_000, peakTps: 150, status: 'idle', steps: 5, title: 'writing tests', tps: 0 },
+    ] },
+  };
+  await panel.set(filtered);
+  const unfiltered = await panel.read();
+  await panel.click('.subs-toggle');
+  await panel.wait(400);
+  await panel.click('.sub-detail[data-member="ses_sub_a"]');
+  await panel.wait(300);
+  const oneMember = await panel.read();
+  check(
+    'panel filters the step chart the moment a roster row is clicked',
+    unfiltered.stepFills.length === 3 && oneMember.stepFills.length === 1 && oneMember.stepFills[0] === 'var(--oc-info)',
+    `${unfiltered.stepFills.length} -> ${oneMember.stepFills.join(',')}`,
+  );
+  await panel.click('.sub-detail[data-member="ses_sub_a"]');
+  await panel.wait(300);
+  const wholeTree = await panel.read();
+  check('panel draws the whole tree again on a second click', wholeTree.stepFills.length === 3, `${wholeTree.stepFills.length} bars`);
+
+  // The filtered member leaves the tree (quiet for an hour): its row and its
+  // steps are gone, and the filter must go with them, not hold the chart empty.
+  await panel.click('.sub-detail[data-member="ses_sub_a"]');
+  await panel.wait(300);
+  await panel.set({ ...state(), stepsSeq: 41, subagents: { ...state().subagents, count: 1, members: [filtered.subagents.members[1]] } });
+  const orphan = await panel.read();
+  check(
+    'panel drops a filter whose member has left the tree',
+    orphan.stepFills.length === 2 && orphan.stepsCountTitle !== "showing one subagent's steps",
+    `${orphan.stepFills.length} bars, title "${orphan.stepsCountTitle}"`,
+  );
+  await panel.click('.subs-toggle');
+  await panel.wait(400);
 
   await panel.set(state({ stream: { state: 'retrying', error: 'socket closed' } }));
   const cutUi = await panel.read();
