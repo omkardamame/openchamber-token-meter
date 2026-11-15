@@ -90,12 +90,48 @@ export function ratesOf(steps) {
 /**
  * One step of a value moving towards a target, for a headline that should read
  * as a needle rather than a jump. `tau` is the time constant in ms: the value
- * covers ~63% of the gap in that time and never overshoots.
+ * covers ~63% of the gap in that time and never overshoots. `snap` is in the
+ * value's units: 0.4 t/s for digits, a small fraction for curve geometry.
  */
-export function easeToward(current, target, dt, tau = 160) {
+export function easeToward(current, target, dt, tau = 160, snap = 0.4) {
   const k = 1 - Math.exp(-Math.max(0, dt) / tau);
   const next = current + (target - current) * k;
-  return Math.abs(target - next) < 0.4 ? target : next;
+  return Math.abs(target - next) < snap ? target : next;
+}
+
+/** Display-only interpolation of normalized curve heights. Retained samples
+ * keep their animation state by timestamp; a new rightmost sample starts at
+ * the preceding height instead of jumping on a poll. The map is bounded by
+ * the visible points and an empty list resets it for a session switch.
+ * Ease in screen fractions so a changed axis also moves the curve smoothly. */
+export function createCurveMotion() {
+  let shown = new Map();
+  let lastAt = null;
+  let lastTime = null;
+  let lastValue = null;
+  return (points, at, reducedMotion = false) => {
+    if (!points.length) {
+      shown.clear();
+      lastAt = lastTime = lastValue = null;
+      return [];
+    }
+    const dt = lastAt === null ? 0 : Math.min(200, Math.max(0, at - lastAt));
+    const next = new Map();
+    let previous = lastValue;
+    const result = points.map((point) => {
+      const target = Number.isFinite(point.v) ? Math.min(1, Math.max(0, point.v)) : 0;
+      const seed = shown.get(point.t) ?? (lastTime !== null && point.t > lastTime ? previous ?? target : target);
+      const value = reducedMotion ? target : easeToward(seed, target, dt, 160, 0.0001);
+      next.set(point.t, value);
+      previous = value;
+      return { t: point.t, v: value };
+    });
+    shown = next;
+    lastAt = at;
+    lastTime = points.at(-1).t;
+    lastValue = result.at(-1).v;
+    return result;
+  };
 }
 
 /**
@@ -103,11 +139,12 @@ export function easeToward(current, target, dt, tau = 160) {
  * Growing immediately keeps a new peak from being clipped; shrinking slowly
  * keeps the rest of the curve from bobbing whenever the peak bucket changes.
  */
-export function nextScale(previous, values) {
+export function nextScale(previous, values, dt = 100) {
   const target = Math.max(1, ...values);
   if (!Number.isFinite(previous) || previous <= 0) return target;
   if (target >= previous) return target;
-  return previous + (target - previous) * 0.06;
+  // Preserve the original 6% decay per 100 ms, independent of display rate.
+  return previous + (target - previous) * (1 - 0.94 ** (Math.max(0, dt) / 100));
 }
 
 /**

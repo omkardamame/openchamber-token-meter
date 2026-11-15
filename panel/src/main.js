@@ -1,7 +1,7 @@
 import { HostRequestError, connectHost } from '@openchamber/sdk';
 import { applyHostReady, mountBanner, mountButton, mountEmpty, mountTextField } from '@openchamber/sdk/ui';
 import { compact, duration, percent, seconds } from '../../shared/summary.js';
-import { easeToward, rateCeiling, rateTicks, seriesPoints, smoothPath, symlogShare } from '../../shared/chart.js';
+import { createCurveMotion, easeToward, rateCeiling, rateTicks, seriesPoints, smoothPath, symlogShare } from '../../shared/chart.js';
 import { dotState, mountCells, paintCells } from '../../shared/cells.js';
 import { el } from '../../shared/dom.js';
 import { speedTier } from '../../shared/speed-color.js';
@@ -88,6 +88,7 @@ let lastDrawnH = 0;
 let lastDrawnHover = null;
 let drawnSteps = [];
 let drawnSlot = 0;
+const animateCurve = createCurveMotion();
 
 // A reader who asked the system for less motion gets the measured number
 // without the easing travel; the digits are the same either way.
@@ -947,6 +948,8 @@ function drawLive(data) {
   const max = rateCeiling(Math.max(ceilingPeak, rates.avg));
   const share = (value) => symlogShare(value, max);
   const lineY = (value) => height - pad - share(value) * (height - pad * 2);
+  const plotted = animateCurve(visible.map((point, index) => ({ t: point.t, v: share(smooth[index]) })), performance.now(), REDUCED_MOTION);
+  const plottedY = (index) => height - pad - plotted[index].v * (height - pad * 2);
   const xOf = (point) => ((point.t - from) / liveWindowMs) * width;
   const baseline = height - pad;
 
@@ -1015,7 +1018,7 @@ function drawLive(data) {
     for (let index = 1; index < visible.length; index += 1) {
       if (Math.abs(xOf(visible[index]) - liveHoverX) < Math.abs(xOf(visible[nearest]) - liveHoverX)) nearest = index;
     }
-    hovered = { x: xOf(visible[nearest]), y: lineY(smooth[nearest]), value: visible[nearest].v, at: visible[nearest].t };
+    hovered = { x: xOf(visible[nearest]), y: plottedY(nearest), value: visible[nearest].v, at: visible[nearest].t };
   }
   if (hovered) {
     const cross = nodes.cross;
@@ -1033,7 +1036,7 @@ function drawLive(data) {
   }
 
   if (smooth.length > 1) {
-    const points = smooth.map((value, index) => ({ x: xOf(visible[index]), y: lineY(value) }));
+    const points = plotted.map((point, index) => ({ x: xOf(visible[index]), y: plottedY(index) }));
     const line = smoothPath(points);
     const first = points[0];
     const last = points[points.length - 1];
@@ -1054,7 +1057,7 @@ function drawLive(data) {
   } else if (smooth.length === 1) {
     // A single sample has no history curve, but its held value still sits at now.
     nodes.dot.setAttribute('cx', width.toFixed(1));
-    nodes.dot.setAttribute('cy', lineY(smooth[0]).toFixed(1));
+    nodes.dot.setAttribute('cy', plottedY(0).toFixed(1));
     showPart(nodes.dot, true);
     hidePath(nodes.line);
     hidePath(nodes.fill);

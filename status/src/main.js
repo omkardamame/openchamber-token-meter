@@ -1,7 +1,7 @@
 import { HostRequestError, connectHost } from '@openchamber/sdk';
 import { applyHostReady, mountBanner } from '@openchamber/sdk/ui';
 import { seconds } from '../../shared/summary.js';
-import { compress, easeToward, nextScale, seriesPoints, smoothPath } from '../../shared/chart.js';
+import { compress, createCurveMotion, easeToward, nextScale, seriesPoints, smoothPath } from '../../shared/chart.js';
 import { dotState, mountCells, paintCells } from '../../shared/cells.js';
 import { el } from '../../shared/dom.js';
 import { speedTier } from '../../shared/speed-color.js';
@@ -26,6 +26,9 @@ let pollGeneration = 0;
 let lastHeight = 0;
 let receivedAt = 0;
 let sparkScale = 1;
+let sparkDrawAt = null;
+let sparkNodes = null;
+const animateCurve = createCurveMotion();
 let lastStepsSeq = -1;
 let targetTps = 0;
 let shownTps = 0;
@@ -126,25 +129,47 @@ function drawSpark(data) {
   const width = Math.max(60, svg.clientWidth || 120);
   const height = 30;
   svg.setAttribute('viewBox', `0 0 ${width} ${height}`);
+  // Keep the SVG tree: display-rate animation only changes path attributes.
+  if (!sparkNodes) {
+    svg.innerHTML = `<defs><linearGradient id="tm-spark-fill" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="var(--oc-primary)" stop-opacity="0.4" /><stop offset="100%" stop-color="var(--oc-primary)" stop-opacity="0" /></linearGradient></defs>` +
+      `<line data-role="spark-baseline" x1="0" y1="29" y2="29" stroke="var(--oc-primary)" stroke-width="1.2" opacity="0.4" />` +
+      `<path data-role="spark-fill" fill="url(#tm-spark-fill)" />` +
+      `<path data-role="spark-line" fill="none" stroke="var(--oc-primary)" stroke-width="1.3" stroke-linejoin="round" />`;
+    sparkNodes = {
+      baseline: svg.querySelector('[data-role="spark-baseline"]'),
+      fill: svg.querySelector('[data-role="spark-fill"]'),
+      line: svg.querySelector('[data-role="spark-line"]'),
+    };
+  }
   const series = Array.isArray(data.points) ? data.points : [];
   const now = projectedNow(data);
   const from = now - 60_000;
   const visible = series.filter((point) => point.t >= from && point.t <= now);
-  // Same rule as the panel: follow the typical rate, let a lone spike clip.
+  // Retain this compact chart's typical-rate scale; the rail uses a peak axis.
   const ranked = visible.map((point) => point.v).sort((a, b) => a - b);
   const typical = ranked.length ? ranked[Math.min(ranked.length - 1, Math.floor(ranked.length * 0.92))] : 0;
-  sparkScale = nextScale(sparkScale, [typical * 1.15, 1]);
+  const at = performance.now();
+  const dt = sparkDrawAt === null ? 100 : Math.min(200, Math.max(0, at - sparkDrawAt));
+  sparkDrawAt = at;
+  sparkScale = nextScale(sparkScale, [typical * 1.15, 1], dt);
   const max = Math.max(sparkScale, 1);
+  let smoothed = 0;
+  const plotted = animateCurve(visible.map((point, index) => {
+    smoothed = index === 0 ? point.v : smoothed + (point.v - smoothed) * 0.3;
+    return { t: point.t, v: compress(smoothed, max) };
+  }), at, REDUCED_MOTION);
   if (visible.length < 2) {
-    svg.innerHTML = `<line x1="0" y1="${height - 1}" x2="${width}" y2="${height - 1}" stroke="var(--oc-primary)" stroke-width="1.2" opacity="0.4" />`;
+    sparkNodes.baseline.setAttribute('x2', width);
+    sparkNodes.baseline.setAttribute('visibility', 'visible');
+    sparkNodes.line.removeAttribute('d');
+    sparkNodes.fill.removeAttribute('d');
     return;
   }
-  let smoothed = 0;
-  const points = visible.map((point, index) => {
-    smoothed = index === 0 ? point.v : smoothed + (point.v - smoothed) * 0.3;
+  sparkNodes.baseline.setAttribute('visibility', 'hidden');
+  const points = plotted.map((point) => {
     return {
       x: ((point.t - from) / 60_000) * width,
-      y: height - 1 - compress(smoothed, max) * (height - 3),
+      y: height - 1 - point.v * (height - 3),
     };
   });
   // The same monotone curve as the panel: the spark shows the shape of a
@@ -153,14 +178,8 @@ function drawSpark(data) {
   const line = smoothPath(points);
   const first = points[0];
   const last = points[points.length - 1];
-  svg.innerHTML = [
-    `<defs><linearGradient id="tm-spark-fill" x1="0" y1="0" x2="0" y2="1">`,
-    `<stop offset="0%" stop-color="var(--oc-primary)" stop-opacity="0.4" />`,
-    `<stop offset="100%" stop-color="var(--oc-primary)" stop-opacity="0" />`,
-    `</linearGradient></defs>`,
-    `<path d="${line} L ${last.x.toFixed(1)},${height} L ${first.x.toFixed(1)},${height} Z" fill="url(#tm-spark-fill)" />`,
-    `<path d="${line}" fill="none" stroke="var(--oc-primary)" stroke-width="1.3" stroke-linejoin="round" />`,
-  ].join('');
+  sparkNodes.fill.setAttribute('d', `${line} L ${last.x.toFixed(1)},${height} L ${first.x.toFixed(1)},${height} Z`);
+  sparkNodes.line.setAttribute('d', line);
 }
 
 function clearNotice() {
@@ -289,23 +308,16 @@ host.onReady((ctx) => {
       if (current) drawSpark(current);
     });
     observer.observe(ui.spark);
-    // Redraw between polls against the projected clock, but only while tokens
-    // are moving: a 60 s curve gains nothing from 60 fps, and an idle section
-    // should not repaint at all.
-    let lastPaint = 0;
+    // Match the rail graph and the eased digits at the display's own cadence.
     let lastFrame = 0;
     const paint = (stamp) => {
+      requestAnimationFrame(paint);
       const dt = lastFrame ? Math.min(200, stamp - lastFrame) : 16;
       lastFrame = stamp;
       if (!document.hidden) {
         animateSpeed(dt);
-        const moving = current && (current.status === 'streaming' || current.status === 'tool');
-        if (moving && stamp - lastPaint >= 100) {
-          lastPaint = stamp;
-          drawSpark(current);
-        }
+        if (current && !REDUCED_MOTION) drawSpark(current);
       }
-      requestAnimationFrame(paint);
     };
     requestAnimationFrame(paint);
     fitHeight();
@@ -320,6 +332,7 @@ host.onReady((ctx) => {
   streamingNow = false;
   lastTier = '';
   sparkScale = 1;
+  sparkDrawAt = null;
   ui.tps.textContent = '0';
   delete ui.tps.dataset.tier;
   ui.lastRate.textContent = '';

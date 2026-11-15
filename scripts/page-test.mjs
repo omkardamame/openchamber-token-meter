@@ -13,7 +13,7 @@ import { execFile, spawnSync } from 'node:child_process';
 import { promisify } from 'node:util';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { rateCeiling, rateTicks, seriesPoints, smoothPath, symlogShare } from '../shared/chart.js';
+import { createCurveMotion, nextScale, rateCeiling, rateTicks, seriesPoints, smoothPath, symlogShare } from '../shared/chart.js';
 import { duration } from '../shared/summary.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -236,14 +236,14 @@ const harness = `<!doctype html><meta charset="utf-8"><title>page test</title>
   // while still visibly stepping, so measure distinct geometry per frame.
   window.__chartCadence = (ms) => new Promise((resolve) => {
     const view = frame.contentWindow;
-    const line = frame.contentDocument.querySelector('[data-role="live-line"]');
-    let previous = line.getAttribute('d');
+    const lineNow = () => frame.contentDocument.querySelector('[data-role="live-line"], [data-chart="spark"] path[stroke]');
+    let previous = lineNow().getAttribute('d');
     let frames = 0;
     let changed = 0;
     let started = null;
     const sample = (stamp) => {
       if (started === null) started = stamp;
-      const next = line.getAttribute('d');
+      const next = lineNow().getAttribute('d');
       if (next !== previous) changed += 1;
       previous = next;
       frames += 1;
@@ -259,14 +259,14 @@ const harness = `<!doctype html><meta charset="utf-8"><title>page test</title>
     const original = view.requestAnimationFrame;
     const queue = [];
     view.requestAnimationFrame = (callback) => { queue.push(callback); return queue.length; };
-    const line = frame.contentDocument.querySelector('[data-role="live-line"]');
-    const set = line.setAttribute;
+    const svg = frame.contentDocument.querySelector('[data-chart="live"], [data-chart="spark"]');
+    const set = svg.setAttribute;
     let draws = 0;
     try {
       // Let the already-booked real frame run and queue the next one here.
       await new Promise((resolve) => original.call(view, resolve));
-      line.setAttribute = function(name, value) {
-        if (name === 'd') draws += 1;
+      svg.setAttribute = function(name, value) {
+        if (name === 'viewBox') draws += 1;
         return set.call(this, name, value);
       };
       const start = view.performance.now();
@@ -275,7 +275,7 @@ const harness = `<!doctype html><meta charset="utf-8"><title>page test</title>
       }
       return draws;
     } finally {
-      line.setAttribute = set;
+      svg.setAttribute = set;
       view.requestAnimationFrame = original;
       for (const callback of queue) original.call(view, callback);
     }
@@ -290,6 +290,27 @@ const harness = `<!doctype html><meta charset="utf-8"><title>page test</title>
       delete doc.hidden;
     }
   };
+  // Capture the curve's vertical rise, not just its horizontal scrolling or
+  // repeated writes of an unchanged path. Start before the next poll arrives.
+  window.__curveRise = (next) => new Promise((resolve) => {
+    const view = frame.contentWindow;
+    const doc = frame.contentDocument;
+    const trace = [];
+    let started = null;
+    window.__setState(next);
+    const sample = (stamp) => {
+      if (started === null) started = stamp;
+      const dot = doc.querySelector('[data-n="dot"]');
+      const line = doc.querySelector('[data-chart="spark"] path[stroke]');
+      const numbers = line?.getAttribute('d')?.match(/-?[0-9]+(?:[.][0-9]+)?/g);
+      const y = dot ? Number(dot.getAttribute('cy')) : numbers ? Number(numbers.at(-1)) : null;
+      const rate = Number((doc.querySelector('.tps-value, .tps') || {}).textContent);
+      trace.push({ y, rate });
+      if (stamp - started >= 1400) resolve(trace);
+      else view.requestAnimationFrame(sample);
+    };
+    view.requestAnimationFrame(sample);
+  });
   // The service leaves the step list out when the frame already has this
   // sequence, which is what lets the frame keep one array object between polls.
   // Mimic it, so a poll that changed nothing can keep the bars it drew.
@@ -619,6 +640,7 @@ const run = async (page) => {
     chartCadence: async (ms = 600) => JSON.parse(JSON.parse(await browser(['eval', `(async () => JSON.stringify(await window.__chartCadence(${ms})))()`]))),
     fastFrames: async () => Number(JSON.parse(await browser(['eval', 'window.__fastFrames()']))),
     hiddenDraws: async (ms = 600) => Number(JSON.parse(await browser(['eval', `window.__hiddenDraws(${ms})`]))),
+    curveRise: async (next) => JSON.parse(JSON.parse(await browser(['eval', `(async () => JSON.stringify(await window.__curveRise(${JSON.stringify(next)})))()`]))),
     fastZoomReset: async (ms) => {
       const done = Boolean(JSON.parse(await browser(['eval', `window.__fastZoomReset(${ms})`])));
       return done;
@@ -669,14 +691,58 @@ const run = async (page) => {
 /** The headline is eased; a busy browser can paint fewer frames than 1.6 s allows. */
 const settle = async (handle, field, want) => {
   let value = await handle.read();
-  for (let i = 0; i < 25 && value[field] !== want; i += 1) {
+  const reached = (data) => typeof field === 'function' ? field(data) : data[field] === want;
+  for (let i = 0; i < 25 && !reached(value); i += 1) {
     await new Promise((resolve) => setTimeout(resolve, 200));
     value = await handle.read();
   }
   return value;
 };
 
+const measureCurveRise = async (surface) => {
+  // Keep the scale stable with a high-rate history, then change the newest
+  // sample only: a poll-step jump cannot hide behind a scrolling X coordinate.
+  const values = Array.from({ length: 240 }, (_, i) => i < 230 ? 400 : 20);
+  const before = state({
+    status: 'streaming',
+    live: { ...state().live, tps: 20 },
+    rates: { avg: 150, peak: 3000 },
+    series: { t0: Date.now() - 59_750, step: 250, v: values },
+  });
+  await surface.set(before);
+  const after = { ...before, generatedAt: Date.now(), live: { ...before.live, tps: 200 }, series: { ...before.series, v: [...values.slice(0, -1), 200] } };
+  const trace = await surface.curveRise(after);
+  const intermediate = trace.filter((sample) => sample.rate > 20 && sample.rate < 200 && sample.y !== null);
+  return { frames: intermediate.length, heights: new Set(intermediate.map((sample) => sample.y)).size };
+};
+
 try {
+  const curveMotion = createCurveMotion();
+  curveMotion([{ t: 1, v: 0 }], 0);
+  const halfway = curveMotion([{ t: 1, v: 1 }], 160)[0].v;
+  check('curve motion uses the headline time constant without overshoot', Math.abs(halfway - (1 - Math.exp(-1))) < 1e-12);
+  const addedMotion = createCurveMotion();
+  addedMotion([{ t: 1, v: 0.2 }], 0);
+  const added = addedMotion([{ t: 1, v: 0.2 }, { t: 2, v: 0.9 }], 0);
+  check('a newly arriving sample begins at the preceding displayed height', added[1].v === 0.2);
+  const atRate = (hz) => {
+    const motion = createCurveMotion();
+    motion([{ t: 1, v: 0 }], 0);
+    let result;
+    for (let i = 1; i <= hz / 2; i += 1) result = motion([{ t: 1, v: 1 }], i * 1000 / hz)[0].v;
+    return result;
+  };
+  check('curve easing takes the same time at 60 and 120 Hz', Math.abs(atRate(60) - atRate(120)) < 1e-12);
+  curveMotion([], 200);
+  check('an empty curve resets motion so the next session inherits no heights', curveMotion([{ t: 1, v: 0.1 }], 201)[0].v === 0.1);
+  check('reduced motion reads the target height immediately', curveMotion([{ t: 1, v: 0.8 }], 202, true)[0].v === 0.8);
+  const scaleAfter = (hz) => {
+    let scale = 1000;
+    for (let i = 0; i < hz; i += 1) scale = nextScale(scale, [100], 1000 / hz);
+    return scale;
+  };
+  check('spark scale decay is time-based rather than faster at high refresh', Math.abs(scaleAfter(60) - scaleAfter(120)) < 1e-9 && Math.abs(scaleAfter(60) - (100 + 900 * 0.94 ** 10)) < 1e-9);
+
   // Graph change: independent expected positions, including boundary, floor,
   // non-finite inputs and tick spacing at short/tall chart sizes.
   check('scale: zero and the linear threshold are exact', symlogShare(0, 3000) === 0 && symlogShare(50, 3000) === 0.175 && symlogShare(100, 3000) === 0.35);
@@ -1630,6 +1696,8 @@ try {
   check('UI-31 generating scroll follows display frames without pointer input', busyCadence.frames >= 10 && busyCadence.changed >= busyCadence.frames * 0.8, JSON.stringify(busyCadence));
   const highRefreshDraws = await panel.fastFrames();
   check('UI-31 a 120 Hz display is not capped by a 16 ms redraw gate', highRefreshDraws === 40, `${highRefreshDraws} draws / 40 frames`);
+  const panelRise = await measureCurveRise(panel);
+  check('rail curve rises through intermediate heights alongside the eased number', panelRise.frames >= 6 && panelRise.heights >= 6, JSON.stringify(panelRise));
   await panel.set(state({ status: 'idle' }));
   const idleCadence = await panel.chartCadence();
   check('UI-31 idle history keeps scrolling at display cadence without the cursor', idleCadence.frames >= 10 && idleCadence.changed >= idleCadence.frames * 0.8, JSON.stringify(idleCadence));
@@ -1878,10 +1946,10 @@ try {
     steps: graphRates.map((tps, i) => ({ tps, ms: 2000, tokens: tps * 2, at: Date.now() - (4 - i) * 1000, aborted: false })),
     series: { t0: Date.now() - 2000, step: 250, v: [250, 250, 250] },
   });
-  await panel.set(graphState);
-  const graphRead = await panel.read();
   const expectedShare = (v, max = 3000) => v <= 100 ? 0.35 * v / 100 : 0.35 + 0.65 * Math.log10(v / 100) / Math.log10(max / 100);
   const expectedY = (v, g, pad, max = 3000) => g.height - pad - expectedShare(v, max) * (g.height - 2 * pad);
+  await panel.set(graphState);
+  const graphRead = await settle(panel, (data) => Math.abs(data.chartGeometry[0].dotY - expectedY(250, data.chartGeometry[0], 8)) < 0.11);
   const [liveG, stepG] = graphRead.chartGeometry;
   check('graph: a 250 t/s live trace uses over half the plot under a 3k peak', Math.abs(liveG.dotY - expectedY(250, liveG, 8)) < 0.11 && (liveG.height - 8 - liveG.dotY) / (liveG.height - 16) > 0.5, JSON.stringify(liveG));
   check('graph: live average and peak use the same mapping', Math.abs(liveG.avgY - expectedY(150, liveG, 8)) < 0.11 && liveG.peakY === 8);
@@ -1897,10 +1965,10 @@ try {
   check('graph: step hover still reads raw t/s', /^250 t\/s/.test(rawStep.stepsHoverText ?? ''), rawStep.stepsHoverText);
   await panel.leave('[data-chart="steps"]');
   await panel.set({ ...graphState, rates: { avg: 150, peak: 12000 }, series: { ...graphState.series, v: [250, 250, 250] } });
-  const giantGraph = await panel.read();
+  const giantGraph = await settle(panel, (data) => Math.abs(data.chartGeometry[0].dotY - expectedY(250, data.chartGeometry[0], 8, 12000)) < 0.11);
   check('graph: the axis grows dynamically beyond the example 3k spike', Math.abs(giantGraph.chartGeometry[0].dotY - expectedY(250, giantGraph.chartGeometry[0], 8, 12000)) < 0.11 && giantGraph.gridLabels.some((label) => label.endsWith('k')), giantGraph.gridLabels.join(' | '));
   await panel.set({ ...graphState, rates: { avg: 60, peak: 100 }, series: { ...graphState.series, v: [60] } });
-  const slowGraph = await panel.read();
+  const slowGraph = await settle(panel, (data) => Math.abs(data.chartGeometry[0].dotY - expectedY(60, data.chartGeometry[0], 8, 300)) < 0.11);
   check('graph: a single slow sample and a low peak use the 300 floor', Math.abs(slowGraph.chartGeometry[0].dotY - expectedY(60, slowGraph.chartGeometry[0], 8, 300)) < 0.11 && Math.abs(slowGraph.peakLineY - expectedY(100, slowGraph.chartGeometry[0], 8, 300)) < 0.11);
 
   // --- budget ----------------------------------------------------------------
@@ -2177,6 +2245,13 @@ try {
   );
   await status.delay(0);
   await new Promise((resolve) => setTimeout(resolve, 1800));
+
+  const statusRise = await measureCurveRise(status);
+  check('Work Status curve rises through intermediate heights alongside the eased number', statusRise.frames >= 6 && statusRise.heights >= 6, JSON.stringify(statusRise));
+  const statusCadence = await status.chartCadence();
+  check('Work Status curve follows display frames without pointer input', statusCadence.frames >= 10 && statusCadence.changed >= statusCadence.frames * 0.8, JSON.stringify(statusCadence));
+  const statusHighRefresh = await status.fastFrames();
+  check('Work Status curve draws on every 120 Hz callback', statusHighRefresh === 40, `${statusHighRefresh} draws / 40 frames`);
 
   // A section with no chat open says why it is empty instead of drawing a box.
   await status.switchSession(state(), null);
