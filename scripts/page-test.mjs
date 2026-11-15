@@ -897,6 +897,19 @@ try {
     /^~\$/.test(partialUi.costRate ?? '') && /published rate/.test(partialUi.costRateTitle ?? ''),
     `${partialUi.costRate} · ${String(partialUi.costRateTitle).slice(0, 60)}`,
   );
+  // The record can hold more steps than the meter keeps (1,000 per member);
+  // the Effective tooltip says how many were priced. The note was written and
+  // then overwritten by the tooltip's own assignment, so it never showed.
+  await panel.set({ ...priced(), stepsKnown: 1_500, stepsSeq: 77 });
+  const keptUi = await panel.read();
+  check(
+    'UI-25 the effective rate says when the record holds more steps than were priced',
+    / · the record holds 1\.5k steps, 2 priced$/.test(keptUi.costRateTitle ?? ''),
+    String(keptUi.costRateTitle).slice(-80),
+  );
+  await panel.set(priced());
+  const keptUiBack = await panel.read();
+  check('UI-25 and says nothing when every step was priced', !/record holds/.test(keptUiBack.costRateTitle ?? ''), String(keptUiBack.costRateTitle).slice(-60));
 
   const staleCard = {
     ...CLAUDE_CARD,

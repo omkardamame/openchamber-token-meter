@@ -417,11 +417,6 @@ function paintCost(data) {
 
   ui.apiBadge.hidden = !api;
   ui.costTotal.textContent = priced ? `${floor}${money(cost.total)}` : '—';
-  ui.costRate.title = `${ui.costRate.title}${
-    data.stepsKnown && data.steps?.length && data.stepsKnown > data.steps.length
-      ? ` · the record holds ${compact(data.stepsKnown)} steps, ${compact(data.steps.length)} priced`
-      : ''
-  }`;
   ui.costTotal.title = api
     ? priced
       ? [
@@ -469,7 +464,13 @@ function paintCost(data) {
   ui.costRate.title = api
     ? `API value divided by ${
         cost.lowerBound ? 'the tokens that have a published rate' : 'the tokens in the priced steps'
-      } · billed ${rateMoney(cost.billed?.perMillion ?? 0)} / 1M`
+      } · billed ${rateMoney(cost.billed?.perMillion ?? 0)} / 1M${
+        // The record can hold more steps than the meter keeps; say so, so the
+        // Consumed cell and this rate can be reconciled.
+        data.stepsKnown && data.steps?.length && data.stepsKnown > data.steps.length
+          ? ` · the record holds ${compact(data.stepsKnown)} steps, ${compact(data.steps.length)} priced`
+          : ''
+      }`
     : 'effective: this session’s cost divided by every token it processed';
 
   // A card is resolved for the current model, so it is never stale. Recovered
