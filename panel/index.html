@@ -622,6 +622,30 @@
         font-size: 10.5px;
         white-space: nowrap;
       }
+      /* A limit that was reached: the number and the chip take the warning
+         colour; the words are in the titles, so colour is never the only cue. */
+      .cost-grid .cell-value[data-over='true'],
+      .chip.budget-chip[data-over='true'] {
+        color: var(--oc-warning);
+      }
+      .chip.budget-chip[data-over='true'] {
+        border-color: var(--oc-warning);
+      }
+      .budget-form {
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+      }
+      .budget-fields {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 8px;
+      }
+      .budget-actions {
+        display: flex;
+        justify-content: flex-end;
+        gap: 6px;
+      }
       .cell-label .api-badge {
         font-style: normal;
         font-size: 9.5px;

@@ -123,7 +123,51 @@ const harness = `<!doctype html><meta charset="utf-8"><title>page test</title>
       return;
     }
     if (message.type === 'set-height') return;
+    // The extension's server storage, kept in this page, and every toast the
+    // frame asked for, so a test can count them.
+    if (message.type === 'storage') {
+      const op = message.payload.op;
+      const key = message.payload.key;
+      if (op === 'get') reply({ storage: true, op, found: key in window.__storage, value: window.__storage[key] });
+      else if (op === 'set') { window.__storage[key] = message.payload.value; reply({ storage: true, op }); }
+      else if (op === 'delete') { delete window.__storage[key]; reply({ storage: true, op }); }
+      else reply({ storage: true, op: 'keys', keys: Object.keys(window.__storage).sort() });
+      return;
+    }
+    if (message.type === 'toast') {
+      window.__toasts.push(message.payload);
+      reply({});
+      return;
+    }
   });
+  window.__storage = {};
+  window.__toasts = [];
+  // Type into a field the way a reader does: the value, then an input event.
+  window.__type = (selector, text) => {
+    const frame = document.getElementById('f');
+    const node = frame.contentDocument.querySelector(selector);
+    if (!node) return false;
+    node.value = text;
+    node.dispatchEvent(new frame.contentWindow.Event('input', { bubbles: true }));
+    return true;
+  };
+  window.__budget = () => {
+    const doc = document.getElementById('f').contentDocument;
+    const form = doc.querySelector('.budget-form');
+    return {
+      chip: doc.querySelector('.budget-chip').textContent,
+      chipDisabled: doc.querySelector('.budget-chip').disabled,
+      chipOver: doc.querySelector('.budget-chip').dataset.over ?? null,
+      formShown: Boolean(form) && !form.hidden && getComputedStyle(form).display !== 'none',
+      fields: [...doc.querySelectorAll('.budget-form input')].length,
+      errors: [...doc.querySelectorAll('.budget-form .oc-sdk-field-note')].filter((n) => !n.hidden).map((n) => n.textContent),
+      totalOver: doc.querySelector('.cost-total').dataset.over ?? null,
+      turnOver: doc.querySelector('.cost-turn').dataset.over ?? null,
+      totalTitle: doc.querySelector('.cost-total').title,
+      stored: window.__storage.budget ?? null,
+      toasts: window.__toasts.map((t) => t.message),
+    };
+  };
   window.__delayMs = 0;
   window.__setState = (next) => { window.__state = next; };
   // The reset is a minute in use; the frame reads this at call time.
@@ -504,6 +548,8 @@ const run = async (page) => {
       return done;
     },
     click: async (selector) => Boolean(JSON.parse(await browser(['eval', `window.__click(${JSON.stringify(selector)})`]))),
+    type: async (selector, text) => Boolean(JSON.parse(await browser(['eval', `window.__type(${JSON.stringify(selector)}, ${JSON.stringify(text)})`]))),
+    budget: async () => JSON.parse(JSON.parse(await browser(['eval', 'JSON.stringify(window.__budget())']))),
     wheelFrames: async (selector, deltaY, frames) =>
       JSON.parse(await browser(['eval', `window.__wheelFrames(${JSON.stringify(selector)}, ${deltaY}, ${frames})`])),
     key: async (selector, key) => Boolean(JSON.parse(await browser(['eval', `window.__key(${JSON.stringify(selector)}, ${JSON.stringify(key)})`]))),
@@ -1711,6 +1757,100 @@ try {
     'panel returns the peak line to the top as soon as the burst passes',
     settled.peakLineY === 8,
     `y ${settled.peakLineY}`,
+  );
+
+  // --- budget ----------------------------------------------------------------
+  // A limit is set from the Cost block's chip, stored in the extension's server
+  // storage, colours the number that reached it and toasts once when a number
+  // crosses it while the panel watches. The canned answer has no book: its
+  // total is $0.31 recorded, its last turn $0.08.
+  const SESSION_FIELD = '.budget-fields > :nth-child(1) input';
+  const TURN_FIELD = '.budget-fields > :nth-child(2) input';
+  const SAVE = '.budget-actions > :nth-child(1)';
+  const CLEAR = '.budget-actions > :nth-child(2)';
+  const costAt = (total) => state({ cost: { ...state().cost, total } });
+  await panel.set(state());
+  const budgetIdle = await panel.budget();
+  check(
+    'budget: the chip offers a limit once storage has answered',
+    !budgetIdle.chipDisabled && budgetIdle.chip === 'set budget' && budgetIdle.totalOver === 'false' && !budgetIdle.formShown,
+    JSON.stringify(budgetIdle),
+  );
+  await panel.click('.budget-chip');
+  await panel.wait(200);
+  await panel.type(SESSION_FIELD, 'lots');
+  await panel.click(SAVE);
+  await panel.wait(200);
+  const budgetBad = await panel.budget();
+  check(
+    'budget: two fields, and a limit that is not an amount is refused, not stored',
+    budgetBad.formShown && budgetBad.fields === 2 && /dollar amount above 0/.test(budgetBad.errors.join(' ')) && budgetBad.stored === null,
+    JSON.stringify(budgetBad),
+  );
+  await panel.type(SESSION_FIELD, '0.25');
+  await panel.type(TURN_FIELD, '$1');
+  await panel.click(SAVE);
+  await panel.wait(300);
+  const budgetOver = await panel.budget();
+  check(
+    'budget: a saved limit is stored and the number that reached it turns warning',
+    JSON.stringify(budgetOver.stored) === '{"session":0.25,"turn":1}' &&
+      !budgetOver.formShown &&
+      budgetOver.totalOver === 'true' &&
+      budgetOver.turnOver === 'false' &&
+      budgetOver.chip === 'budget 124%' &&
+      budgetOver.chipOver === 'true' &&
+      /at or over your \$0\.2500 session budget/.test(budgetOver.totalTitle),
+    JSON.stringify(budgetOver),
+  );
+  check('budget: setting a limit below the current number does not toast', budgetOver.toasts.length === 0, JSON.stringify(budgetOver.toasts));
+  await panel.click('.budget-chip');
+  await panel.wait(200);
+  await panel.type(SESSION_FIELD, '0.5');
+  await panel.type(TURN_FIELD, '');
+  await panel.click(SAVE);
+  await panel.wait(300);
+  const budgetUnder = await panel.budget();
+  check(
+    'budget: under the limit the chip says how much of it is used',
+    JSON.stringify(budgetUnder.stored) === '{"session":0.5,"turn":null}' &&
+      budgetUnder.chip === 'budget 62%' &&
+      budgetUnder.totalOver === 'false' &&
+      // The old limit leaves the title with the save, not with the next poll.
+      !/session budget/.test(budgetUnder.totalTitle),
+    JSON.stringify(budgetUnder),
+  );
+  await panel.set(costAt(0.6));
+  await panel.set(costAt(0.7));
+  const budgetCrossed = await panel.budget();
+  check(
+    'budget: crossing the limit while watching toasts once',
+    budgetCrossed.toasts.length === 1 &&
+      budgetCrossed.toasts[0] === 'Token Meter: this session reached your $0.5000 budget ($0.6000)' &&
+      budgetCrossed.totalOver === 'true',
+    JSON.stringify(budgetCrossed.toasts),
+  );
+  await panel.switchSession(costAt(0.9), 'ses_budget');
+  await panel.wait(1200);
+  const budgetOpened = await panel.budget();
+  check(
+    'budget: opening a session that is already over colours it without a toast',
+    budgetOpened.toasts.length === 1 && budgetOpened.totalOver === 'true',
+    `${budgetOpened.toasts.length} toasts, over ${budgetOpened.totalOver}`,
+  );
+  await panel.click('.budget-chip');
+  await panel.wait(200);
+  await panel.click(CLEAR);
+  await panel.wait(300);
+  const budgetCleared = await panel.budget();
+  check(
+    'budget: clearing removes the stored limits',
+    budgetCleared.stored === null &&
+      budgetCleared.chip === 'set budget' &&
+      budgetCleared.totalOver === 'false' &&
+      budgetCleared.chipOver === 'false' &&
+      !/session budget/.test(budgetCleared.totalTitle),
+    JSON.stringify(budgetCleared),
   );
 
   // --- robustness -----------------------------------------------------------

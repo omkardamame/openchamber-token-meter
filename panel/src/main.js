@@ -1,5 +1,5 @@
 import { HostRequestError, connectHost } from '@openchamber/sdk';
-import { applyHostReady, mountBanner, mountEmpty } from '@openchamber/sdk/ui';
+import { applyHostReady, mountBanner, mountButton, mountEmpty, mountTextField } from '@openchamber/sdk/ui';
 import { compact, duration, percent, seconds } from '../../shared/summary.js';
 import { easeToward, seriesPoints, smoothPath } from '../../shared/chart.js';
 import { dotState, mountCells, paintCells } from '../../shared/cells.js';
@@ -177,7 +177,8 @@ function build() {
     </section>
 
     <section class="block cost">
-      <div class="block-head" title="This session and its subagents"><span>Cost</span></div>
+      <div class="block-head"><span title="This session and its subagents">Cost</span><button type="button" class="chip budget-chip" disabled>set budget</button></div>
+      <div class="budget-form" hidden></div>
       <div class="grid cost-grid">
         <div class="cell"><span class="cell-label">Total<i class="api-badge" hidden>API</i></span><span class="cell-value cost-total">—</span></div>
         <div class="cell"><span class="cell-label">Last turn</span><span class="cell-value cost-turn">—</span></div>
@@ -229,6 +230,8 @@ function build() {
     costRate: app.querySelector('.cost-rate'),
     costRates: app.querySelector('.cost-rates'),
     apiBadge: app.querySelector('.api-badge'),
+    budgetChip: app.querySelector('.budget-chip'),
+    budgetForm: app.querySelector('.budget-form'),
     footClock: app.querySelector('.foot-clock'),
     subsBlock: app.querySelector('.subagents'),
     subsMeta: app.querySelector('.subs-meta'),
@@ -611,6 +614,156 @@ function paintRecoveredRates(cost, rates, tariff) {
           : cost.ratesNote === 'noCache'
             ? 'no cache-read tokens yet; the fit cannot separate the cache rate'
             : 'not enough differently shaped steps to recover the model’s input, output and cache rates';
+}
+
+// The reader's spending limits, in dollars of the Cost block's own headline
+// (API value with a price book, the recorded cost without). Kept in the
+// extension's server storage, so one setting covers every session and frame.
+const BUDGET_KEY = 'budget';
+let budget = { session: null, turn: null };
+// Which limits already toasted, so a limit speaks once per session or turn.
+const budgetToasted = new Set();
+// The first answer after a switch, a load or a save only marks what is already
+// over: opening an expensive old session, or setting a limit below the current
+// number, is not news.
+let budgetQuiet = true;
+
+/** A stored limit is a positive dollar amount, or no limit at all. */
+function limitOf(value) {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : null;
+}
+
+function normalizeBudget(value) {
+  return { session: limitOf(value?.session), turn: limitOf(value?.turn) };
+}
+
+/** A field's text as a limit: empty is no limit, `$` is allowed. */
+function parseLimit(text) {
+  const trimmed = String(text ?? '').trim().replace(/^\$/, '').trim();
+  if (!trimmed) return { value: null };
+  const value = Number(trimmed);
+  return limitOf(value) === null ? { error: 'a dollar amount above 0, like 5 or 0.50' } : { value };
+}
+
+/**
+ * Colour the numbers that passed their limit, say how much of it is used on
+ * the chip, and toast once when a limit is crossed while the panel watches.
+ */
+function paintBudget(data) {
+  const cost = data?.cost ?? {};
+  const money = cost.mode === 'api' ? moneyValue : money4;
+  const total = typeof cost.total === 'number' ? cost.total : null;
+  const turnValue = typeof cost.lastTurn === 'number' ? cost.lastTurn : null;
+  const overSession = budget.session !== null && total !== null && total >= budget.session;
+  const overTurn = budget.turn !== null && turnValue !== null && turnValue >= budget.turn;
+  ui.costTotal.dataset.over = overSession ? 'true' : 'false';
+  ui.costTurn.dataset.over = overTurn ? 'true' : 'false';
+  if (overSession) ui.costTotal.title = `${ui.costTotal.title} · at or over your ${money(budget.session)} session budget`;
+  if (overTurn) ui.costTurn.title = `${ui.costTurn.title} · at or over your ${money(budget.turn)} turn budget`;
+
+  const shares = [];
+  const lines = [];
+  if (budget.session !== null) {
+    lines.push(`session ${total === null ? '—' : money(total)} of ${money(budget.session)}`);
+    if (total !== null) shares.push(total / budget.session);
+  }
+  if (budget.turn !== null) {
+    lines.push(`turn ${turnValue === null ? '—' : money(turnValue)} of ${money(budget.turn)}`);
+    if (turnValue !== null) shares.push(turnValue / budget.turn);
+  }
+  const chip = ui.budgetChip;
+  if (!chip.disabled) {
+    chip.textContent = lines.length === 0 ? 'set budget' : shares.length ? `budget ${Math.round(Math.max(...shares) * 100)}%` : 'budget set';
+    chip.title = lines.length ? `${lines.join(' · ')} · click to change` : 'warn when this session or one turn passes a dollar amount';
+  }
+  chip.dataset.over = overSession || overTurn ? 'true' : 'false';
+
+  if (!data || !sessionId) return;
+  const due = [];
+  if (overSession) due.push([`${sessionId}|session|${budget.session}`, `this session reached your ${money(budget.session)} budget (${money(total)})`]);
+  if (overTurn) {
+    due.push([
+      `${sessionId}|turn|${data.turn?.startedAt ?? ''}|${budget.turn}`,
+      `this turn reached your ${money(budget.turn)} budget (${money(turnValue)})`,
+    ]);
+  }
+  for (const [key, message] of due) {
+    if (budgetToasted.has(key)) continue;
+    budgetToasted.add(key);
+    if (budgetQuiet) continue;
+    host.toast({ kind: 'info', message: `Token Meter: ${message}` }).catch((error) => {
+      console.warn('token meter: the budget toast was refused', error);
+    });
+  }
+  budgetQuiet = false;
+}
+
+/** The two limits as fields, built fresh each time the form opens. */
+function openBudgetForm() {
+  const form = ui.budgetForm;
+  const draft = {
+    session: budget.session === null ? '' : String(budget.session),
+    turn: budget.turn === null ? '' : String(budget.turn),
+  };
+  const fields = el('div', 'budget-fields');
+  const actions = el('div', 'budget-actions');
+  form.replaceChildren(fields, actions);
+  const sessionField = mountTextField(fields, {
+    label: 'Session, $',
+    value: draft.session,
+    placeholder: 'no limit',
+    onChange: (value) => {
+      draft.session = value;
+      sessionField.update({ error: undefined });
+    },
+  });
+  const turnField = mountTextField(fields, {
+    label: 'Turn, $',
+    value: draft.turn,
+    placeholder: 'no limit',
+    onChange: (value) => {
+      draft.turn = value;
+      turnField.update({ error: undefined });
+    },
+  });
+  const store = (next) => {
+    const write = next.session === null && next.turn === null ? host.storage.delete(BUDGET_KEY) : host.storage.set(BUDGET_KEY, next);
+    return write.then(() => {
+      budget = next;
+      budgetQuiet = true;
+      closeBudgetForm();
+      // The whole answer, not only the budget: the titles carry the old limit.
+      if (current) render(current);
+      else paintBudget(null);
+    });
+  };
+  const fail = (error) => sessionField.update({ error: `not saved: ${error?.message ?? error}` });
+  mountButton(actions, {
+    label: 'Save',
+    size: 'xs',
+    onClick: () => {
+      const session = parseLimit(draft.session);
+      const turn = parseLimit(draft.turn);
+      sessionField.update({ error: session.error });
+      turnField.update({ error: turn.error });
+      if (session.error || turn.error) return;
+      store({ session: session.value, turn: turn.value }).catch(fail);
+    },
+  });
+  mountButton(actions, {
+    label: 'Clear',
+    size: 'xs',
+    variant: 'ghost',
+    onClick: () => store({ session: null, turn: null }).catch(fail),
+  });
+  form.hidden = false;
+  ui.budgetChip.setAttribute('aria-expanded', 'true');
+}
+
+function closeBudgetForm() {
+  ui.budgetForm.hidden = true;
+  ui.budgetForm.replaceChildren();
+  ui.budgetChip.setAttribute('aria-expanded', 'false');
 }
 
 // The live chart's SVG is built once per size; after that only attributes
@@ -1462,6 +1615,7 @@ function render(data) {
   paintCells(rowNodes, data);
   paintCost(data);
   paintModels(data.cost);
+  paintBudget(data);
   const totals = data.totals ?? {};
   // `live` says the session is working right now, not where the numbers came
   // from: an idle session keeps its usage record, and labelling a frozen number
@@ -1689,6 +1843,26 @@ host.onReady((ctx) => {
         flash(ui.footCopy, 'copy failed');
       }
     });
+    // The limits load once; until they do the chip cannot open a form that
+    // would save over them. A failed read says why and stays shut.
+    ui.budgetChip.setAttribute('aria-expanded', 'false');
+    host.storage
+      .get(BUDGET_KEY)
+      .then((value) => {
+        budget = normalizeBudget(value);
+        budgetQuiet = true;
+        ui.budgetChip.disabled = false;
+        if (current) render(current);
+        else paintBudget(null);
+      })
+      .catch((error) => {
+        ui.budgetChip.title = `budget unavailable: ${error?.message ?? error}`;
+        console.warn('token meter: could not read the budget', error);
+      });
+    ui.budgetChip.addEventListener('click', () => {
+      if (ui.budgetForm.hidden) openBudgetForm();
+      else closeBudgetForm();
+    });
     ui.footCeiling.addEventListener('click', () => {
       ceilingMode = ceilingMode === 'session' ? 'turn' : 'session';
       ui.footCeiling.textContent = ceilingMode === 'turn' ? 'turn peak' : 'session peak';
@@ -1848,6 +2022,8 @@ host.onReady((ctx) => {
   paintCells(rowNodes, {});
   paintCost({});
   paintModels({});
+  budgetQuiet = true;
+  paintBudget(null);
   // The header too: the session that left may have been generating, and its
   // breathing dot and turn timer must not sit under the new session's name
   // for the first load (up to six seconds on a long history).
