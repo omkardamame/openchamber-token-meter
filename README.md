@@ -30,8 +30,11 @@ https://github.com/omkardamame/openchamber-token-meter.git
   underneath in the same tier colours.
 - **Graph** — the last 60 seconds, zoomable with the wheel out to an hour (the
   service keeps 250 ms samples, then one-second and ten-second buckets). The
-  plot is scaled to the peak, so the red `peak` line is the ceiling and carries
-  its age; the green `avg` line sits below. Above both is the live estimate.
+  panel charts use a dynamic linear/log scale: 0–100 t/s takes the bottom 35%,
+  with bursts compressed logarithmically above it and a 300 t/s minimum ceiling.
+  Clean ticks adapt to the range and chart height; the red `peak` and green `avg`
+  lines use the same mapping. A peak below 300 stays below the top, not inflated
+  to the ceiling. Rates and hover readouts stay in t/s.
 - **Subagents** — each subagent still working, its own live rate, and how many
   of the tree are running. `N subagents` opens a roster of every subagent
   session in the tree (an hour wide) with what each consumed, cost, its average

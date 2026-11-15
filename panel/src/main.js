@@ -1,7 +1,7 @@
 import { HostRequestError, connectHost } from '@openchamber/sdk';
 import { applyHostReady, mountBanner, mountButton, mountEmpty, mountTextField } from '@openchamber/sdk/ui';
 import { compact, duration, percent, seconds } from '../../shared/summary.js';
-import { easeToward, seriesPoints, smoothPath } from '../../shared/chart.js';
+import { easeToward, rateCeiling, rateTicks, seriesPoints, smoothPath, symlogShare } from '../../shared/chart.js';
 import { dotState, mountCells, paintCells } from '../../shared/cells.js';
 import { el } from '../../shared/dom.js';
 import { speedTier } from '../../shared/speed-color.js';
@@ -153,7 +153,7 @@ function build() {
 
     <section class="live">
       <div class="speed">
-        <span class="stat-label">live <em>est</em></span>
+        <span class="stat-label">live <em>est · linear/log</em></span>
         <span class="speed-value" title="the session and every streaming subagent, added together"><b class="tps-value">0</b><i>t/s</i></span>
         <span class="speed-note tps-sub">no generation right now</span>
         <span class="speed-last last-line"><span class="last-rate"></span><span class="last-rest"></span></span>
@@ -194,7 +194,7 @@ function build() {
     </section>
 
     <section class="block steps">
-      <div class="block-head"><span>Per step</span><span class="block-meta"><span class="steps-count"></span> <span class="steps-avg"></span> <span class="steps-peak"></span></span></div>
+      <div class="block-head"><span>Per step <small>linear/log</small></span><span class="block-meta"><span class="steps-count"></span> <span class="steps-avg"></span> <span class="steps-peak"></span></span></div>
       <div class="chart-wrap"><svg class="chart" data-chart="steps" aria-hidden="true"></svg></div>
       <div class="steps-axis" hidden><span class="steps-start"></span><span class="steps-now"></span><span class="steps-hover" hidden></span></div>
       <div class="legend" hidden><span><i class="swatch main"></i>session</span><span><i class="swatch sub"></i>subagent</span></div>
@@ -778,16 +778,13 @@ const LIVE_PARTS = [
   'cross-dot',
   'dot',
   'fill',
-  'half-grid',
-  'half-label',
+  'scale',
   'line',
   'peak',
   'peak-label',
   'time-0.25',
   'time-0.5',
   'time-0.75',
-  'top-grid',
-  'top-label',
 ];
 let liveSkeleton = null;
 let liveSkeletonKey = '';
@@ -808,10 +805,7 @@ function ensureLive(svg, width, height, pad) {
     `<stop offset="55%" stop-color="var(--oc-primary)" stop-opacity="0.12" />` +
     `<stop offset="100%" stop-color="var(--oc-primary)" stop-opacity="0" />` +
     `</linearGradient></defs>` +
-    `<line data-n="top-grid" x1="0" x2="${width}" stroke="var(--oc-border)" stroke-width="1" stroke-dasharray="2 4" opacity="0.8" />` +
-    `<text data-n="top-label" x="2" text-anchor="start" fill="var(--oc-muted)" font-size="9.5" opacity="0.8" data-role="grid-label"></text>` +
-    `<line data-n="half-grid" x1="0" x2="${width}" stroke="var(--oc-border)" stroke-width="1" stroke-dasharray="2 4" opacity="0.8" />` +
-    `<text data-n="half-label" x="2" text-anchor="start" fill="var(--oc-muted)" font-size="9.5" opacity="0.8" data-role="grid-label"></text>` +
+    `<g data-n="scale"></g>` +
     timeLines +
     `<line data-n="baseline" x1="0" x2="${width}" stroke="var(--oc-primary)" stroke-width="1.6" opacity="0.45" />` +
     `<path data-n="fill" fill="url(#tm-live-fill)" data-role="live-fill" />` +
@@ -841,6 +835,16 @@ const placeY = (node, y, width) => {
   node.setAttribute('y2', y.toFixed(1));
   node.setAttribute('x2', width);
 };
+
+/** Shared axis geometry for both panel charts. Labels sit inside the existing
+ * plot, with no new gutter or change to pointer coordinates. */
+function scaleGrid(maximum, width, height, pad) {
+  return rateTicks(maximum, height - 2 * pad).map((tick) => {
+    const y = height - pad - tick.share * (height - 2 * pad);
+    return `<line x1="0" x2="${width}" y1="${y.toFixed(1)}" y2="${y.toFixed(1)}" stroke="var(--oc-border)" stroke-dasharray="2 4" opacity="0.6" />` +
+      `<text x="2" y="${(y < pad + 10 ? y + 10 : y - 3).toFixed(1)}" fill="var(--oc-muted)" font-size="9.5" data-role="grid-label">${tick.label}</text>`;
+  }).join('');
+}
 
 /** The best step of this turn, 0 when there is no turn to measure. */
 function turnPeakOf(data) {
@@ -926,11 +930,8 @@ function drawLive(data) {
   rates.avg = Number(rates.avg) || 0;
   rates.peak = Number(rates.peak) || 0;
 
-  // Draw a smoothed curve first: the samples are a 250 ms average already, and
-  // the providers arrive in bursts, so a short exponential pass keeps the shape
-  // without inventing points the service did not measure. The scale follows the
-  // session's peak, so the plot's top is the number on the red line and the
-  // line cannot drift; only a live estimate above that peak raises the ceiling.
+  // Smooth in rate units, then map to the axis: geometry never feeds back into
+  // a measured value, a reference line's rate or the hover readout.
   const smooth = [];
   for (const point of visible) {
     const previous = smooth[smooth.length - 1];
@@ -938,46 +939,23 @@ function drawLive(data) {
     smooth.push(value);
   }
   const liveTop = smooth.reduce((best, value) => Math.max(best, value), 0);
-  // The top of the plot is the session's peak: its fastest finished step. The
-  // red line sits on that edge and the curve scales under it, so the line means
-  // what its label says instead of sliding as the window's own maximum moved.
-  // The window's smoothed top still sets the scale when it beats the peak — a
-  // live estimate is allowed to exceed the best finished step, and that sample
-  // must not be drawn above the plot. The 8 t/s floor is for an empty window,
-  // where every value on the axis would otherwise be zero.
   const turnPeak = ceilingMode === 'turn' ? turnPeakOf(data) : 0;
   const turnMode = ceilingMode === 'turn' && turnPeak > 0;
-  // The line is the ceiling, so the ceiling has to include the curve that is
-  // being drawn: a finished step's rate lags a burst by a whole turn, and the
-  // curve would cross a line that claims to be the peak.
+  // Retain the existing peak selection (finished step or visible live burst).
+  // The axis has a 300 floor; a smaller peak is marked at its actual value.
   const ceilingPeak = Math.max(turnMode ? turnPeak : rates.peak, liveTop);
-  const max = Math.max(8, ceilingPeak);
-  const share = (value) => Math.min(1, Math.max(0, value) / max);
+  const max = rateCeiling(Math.max(ceilingPeak, rates.avg));
+  const share = (value) => symlogShare(value, max);
   const lineY = (value) => height - pad - share(value) * (height - pad * 2);
   const xOf = (point) => ((point.t - from) / liveWindowMs) * width;
   const baseline = height - pad;
 
-  // The scale down the left edge: the top and the middle of the plot, labelled
-  // with the rate they stand for. An empty or all-zero window says nothing,
-  // because every number on it would be the 8 t/s floor, not a measurement.
-  if (liveTop > 0) {
-    const topValue = Math.round(max);
-    const halfValue = Math.round(max / 2);
-    const topY = lineY(max);
-    const halfY = lineY(max / 2);
-    placeY(nodes['top-grid'], topY, width);
-    placeY(nodes['half-grid'], halfY, width);
-    nodes['top-label'].textContent = String(topValue);
-    nodes['top-label'].setAttribute('y', (topY + 10).toFixed(1));
-    showPart(nodes['top-grid'], true);
-    showPart(nodes['top-label'], true);
-    // A scale near 1 rounds both lines to the same number; one label is enough.
-    nodes['half-label'].textContent = String(halfValue);
-    nodes['half-label'].setAttribute('y', (halfY - 3).toFixed(1));
-    showPart(nodes['half-grid'], true);
-    showPart(nodes['half-label'], halfValue !== topValue);
-  } else {
-    for (const name of ['top-grid', 'top-label', 'half-grid', 'half-label']) showPart(nodes[name], false);
+  // Rebuild the small tick group only when its values or scale change, not on
+  // every animation frame. Empty plots retain their quiet baseline.
+  const gridKey = liveTop > 0 ? `${max}|${width}|${height}` : '';
+  if (nodes.scale.dataset.key !== gridKey) {
+    nodes.scale.dataset.key = gridKey;
+    nodes.scale.innerHTML = gridKey ? scaleGrid(max, width, height, pad) : '';
   }
 
   let avgLabelY = null;
@@ -1029,16 +1007,15 @@ function drawLive(data) {
     showPart(nodes['peak-label'], false);
   }
 
-  // The sample nearest the pointer. Its rate is the smoothed value the curve
-  // draws, and its age is measured from the window's own clock, so the readout
-  // names a point a reader can put a finger on.
+  // The sample nearest the pointer. Geometry follows the smoothed curve, but
+  // the readout keeps the sample's raw rate, never a logarithmic coordinate.
   let hovered = null;
   if (liveHoverX !== null && smooth.length > 1) {
     let nearest = 0;
     for (let index = 1; index < visible.length; index += 1) {
       if (Math.abs(xOf(visible[index]) - liveHoverX) < Math.abs(xOf(visible[nearest]) - liveHoverX)) nearest = index;
     }
-    hovered = { x: xOf(visible[nearest]), y: lineY(smooth[nearest]), value: smooth[nearest], at: visible[nearest].t };
+    hovered = { x: xOf(visible[nearest]), y: lineY(smooth[nearest]), value: visible[nearest].v, at: visible[nearest].t };
   }
   if (hovered) {
     const cross = nodes.cross;
@@ -1195,10 +1172,7 @@ function drawSteps(data) {
   const totalMs = steps.reduce((sum, step) => sum + step.ms, 0);
   const average = totalMs > 0 ? (totalTokens / totalMs) * 1000 : 0;
   const peak = steps.reduce((best, step) => Math.max(best, step.tps), 0);
-  // The tallest step is the top of the plot: the chart's job is to show the
-  // shape of the session against its own best, and any rounding above the peak
-  // only left an empty band above the bars.
-  const max = peak > 0 ? peak : 1;
+  const max = rateCeiling(peak);
   const slot = width / steps.length;
   // With every step on the chart a long session gets one-pixel bars; a gap
   // under half a pixel would just erase them.
@@ -1240,14 +1214,14 @@ function drawSteps(data) {
   lastDrawnW = width;
   lastDrawnH = height;
   lastDrawnHover = hover;
-  const pieces = [];
+  const pieces = [scaleGrid(max, width, height, pad)];
   if (hover !== null) {
     pieces.push(
       `<rect x="${(hover * slot).toFixed(1)}" y="0" width="${slot.toFixed(1)}" height="${height}" fill="var(--oc-fg)" opacity="0.08" data-role="step-hover-col" />`,
     );
   }
   steps.forEach((step, index) => {
-    const h = Math.max(1.5, (step.tps / max) * (height - pad * 2));
+    const h = Math.max(1.5, symlogShare(step.tps, max) * (height - pad * 2));
     const x = index * slot + (slot - barWidth) / 2;
     const y = height - pad - h;
     const fill = step.sub ? 'var(--oc-info)' : 'var(--oc-primary)';
@@ -1260,15 +1234,15 @@ function drawSteps(data) {
   // The session's own average and best step, over the bars drawn: the same
   // numbers the header shows, in the same colours.
   if (average > 0) {
-    const avgY = height - pad - (average / max) * (height - pad * 2);
+    const avgY = height - pad - symlogShare(average, max) * (height - pad * 2);
     pieces.push(
-      `<line x1="0" y1="${avgY.toFixed(1)}" x2="${width}" y2="${avgY.toFixed(1)}" stroke="var(--oc-success)" stroke-width="1" stroke-dasharray="3 3" opacity="0.75" />`,
+      `<line data-role="step-avg" x1="0" y1="${avgY.toFixed(1)}" x2="${width}" y2="${avgY.toFixed(1)}" stroke="var(--oc-success)" stroke-width="1" stroke-dasharray="3 3" opacity="0.75" />`,
     );
   }
   if (peak > 0) {
-    const peakY = height - pad - (peak / max) * (height - pad * 2);
+    const peakY = height - pad - symlogShare(peak, max) * (height - pad * 2);
     pieces.push(
-      `<line x1="0" y1="${peakY.toFixed(1)}" x2="${width}" y2="${peakY.toFixed(1)}" stroke="var(--oc-error)" stroke-width="1" stroke-dasharray="2 3" opacity="0.7" />`,
+      `<line data-role="step-peak" x1="0" y1="${peakY.toFixed(1)}" x2="${width}" y2="${peakY.toFixed(1)}" stroke="var(--oc-error)" stroke-width="1" stroke-dasharray="2 3" opacity="0.7" />`,
     );
   }
   svg.innerHTML = pieces.join('');

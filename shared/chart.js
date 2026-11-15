@@ -12,6 +12,49 @@
  */
 export const LINEAR_SHARE = 0.76;
 
+// Panel axes: the first 100 t/s get 35% of the plot; bursts share the
+// logarithmic remainder. This is display geometry, never a change to rates.
+export const RATE_FLOOR = 300;
+
+export function rateCeiling(value) {
+  return Number.isFinite(value) ? Math.max(RATE_FLOOR, value) : RATE_FLOOR;
+}
+
+export function symlogShare(value, maximum) {
+  const max = rateCeiling(maximum);
+  const v = Number.isFinite(value) ? Math.min(max, Math.max(0, value)) : 0;
+  return v <= 100 ? 0.35 * v / 100 : 0.35 + 0.65 * Math.log10(v / 100) / Math.log10(max / 100);
+}
+
+export function rateTickLabel(value) {
+  return value >= 1000 ? `${Number((value / 1000).toPrecision(3))}k` : String(value);
+}
+
+/** Clean ticks, extended by decades rather than capped at a 3k burst.
+ * Greedy pixel spacing keeps labels apart even in the short history chart. */
+export function rateTicks(maximum, height, minGap = 22) {
+  const max = rateCeiling(maximum);
+  const candidates = new Set([0, 50, 100]);
+  for (let power = 2; power <= Math.floor(Math.log10(max)); power += 1) {
+    for (const multiple of [1, 2, 2.5, 3, 5]) {
+      const value = multiple * 10 ** power;
+      if (value >= 250 && value <= max) candidates.add(value);
+    }
+  }
+  const ticks = [];
+  let previousLabelY = Infinity;
+  for (const value of [...candidates].sort((a, b) => a - b)) {
+    const share = symlogShare(value, max);
+    const y = height - share * height;
+    const labelY = y < 10 ? y + 10 : y - 3;
+    if (!ticks.length || previousLabelY - labelY >= minGap) {
+      ticks.push({ value, share, label: rateTickLabel(value) });
+      previousLabelY = labelY;
+    }
+  }
+  return ticks;
+}
+
 export function compress(value, ceiling) {
   if (!(ceiling > 0)) return 0;
   const v = Math.max(0, value);

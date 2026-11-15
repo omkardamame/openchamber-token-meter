@@ -13,7 +13,7 @@ import { execFile, spawnSync } from 'node:child_process';
 import { promisify } from 'node:util';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { seriesPoints, smoothPath } from '../shared/chart.js';
+import { rateCeiling, rateTicks, seriesPoints, smoothPath, symlogShare } from '../shared/chart.js';
 import { duration } from '../shared/summary.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -320,6 +320,18 @@ const harness = `<!doctype html><meta charset="utf-8"><title>page test</title>
       tps: (doc.querySelector('.tps-value') || doc.querySelector('.tps') || {}).textContent,
       bars: doc.querySelectorAll('[data-chart="steps"] rect:not([data-role="step-hover-col"])').length,
       stepSvg: (doc.querySelector('[data-chart="steps"]') || {}).innerHTML ?? '',
+      chartGeometry: ['live', 'steps'].map((name) => {
+        const svg = doc.querySelector('[data-chart="' + name + '"]');
+        if (!svg) return null;
+        return {
+          height: svg.clientHeight,
+          ticks: [...svg.querySelectorAll('[data-role="grid-label"]')].map((n) => ({ label: n.textContent, y: Number(n.getAttribute('y')) })),
+          bars: [...svg.querySelectorAll('rect:not([data-role])')].map((n) => ({ y: Number(n.getAttribute('y')), h: Number(n.getAttribute('height')) })),
+          dotY: Number(svg.querySelector('[data-n="dot"]')?.getAttribute('cy')),
+          avgY: Number(svg.querySelector('[data-role="live-avg"], [data-role="step-avg"]')?.getAttribute('y1')),
+          peakY: Number(svg.querySelector('[data-role="live-peak"], [data-role="step-peak"]')?.getAttribute('y1')),
+        };
+      }),
       subsHidden: doc.querySelector('.subagents') ? doc.querySelector('.subagents').hidden : null,
       legendHidden: doc.querySelector('.legend') ? doc.querySelector('.legend').hidden : null,
       legendText: doc.querySelector('.legend') ? doc.querySelector('.legend').innerText.replace(/\\s+/g, ' ').trim() : null,
@@ -601,6 +613,19 @@ const settle = async (handle, field, want) => {
 };
 
 try {
+  // Graph change: independent expected positions, including boundary, floor,
+  // non-finite inputs and tick spacing at short/tall chart sizes.
+  check('scale: zero and the linear threshold are exact', symlogShare(0, 3000) === 0 && symlogShare(50, 3000) === 0.175 && symlogShare(100, 3000) === 0.35);
+  check('scale: 250 stays legible beneath a 3k spike', Math.abs(symlogShare(250, 3000) - (0.35 + 0.65 * Math.log10(2.5) / Math.log10(30))) < 1e-12 && symlogShare(250, 3000) > 0.5);
+  check('scale: floor, clipping and non-finite values are safe', rateCeiling(0) === 300 && rateCeiling(NaN) === 300 && symlogShare(-1, 300) === 0 && symlogShare(Infinity, 300) === 0 && symlogShare(1000, 0) === 1);
+  const scaleValues = [0, 1, 50, 99.99999, 100, 100.00001, 250, 1000, 3000];
+  check('scale: continuous and strictly increasing through 100', scaleValues.every((v, i) => i === 0 || symlogShare(v, 3000) > symlogShare(scaleValues[i - 1], 3000)) && Math.abs(symlogShare(100.00001, 3000) - symlogShare(99.99999, 3000)) < 1e-6);
+  const tickCases = [74, 98, 184, 800].flatMap((height) => [300, 3000, 30000, 1e6].map((max) => ({ height, max, ticks: rateTicks(max, height) })));
+  check('scale: ticks never overlap, even above 3k or in a short chart', tickCases.every(({ height, max, ticks }) => ticks.every((tick, i) => {
+    const labelY = (t) => { const y = height * (1 - t.share); return y < 10 ? y + 10 : y - 3; };
+    return tick.value <= max && (i === 0 || labelY(ticks[i - 1]) - labelY(tick) >= 22 - 1e-9);
+  })));
+  check('scale: ticks extend dynamically beyond 3k with k labels', rateTicks(30000, 800).some((t) => t.value >= 10000 && t.label.endsWith('k')));
   // --- the shared curve and the turn timer ---------------------------------
   const spike = [
     { x: 0, y: 40 },
@@ -663,11 +688,8 @@ try {
     `curve ${idle.liveTopY}, peak line ${idle.peakLineY}`,
   );
   check(
-    'panel labels the live scale at half and full height',
-    idle.gridLabels.length === 2 &&
-      /^\d+$/.test(idle.gridLabels[0]) &&
-      Number(idle.gridLabels[0]) > 0 &&
-      Math.abs(Number(idle.gridLabels[0]) - 2 * Number(idle.gridLabels[1])) <= 2,
+    'panel labels clean linear/log ticks instead of linear half-height marks',
+    idle.gridLabels.includes('0') && idle.gridLabels.includes('100') && idle.gridLabels.includes('250'),
     idle.gridLabels.join(' | '),
   );
   check('panel marks where 15, 30 and 45 seconds ago sit', idle.timeGrid === 3, String(idle.timeGrid));
@@ -677,7 +699,8 @@ try {
     idle.costTurnTitle === '2 steps · 2.0k generated tokens',
     String(idle.costTurnTitle),
   );
-  check('panel pins the tallest step to the top of its chart', idle.stepsPeakTop === 6, String(idle.stepsPeakTop));
+  const idleStepPlot = idle.chartGeometry[1].height - 12;
+  check('panel keeps a sub-300 peak below the ceiling', Math.abs(idle.stepsPeakTop - (6 + idleStepPlot * (1 - symlogShare(180, 300)))) < 0.11, String(idle.stepsPeakTop));
   check('panel shows the last measured step', /last 33 t\/s/.test(idle.text), idle.text.slice(0, 60));
   check(
     'panel puts the last turn cost after the last measured step',
@@ -710,7 +733,7 @@ try {
     `${onePoint.liveDots} dots, line ${onePoint.livePolyline}`,
   );
 
-  // A resting session samples zeros; the 8 t/s floor is not a measured scale.
+  // A resting session samples zeros; the axis floor is not a measured scale.
   await panel.set({ ...oneBase, series: { t0: Date.now() - 2000, step: 250, v: [0, 0, 0, 0] } });
   const flat = await panel.read();
   check('panel leaves the scale unlabelled while nothing was measured', flat.gridLabels.length === 0, flat.gridLabels.join(' | '));
@@ -1450,7 +1473,7 @@ try {
   const lowRate = await low.read();
   check(
     'panel scales the plot to the session peak, not the window',
-    lowRate.liveTopY > 8 && lowRate.peakLineY === 8 && lowRate.gridLabels[0] === '334',
+    lowRate.liveTopY > 8 && lowRate.peakLineY === 8 && lowRate.gridLabels.includes('250'),
     `curve ${lowRate.liveTopY}, peak line ${lowRate.peakLineY}, axis ${lowRate.gridLabels[0]}`,
   );
 
@@ -1458,8 +1481,8 @@ try {
   // between reads, instead of drifting down while an old scale eased away.
   const steady = await panel.read();
   check(
-    'panel pins the peak line to the top of the plot',
-    steady.peakLineY === 8 && steady.gridLabels[0] === '334',
+    'panel pins a peak above the floor to the top of the plot',
+    steady.peakLineY === 8 && steady.gridLabels.includes('250'),
     `y ${steady.peakLineY}, axis ${steady.gridLabels[0]}`,
   );
   check(
@@ -1748,7 +1771,7 @@ try {
   const burst = await panel.read();
   check(
     'panel keeps the peak line on the top edge through a burst, and scales to it',
-    burst.peakLineY === 8 && Number(burst.gridLabels[0]) > 334,
+    burst.peakLineY === 8 && burst.gridLabels.includes('500'),
     `y ${burst.peakLineY}, axis ${burst.gridLabels[0]} with a sustained 900 t/s burst`,
   );
   await panel.set(state());
@@ -1758,6 +1781,41 @@ try {
     settled.peakLineY === 8,
     `y ${settled.peakLineY}`,
   );
+
+  // Graph change: the rendered points, bars and both references must share
+  // the very same geometry while their numbers remain in raw t/s units.
+  const graphRates = [50, 100, 250, 3000];
+  const graphState = state({
+    rates: { avg: 150, peak: 3000 },
+    stepsSeq: 800,
+    stepsKnown: 4,
+    steps: graphRates.map((tps, i) => ({ tps, ms: 2000, tokens: tps * 2, at: Date.now() - (4 - i) * 1000, aborted: false })),
+    series: { t0: Date.now() - 2000, step: 250, v: [250, 250, 250] },
+  });
+  await panel.set(graphState);
+  const graphRead = await panel.read();
+  const expectedShare = (v, max = 3000) => v <= 100 ? 0.35 * v / 100 : 0.35 + 0.65 * Math.log10(v / 100) / Math.log10(max / 100);
+  const expectedY = (v, g, pad, max = 3000) => g.height - pad - expectedShare(v, max) * (g.height - 2 * pad);
+  const [liveG, stepG] = graphRead.chartGeometry;
+  check('graph: a 250 t/s live trace uses over half the plot under a 3k peak', Math.abs(liveG.dotY - expectedY(250, liveG, 8)) < 0.11 && (liveG.height - 8 - liveG.dotY) / (liveG.height - 16) > 0.5, JSON.stringify(liveG));
+  check('graph: live average and peak use the same mapping', Math.abs(liveG.avgY - expectedY(150, liveG, 8)) < 0.11 && liveG.peakY === 8);
+  check('graph: every history bar uses the same linear/log mapping', stepG.bars.length === 4 && stepG.bars.every((bar, i) => Math.abs(bar.y - expectedY(graphRates[i], stepG, 6)) < 0.11), JSON.stringify(stepG.bars));
+  check('graph: history average is transformed after averaging raw rates', Math.abs(stepG.avgY - expectedY(850, stepG, 6)) < 0.11 && stepG.peakY === 6, JSON.stringify(stepG));
+  check('graph: both charts show non-overlapping ticks and name the scale', [liveG, stepG].every((g) => g.ticks.every((t, i) => i === 0 || g.ticks[i - 1].y - t.y >= 21.9)) && (graphRead.text.match(/linear\/log/g) ?? []).length >= 2);
+  await panel.hover('[data-chart="live"]', 0.99);
+  const rawLive = await panel.read();
+  check('graph: live hover still reads raw t/s, not the transformed coordinate', /^250 t\/s ·/.test(rawLive.peakText ?? ''), rawLive.peakText);
+  await panel.leave('[data-chart="live"]');
+  await panel.hover('[data-chart="steps"]', 0.625);
+  const rawStep = await panel.read();
+  check('graph: step hover still reads raw t/s', /^250 t\/s/.test(rawStep.stepsHoverText ?? ''), rawStep.stepsHoverText);
+  await panel.leave('[data-chart="steps"]');
+  await panel.set({ ...graphState, rates: { avg: 150, peak: 12000 }, series: { ...graphState.series, v: [250, 250, 250] } });
+  const giantGraph = await panel.read();
+  check('graph: the axis grows dynamically beyond the example 3k spike', Math.abs(giantGraph.chartGeometry[0].dotY - expectedY(250, giantGraph.chartGeometry[0], 8, 12000)) < 0.11 && giantGraph.gridLabels.some((label) => label.endsWith('k')), giantGraph.gridLabels.join(' | '));
+  await panel.set({ ...graphState, rates: { avg: 60, peak: 100 }, series: { ...graphState.series, v: [60] } });
+  const slowGraph = await panel.read();
+  check('graph: a single slow sample and a low peak use the 300 floor', Math.abs(slowGraph.chartGeometry[0].dotY - expectedY(60, slowGraph.chartGeometry[0], 8, 300)) < 0.11 && Math.abs(slowGraph.peakLineY - expectedY(100, slowGraph.chartGeometry[0], 8, 300)) < 0.11);
 
   // --- budget ----------------------------------------------------------------
   // A limit is set from the Cost block's chip, stored in the extension's server
