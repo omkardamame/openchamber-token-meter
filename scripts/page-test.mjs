@@ -323,6 +323,7 @@ const harness = `<!doctype html><meta charset="utf-8"><title>page test</title>
       totalsSource: (doc.querySelector('.totals-source') || {}).textContent ?? null,
       sectionHead: [...doc.querySelectorAll('.block-head span')].map((n) => n.textContent),
       footClock: (doc.querySelector('.foot-clock') || {}).textContent ?? null,
+      footText: (doc.querySelector('.foot-text') || {}).textContent ?? null,
       subIds: [...doc.querySelectorAll('.sub-row[data-sub]')].map((node) => node.dataset.sub),
       subOut: doc.querySelectorAll('.sub-row.sub-out').length,
       avgLineY: (() => {
@@ -1325,6 +1326,17 @@ try {
     historyUi.totalsSource === 'from history',
     String(historyUi.totalsSource),
   );
+
+  await panel.set(state({ stream: { state: 'retrying', error: 'socket closed' } }));
+  const cutUi = await panel.read();
+  check(
+    'UI-33 a dropped stream says so in the footer',
+    cutUi.footText === 'events reconnecting',
+    String(cutUi.footText),
+  );
+  await panel.set(state());
+  const backUi = await panel.read();
+  check('UI-33 the footer returns to live', backUi.footText === 'live from OpenCode events', String(backUi.footText));
   // A sustained burst, not one sample: the curve is smoothed, so a single
   // 250 ms spike never reaches the peak and must not move the line.
   await panel.set(state({ series: { d: [0, 250, 500, 750, 1000, 1250], step: 250, t0: Date.now() - 6_000, v: [30, 900, 900, 900, 900, 900] } }));
