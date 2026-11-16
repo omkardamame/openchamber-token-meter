@@ -183,6 +183,49 @@ const manyValue = value(many, { turnStartedAt: 500 * 1000 });
 const elapsed = performance.now() - started;
 check('CV-20 1,000 steps under 50 ms', elapsed < 50 && near(manyValue.total, manyValue.models.reduce((sum, m) => sum + m.apiValue, 0)), `${elapsed.toFixed(1)} ms`);
 
+// The turn filter used to keep one price object per step (`rows`) only to sum
+// it later; that retained ~450 B per step in the whole tree. The timeline
+// answers the same question, and these checks pin every edge of it.
+const timeline = value([
+  step({ at: 1000, cost: 4, input: 1e6 }),
+  step({ at: 2000, cost: 2, generated: 1e5 }),
+]);
+check(
+  'CV-26 turn totals include the step exactly at the boundary',
+  near(timeline.turnTotals(1000).api, 6) &&
+    near(timeline.turnTotals(1001).api, 2) &&
+    near(timeline.turnTotals(2000).api, 2) &&
+    near(timeline.turnTotals(2000).billed, 2),
+  JSON.stringify([timeline.turnTotals(1000), timeline.turnTotals(1001), timeline.turnTotals(2000)]),
+);
+check(
+  'CV-27 turn totals reproduce the headline and the last turn',
+  near(manyValue.turnTotals(0).api, manyValue.total) &&
+    near(manyValue.turnTotals(0).billed, manyValue.billed.total) &&
+    near(manyValue.turnTotals(500 * 1000).api, manyValue.lastTurn) &&
+    near(manyValue.turnTotals(500 * 1000).billed, manyValue.billed.lastTurn) &&
+    manyValue.turnTotals(1e15).api === 0 &&
+    manyValue.turnTotals(null).api === 0,
+  `all ${manyValue.turnTotals(0).api}/${manyValue.total}, turn ${manyValue.turnTotals(500 * 1000).api}/${manyValue.lastTurn}`,
+);
+const mixedTurn = value([
+  step({ at: 1000, input: 1e6, cost: 4 }),
+  step({ at: 2000, generated: 1e5, cost: 2 }),
+  step({ at: 2500, cost: 0, input: 1e6, model: 'unknown/model', provider: 'nowhere' }),
+]);
+check(
+  'CV-28 an unpriced step after the boundary adds no API value but keeps the bill',
+  near(mixedTurn.turnTotals(1500).api, 2) && near(mixedTurn.turnTotals(1500).billed, 2),
+  JSON.stringify(mixedTurn.turnTotals(1500)),
+);
+const unsorted = value([step({ at: 2000, generated: 1e5 }), step({ at: 1000, input: 1e6 })]);
+check(
+  'CV-29 an unsorted list still answers the turn filter',
+  near(unsorted.turnTotals(1500).api, 2) && near(unsorted.turnTotals(0).api, 6),
+  JSON.stringify([unsorted.turnTotals(0), unsorted.turnTotals(1500)]),
+);
+check('CV-30 the price result keeps no per-step rows', timeline.rows === undefined);
+
 // --- price-book drift ----------------------------------------------------------
 // `sync-prices --check` names what moved; a scheduled check is read by a person.
 

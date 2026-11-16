@@ -101,7 +101,7 @@ export function createCollector(id) {
     totalsFrom: 'history',
     steps: [],
     stepsSeq: 0,
-    // The full history count, even when steps is capped at 400.
+    // The full history count, even when steps is capped at 1000.
     knownSteps: 0,
     series: [],
     // One bucket per second: { t: start of that second, sum, n }. The average
@@ -1016,15 +1016,13 @@ export function snapshot(collector, now = Date.now(), tree = [collector], priceB
       };
     }
   }
-  // The turn is a filter over the cached rows, never a second pass.
+  // The turn is a filter over the cached timeline, never a second pass.
   let apiTurn = 0;
   let billedTurn = 0;
   if (api && collector.turnStartedAt) {
-    for (const row of api.rows) {
-      if (!((row.at ?? 0) >= collector.turnStartedAt)) continue;
-      billedTurn += row.billed;
-      if (row.apiCost != null) apiTurn += row.apiCost;
-    }
+    const turn = api.turnTotals(collector.turnStartedAt);
+    apiTurn = turn.api;
+    billedTurn = turn.billed;
   }
   const round6 = (value) => (typeof value === 'number' && Number.isFinite(value) ? Math.round(value * 1e6) / 1e6 : null);
   const tariffWire = tariff
