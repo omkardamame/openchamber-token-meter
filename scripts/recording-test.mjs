@@ -221,6 +221,8 @@ try {
     assert.equal(seeded.recording.state, 'saved');
     assert.ok(seeded.recording.endedAt - lastAt < 1000);
     assert.ok(seeded.series.v.length >= 2);
+    // The pre-fix record ended high; a finished graph must settle to zero.
+    assert.equal(seeded.series.v.at(-1), 0);
   });
   await stop();
   await rm(seedDir, { recursive: true, force: true });

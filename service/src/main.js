@@ -96,6 +96,14 @@ export function createService({ fetchImpl = fetch, log = () => {}, base = BASE, 
       collector.series = saved.series;
       collector.seriesLong = saved.seriesLong;
       collector.seriesWide = saved.seriesWide;
+      // A recording written before the settle fix can freeze on its last rate;
+      // a finished turn is zero at its end. Earlier samples stay untouched.
+      const last = collector.series.at(-1);
+      if (saved.endedAt && last && last.v > 0) {
+        const at = Math.min(saved.endedAt, last.t + 250);
+        if (at > last.t) collector.series.push({ t: at, v: 0 });
+        else collector.series[collector.series.length - 1] = { t: last.t, v: 0 };
+      }
     }
     return collector;
   };
