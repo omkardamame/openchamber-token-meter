@@ -5,7 +5,7 @@ import { execFileSync } from 'node:child_process';
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { createCollector, applyRecord, loadHistory, applyEvent, tick, snapshot } from '../service/src/collector.js';
+import { createCollector, applyRecord, loadHistory, applyEvent, tick, tickFinal, snapshot } from '../service/src/collector.js';
 import { compress, easeToward, ratesOf } from '../shared/chart.js';
 import { dotState } from '../shared/cells.js';
 import { isPeakAt, timeTariff } from '../shared/pricing.js';
@@ -158,6 +158,23 @@ const rate = tick(live, at + 2200);
 check('live rate follows the deltas', rate > 0, `${rate.toFixed(0)} tok/s from ${live.charsPerToken.toFixed(2)} chars/token`);
 const seriesSnap = snapshot(live, at + 2200).series;
 check('live series grows on tick', seriesSnap.v.length > 0, `${seriesSnap.v.length} points, step ${seriesSnap.step}`);
+check(
+  'a settling sample lands despite the cadence gate and never duplicates its time',
+  (() => {
+    const settled = createCollector('ses_settle');
+    tick(settled, 1_000);
+    settled.chars.push({ t: 1_000, n: 28 });
+    settled.status = 'streaming';
+    tick(settled, 1_100);
+    const before = settled.series.length;
+    settled.status = 'idle';
+    tickFinal(settled, 1_150);
+    const appended = settled.series.length === before + 1 && settled.series.at(-1).v === 0;
+    tickFinal(settled, 1_150);
+    return appended && settled.series.length === before + 1;
+  })(),
+  'zero added once at the end',
+);
 check(
   'the series travels as values plus each sample’s offset from t0',
   seriesSnap.v.length === live.series.length &&

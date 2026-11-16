@@ -696,11 +696,14 @@ function addLongBucket(collector, now, value) {
  * headline follows what its subagents stream, so a turn spent delegating does
  * not read as zero; hold it to one session by passing nothing.
  */
-export function tick(collector, now = Date.now(), tree = [collector]) {
+function sample(collector, now, tree, force) {
   const streaming = tree.some((member) => member.status === 'streaming');
   const rate = streaming ? tree.reduce((sum, member) => sum + memberRate(member, now), 0) : 0;
   const last = collector.series[collector.series.length - 1];
-  if (!last || now - last.t >= SERIES_INTERVAL_MS) {
+  // A forced sample is the settling point of a finished turn: it must land even
+  // when the last tick is younger than the cadence, or the saved curve freezes
+  // at whatever rate the turn happened to end on.
+  if (!last || now - last.t >= SERIES_INTERVAL_MS || (force && now > last.t)) {
     const value = Math.round(rate * 10) / 10;
     collector.series.push({ t: now, v: value });
     if (collector.series.length > SERIES_POINTS) collector.series.splice(0, collector.series.length - SERIES_POINTS);
@@ -708,6 +711,15 @@ export function tick(collector, now = Date.now(), tree = [collector]) {
     addWideBucket(collector, now, value);
   }
   return rate;
+}
+
+export function tick(collector, now = Date.now(), tree = [collector]) {
+  return sample(collector, now, tree, false);
+}
+
+/** One sample regardless of the cadence gate, used to settle a finished turn. */
+export function tickFinal(collector, now = Date.now(), tree = [collector]) {
+  return sample(collector, now, tree, true);
 }
 
 /**

@@ -105,6 +105,11 @@ try {
     assert.ok(ended.recording.endedAt > 0);
     assert.equal(quiet.recording.endedAt, ended.recording.endedAt);
     assert.deepEqual(quiet.series, ended.series);
+    // The curve must settle at zero, not freeze at the rate it ended on.
+    assert.equal(ended.series.v.at(-1), 0);
+    const lastAt = ended.series.t0 + ended.series.d.at(-1);
+    assert.ok(lastAt <= ended.recording.endedAt && ended.recording.endedAt - lastAt <= 1000);
+    assert.ok(ended.series.v.slice(0, -1).some((v) => v > 0));
   });
   await stop();
   const disk = await readFile(path.join(dir, 'graphs.json'), 'utf8');

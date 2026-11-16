@@ -1007,11 +1007,11 @@ function addLongBucket(collector, now, value) {
     collector.seriesLong.splice(0, collector.seriesLong.length - LONG_POINTS);
   }
 }
-function tick(collector, now = Date.now(), tree = [collector]) {
+function sample(collector, now, tree, force) {
   const streaming = tree.some((member) => member.status === "streaming");
   const rate = streaming ? tree.reduce((sum, member) => sum + memberRate(member, now), 0) : 0;
   const last = collector.series[collector.series.length - 1];
-  if (!last || now - last.t >= SERIES_INTERVAL_MS) {
+  if (!last || now - last.t >= SERIES_INTERVAL_MS || force && now > last.t) {
     const value = Math.round(rate * 10) / 10;
     collector.series.push({ t: now, v: value });
     if (collector.series.length > SERIES_POINTS)
@@ -1020,6 +1020,12 @@ function tick(collector, now = Date.now(), tree = [collector]) {
     addWideBucket(collector, now, value);
   }
   return rate;
+}
+function tick(collector, now = Date.now(), tree = [collector]) {
+  return sample(collector, now, tree, false);
+}
+function tickFinal(collector, now = Date.now(), tree = [collector]) {
+  return sample(collector, now, tree, true);
 }
 function treeStatus(collector, tree) {
   const streaming = tree.some((member) => member.status === "streaming");
@@ -6032,6 +6038,7 @@ var TICK_MS = 250;
 var MAX_RECORDINGS = 200;
 var RECORDING_SAVE_MS = 5000;
 var RECORDING_SCAN_MS = 30000;
+var AUTO_STEPS = 120;
 if (!PORT || !TOKEN) {
   console.error("token-meter: OPENCHAMBER_SERVICE_PORT and OPENCHAMBER_SERVICE_TOKEN are required");
   process.exit(1);
@@ -6044,7 +6051,8 @@ function createService({ fetchImpl = fetch, log = () => {}, base = BASE, token =
   let captureError = null;
   let captureWarnAt = 0;
   let discoveryLoading = false;
-  const working = (member) => member.turnActive || ["streaming", "tool", "waiting-permission", "waiting-question"].includes(member.status);
+  const WORKING_STATES = new Set(["streaming", "tool", "waiting-permission", "waiting-question"]);
+  const working = (member) => Boolean(member.turnActive || WORKING_STATES.has(member.status));
   const makeCollector = (id) => {
     const collector = createCollector(id);
     const saved = recordings.get(id);
@@ -6071,8 +6079,10 @@ function createService({ fetchImpl = fetch, log = () => {}, base = BASE, token =
     applyRecord(collector, record);
     if (liveState)
       Object.assign(collector, liveState);
-    if (record?.parentID && record.parentID !== collector.id)
+    if (record?.parentID && record.parentID !== collector.id && collector.parentId !== record.parentID) {
       collector.parentId = record.parentID;
+      reindex();
+    }
     collector.capturePendingRecord = false;
     collector.captureRecordKnown = true;
     if (typeof record?.time?.idle === "number")
@@ -6118,6 +6128,7 @@ function createService({ fetchImpl = fetch, log = () => {}, base = BASE, token =
     if (!collector) {
       collector = makeCollector(id);
       collectors.set(id, collector);
+      reindex();
     }
     collector.touchedAt = Date.now();
     collector.watched = true;
@@ -6134,18 +6145,33 @@ function createService({ fetchImpl = fetch, log = () => {}, base = BASE, token =
       learnSession(id);
     return collector;
   };
+  let childIndex = null;
+  const reindex = () => {
+    childIndex = null;
+  };
   const treeOf = (root) => {
+    if (!childIndex) {
+      childIndex = new Map;
+      for (const collector of collectors.values()) {
+        if (!collector.parentId)
+          continue;
+        const siblings = childIndex.get(collector.parentId);
+        if (siblings)
+          siblings.push(collector);
+        else
+          childIndex.set(collector.parentId, [collector]);
+      }
+    }
     const tree = [root];
     const seen = new Set([root.id]);
-    let grew = true;
-    while (grew) {
-      grew = false;
-      for (const collector of collectors.values()) {
-        if (!collector.parentId || seen.has(collector.id) || !seen.has(collector.parentId))
+    const queue = [root];
+    while (queue.length) {
+      for (const child of childIndex.get(queue.pop().id) ?? []) {
+        if (seen.has(child.id))
           continue;
-        seen.add(collector.id);
-        tree.push(collector);
-        grew = true;
+        seen.add(child.id);
+        tree.push(child);
+        queue.push(child);
       }
     }
     return tree;
@@ -6154,10 +6180,12 @@ function createService({ fetchImpl = fetch, log = () => {}, base = BASE, token =
     for (const member of treeOf(root)) {
       if (member !== root && member.watched) {
         member.parentId = null;
+        reindex();
         continue;
       }
       recordings.capture(member, member.series.at(-1)?.t ?? Date.now());
       collectors.delete(member.id);
+      reindex();
     }
   };
   const watchedRoots = () => [...collectors.values()].filter((collector) => collector.watched);
@@ -6167,8 +6195,10 @@ function createService({ fetchImpl = fetch, log = () => {}, base = BASE, token =
       collector = makeCollector(id);
       collector.parentId = parentId ?? record?.parentID ?? null;
       collectors.set(id, collector);
-    } else if (!collector.parentId) {
+      reindex();
+    } else if (!collector.parentId && (parentId ?? record?.parentID ?? null)) {
       collector.parentId = parentId ?? record?.parentID ?? null;
+      reindex();
     }
     if (record)
       applyCaptureRecord(collector, record);
@@ -6409,12 +6439,16 @@ function createService({ fetchImpl = fetch, log = () => {}, base = BASE, token =
       tick(collector, now, tree);
       collector.captureDirty = true;
     } else if (collector.captureStartedAt && !collector.captureEndedAt && !collector.capturePendingRecord) {
-      const last = collector.series.at(-1)?.t ?? now;
-      const end = Math.max(last, collector.captureFinishedAt || now);
-      tick(collector, end, tree);
+      const last = collector.series.at(-1)?.t ?? null;
+      const settleAt = last === null ? now : last + 250;
+      const end = Math.max(collector.captureFinishedAt || now, settleAt);
+      tickFinal(collector, settleAt, tree);
       collector.captureEndedAt = end;
       recordings.capture(collector, end);
       collector.captureDirty = false;
+    }
+    if (!collector.watched && collector.historyAt === 0 && collector.steps.length > AUTO_STEPS) {
+      collector.steps.splice(0, collector.steps.length - AUTO_STEPS);
     }
   };
   const recordingWire = (collector) => ({

@@ -12,6 +12,7 @@ import {
   loadHistory,
   snapshot,
   tick,
+  tickFinal,
   wantsEvent,
 } from './collector.js';
 import { PRICE_BOOK } from '../../shared/price-book.js';
@@ -51,6 +52,10 @@ const TICK_MS = 250;
 const MAX_RECORDINGS = 200;
 const RECORDING_SAVE_MS = 5_000;
 const RECORDING_SCAN_MS = 30_000;
+// An unopened session only feeds the live curve; opening it loads the full
+// thousand-step history. Keeping that history for every remembered session
+// would cost far more memory than the graph it draws.
+const AUTO_STEPS = 120;
 
 if (!PORT || !TOKEN) {
   console.error('token-meter: OPENCHAMBER_SERVICE_PORT and OPENCHAMBER_SERVICE_TOKEN are required');
@@ -67,7 +72,8 @@ export function createService({ fetchImpl = fetch, log = () => {}, base = BASE, 
   let captureError = null;
   let captureWarnAt = 0;
   let discoveryLoading = false;
-  const working = (member) => member.turnActive || ['streaming', 'tool', 'waiting-permission', 'waiting-question'].includes(member.status);
+  const WORKING_STATES = new Set(['streaming', 'tool', 'waiting-permission', 'waiting-question']);
+  const working = (member) => Boolean(member.turnActive || WORKING_STATES.has(member.status));
   const makeCollector = (id) => {
     const collector = createCollector(id);
     const saved = recordings.get(id);
@@ -92,7 +98,10 @@ export function createService({ fetchImpl = fetch, log = () => {}, base = BASE, 
     } : null;
     applyRecord(collector, record);
     if (liveState) Object.assign(collector, liveState);
-    if (record?.parentID && record.parentID !== collector.id) collector.parentId = record.parentID;
+    if (record?.parentID && record.parentID !== collector.id && collector.parentId !== record.parentID) {
+      collector.parentId = record.parentID;
+      reindex();
+    }
     collector.capturePendingRecord = false;
     collector.captureRecordKnown = true;
     if (typeof record?.time?.idle === 'number') collector.captureFinishedAt = Math.max(collector.captureFinishedAt ?? 0, record.time.idle);
@@ -142,6 +151,7 @@ export function createService({ fetchImpl = fetch, log = () => {}, base = BASE, 
     if (!collector) {
       collector = makeCollector(id);
       collectors.set(id, collector);
+      reindex();
     }
     collector.touchedAt = Date.now();
     collector.watched = true;
@@ -174,17 +184,31 @@ export function createService({ fetchImpl = fetch, log = () => {}, base = BASE, 
    * session names its parent, so the tree is walked from the parent ids the
    * service already holds; no extra read happens per poll.
    */
+  let childIndex = null;
+  // Any insert, delete or re-parent invalidates the cached index. Sessions are
+  // created and dropped rarely; the tick reads trees four times a second.
+  const reindex = () => {
+    childIndex = null;
+  };
   const treeOf = (root) => {
+    if (!childIndex) {
+      childIndex = new Map();
+      for (const collector of collectors.values()) {
+        if (!collector.parentId) continue;
+        const siblings = childIndex.get(collector.parentId);
+        if (siblings) siblings.push(collector);
+        else childIndex.set(collector.parentId, [collector]);
+      }
+    }
     const tree = [root];
     const seen = new Set([root.id]);
-    let grew = true;
-    while (grew) {
-      grew = false;
-      for (const collector of collectors.values()) {
-        if (!collector.parentId || seen.has(collector.id) || !seen.has(collector.parentId)) continue;
-        seen.add(collector.id);
-        tree.push(collector);
-        grew = true;
+    const queue = [root];
+    while (queue.length) {
+      for (const child of childIndex.get(queue.pop().id) ?? []) {
+        if (seen.has(child.id)) continue;
+        seen.add(child.id);
+        tree.push(child);
+        queue.push(child);
       }
     }
     return tree;
@@ -197,10 +221,12 @@ export function createService({ fetchImpl = fetch, log = () => {}, base = BASE, 
       // becomes a root of its own.
       if (member !== root && member.watched) {
         member.parentId = null;
+        reindex();
         continue;
       }
       recordings.capture(member, member.series.at(-1)?.t ?? Date.now());
       collectors.delete(member.id);
+      reindex();
     }
   };
 
@@ -212,8 +238,10 @@ export function createService({ fetchImpl = fetch, log = () => {}, base = BASE, 
       collector = makeCollector(id);
       collector.parentId = parentId ?? record?.parentID ?? null;
       collectors.set(id, collector);
-    } else if (!collector.parentId) {
+      reindex();
+    } else if (!collector.parentId && (parentId ?? record?.parentID ?? null)) {
       collector.parentId = parentId ?? record?.parentID ?? null;
+      reindex();
     }
     if (record) applyCaptureRecord(collector, record);
     collector.touchedAt = Date.now();
@@ -454,12 +482,21 @@ export function createService({ fetchImpl = fetch, log = () => {}, base = BASE, 
       tick(collector, now, tree);
       collector.captureDirty = true;
     } else if (collector.captureStartedAt && !collector.captureEndedAt && !collector.capturePendingRecord) {
-      const last = collector.series.at(-1)?.t ?? now;
-      const end = Math.max(last, collector.captureFinishedAt || now);
-      tick(collector, end, tree);
+      const last = collector.series.at(-1)?.t ?? null;
+      // Settle one cadence after the last tick (not halfway across a long gap
+      // detected late), so a finished graph drops to zero instead of ending
+      // high and being held at the edge by the frame.
+      const settleAt = last === null ? now : last + 250;
+      const end = Math.max(collector.captureFinishedAt || now, settleAt);
+      tickFinal(collector, settleAt, tree);
       collector.captureEndedAt = end;
       recordings.capture(collector, end);
       collector.captureDirty = false;
+    }
+    // Only the automatic tail is bounded: once a history has been read (a
+    // watched session or a subagent of one) its chart keeps every step it loaded.
+    if (!collector.watched && collector.historyAt === 0 && collector.steps.length > AUTO_STEPS) {
+      collector.steps.splice(0, collector.steps.length - AUTO_STEPS);
     }
   };
 
