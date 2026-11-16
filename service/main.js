@@ -293,7 +293,9 @@ function priceStep(book, step, { provider = null, model = null, overrides = null
   };
 }
 function computeApiValue(book, steps, { turnStartedAt = null, provider = null, model = null, overrides = null, recovered = null } = {}) {
-  const rows = [];
+  const timelineAt = [];
+  const timelineApi = [];
+  const timelineBilled = [];
   const groups = new Map;
   let total = 0;
   let lastTurn = 0;
@@ -305,7 +307,9 @@ function computeApiValue(book, steps, { turnStartedAt = null, provider = null, m
   let freeSteps = 0;
   for (const step of steps) {
     const row = priceStep(book, step, { model, overrides, provider, recovered });
-    rows.push(row);
+    timelineAt.push(step.at ?? 0);
+    timelineApi.push(row.apiCost ?? 0);
+    timelineBilled.push(row.billed);
     totalConsumed += row.consumed;
     billedTotal += row.billed;
     if (!row.unpriced) {
@@ -364,6 +368,61 @@ function computeApiValue(book, steps, { turnStartedAt = null, provider = null, m
       group.name = row.price.name ?? row.price.model;
       group.source = row.price.source;
     }
+  }
+  let ordered = true;
+  for (let index = 1;index < timelineAt.length; index += 1) {
+    if (timelineAt[index] < timelineAt[index - 1]) {
+      ordered = false;
+      break;
+    }
+  }
+  let turnTotals;
+  if (ordered) {
+    const count = timelineAt.length;
+    const at = Float64Array.from(timelineAt);
+    const apiCum = new Float64Array(count);
+    const billedCum = new Float64Array(count);
+    let apiSum = 0;
+    let billedSum = 0;
+    for (let index = 0;index < count; index += 1) {
+      apiSum += timelineApi[index];
+      billedSum += timelineBilled[index];
+      apiCum[index] = apiSum;
+      billedCum[index] = billedSum;
+    }
+    turnTotals = (from) => {
+      if (from == null || count === 0)
+        return { api: 0, billed: 0 };
+      let low = 0;
+      let high = count;
+      while (low < high) {
+        const mid = low + high >>> 1;
+        if (at[mid] < from)
+          low = mid + 1;
+        else
+          high = mid;
+      }
+      if (low === count)
+        return { api: 0, billed: 0 };
+      return {
+        api: apiCum[count - 1] - (low > 0 ? apiCum[low - 1] : 0),
+        billed: billedCum[count - 1] - (low > 0 ? billedCum[low - 1] : 0)
+      };
+    };
+  } else {
+    turnTotals = (from) => {
+      let api = 0;
+      let billed = 0;
+      if (from == null)
+        return { api, billed };
+      for (let index = 0;index < timelineAt.length; index += 1) {
+        if (timelineAt[index] < from)
+          continue;
+        api += timelineApi[index];
+        billed += timelineBilled[index];
+      }
+      return { api, billed };
+    };
   }
   const coverage = totalConsumed > 0 ? pricedConsumed / totalConsumed : pricedSteps > 0 ? 1 : 0;
   const lowerBound = coverage < 1 - EIGHT;
@@ -433,7 +492,7 @@ function computeApiValue(book, steps, { turnStartedAt = null, provider = null, m
     priceNote,
     pricedSteps,
     pricedTokens: pricedConsumed,
-    rows,
+    turnTotals,
     total: pricedSteps === 0 ? null : total,
     totalTokens: totalConsumed,
     unpriced
@@ -1252,13 +1311,9 @@ function snapshot(collector, now = Date.now(), tree = [collector], priceBook = n
   let apiTurn = 0;
   let billedTurn = 0;
   if (api && collector.turnStartedAt) {
-    for (const row of api.rows) {
-      if (!((row.at ?? 0) >= collector.turnStartedAt))
-        continue;
-      billedTurn += row.billed;
-      if (row.apiCost != null)
-        apiTurn += row.apiCost;
-    }
+    const turn = api.turnTotals(collector.turnStartedAt);
+    apiTurn = turn.api;
+    billedTurn = turn.billed;
   }
   const round6 = (value) => typeof value === "number" && Number.isFinite(value) ? Math.round(value * 1e6) / 1e6 : null;
   const tariffWire = tariff ? {
@@ -6701,11 +6756,21 @@ function createService({ fetchImpl = fetch, log = () => {}, base = BASE, token =
       const snapshotAt = Date.now();
       sampleCollector(collector, snapshotAt, tree);
       const answer = snapshot(collector, snapshotAt, tree, priceBook, priceOverrides);
-      if (url.searchParams.get("steps") === String(answer.stepsSeq))
+      const statusSurface = url.searchParams.get("surface") === "status";
+      if (statusSurface) {
+        delete answer.steps;
+        delete answer.seriesLong;
+        delete answer.seriesWide;
+        delete answer.subagents;
+        delete answer.cost;
+        delete answer.models;
+        delete answer.turn;
+        delete answer.rates;
+      } else if (url.searchParams.get("steps") === String(answer.stepsSeq))
         delete answer.steps;
       json(res, 200, {
         ...answer,
-        recording: recordingWire(collector),
+        ...statusSurface ? {} : { recording: recordingWire(collector) },
         stream: { state: state.stream, error: state.streamError, since: state.since },
         loading: Boolean(collector.loading)
       });

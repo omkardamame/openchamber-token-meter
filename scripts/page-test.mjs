@@ -404,6 +404,55 @@ const harness = `<!doctype html><meta charset="utf-8"><title>page test</title>
     rect.setAttribute('data-mark', '1');
     return true;
   };
+  // A pointer move over the step chart must restyle bars, not rebuild them.
+  window.__hoverChurn = (moves) => {
+    const svg = frame.contentDocument.querySelector('[data-chart="steps"]');
+    if (!svg) return JSON.stringify({ added: -1, bars: 0, moves });
+    const rect = svg.getBoundingClientRect();
+    const View = frame.contentWindow;
+    const watch = new MutationObserver(() => {});
+    watch.observe(svg, { childList: true, subtree: true });
+    for (let index = 0; index < moves; index += 1) {
+      svg.dispatchEvent(
+        new View.PointerEvent('pointermove', {
+          bubbles: true,
+          clientX: rect.left + rect.width * (0.15 + (0.7 * index) / moves),
+          clientY: rect.top + rect.height * 0.5,
+        }),
+      );
+    }
+    const added = watch.takeRecords().reduce((sum, record) => sum + record.addedNodes.length, 0);
+    watch.disconnect();
+    const lit = svg.querySelector('rect[data-role="step-hover"]');
+    const column = svg.querySelector('rect[data-role="step-hover-col"]');
+    return JSON.stringify({
+      added,
+      bars: svg.querySelectorAll('rect[data-bar="step"]').length,
+      litOpacity: lit ? lit.getAttribute('opacity') : null,
+      litCount: svg.querySelectorAll('rect[data-role="step-hover"]').length,
+      columnWidth: column ? Number(column.getAttribute('width')) : null,
+      moves,
+    });
+  };
+  // How many times the live curve's path data is rewritten over a window of time.
+  window.__liveWrites = (ms) =>
+    new Promise((resolve) => {
+      const line = frame.contentDocument.querySelector('[data-role="live-line"]');
+      if (!line) {
+        resolve(JSON.stringify({ writes: -1 }));
+        return;
+      }
+      let writes = 0;
+      const watch = new MutationObserver((records) => {
+        writes += records.filter((record) => record.attributeName === 'd').length;
+      });
+      watch.observe(line, { attributes: true, attributeFilter: ['d'] });
+      window.setTimeout(() => {
+        watch.takeRecords();
+        watch.disconnect();
+        resolve(JSON.stringify({ writes }));
+      }, ms);
+    });
   // A second ready is how the host switches sessions; the SDK re-fires onReady.
   window.__switchSession = (next, id) => {
     window.__state = next;
@@ -749,6 +798,8 @@ const run = async (page) => {
     markStep: async () => {
       await browser(['eval', 'window.__markStep()']);
     },
+    hoverChurn: async (moves) => JSON.parse(JSON.parse(await browser(['eval', `window.__hoverChurn(${moves})`]))),
+    liveWrites: async (ms) => JSON.parse(JSON.parse(await browser(['eval', `(async () => await window.__liveWrites(${ms}))()`]))),
     trail: async () => JSON.parse(JSON.parse(await browser(['eval', 'JSON.stringify(window.__trail)']))),
   };
 };
@@ -984,6 +1035,16 @@ try {
     'a finished graph holds its flat zero to the now edge',
     idleBox.dotX === idleCurve.liveWidth && idleCurve.liveRight === idleCurve.liveWidth && idleBox.dotY >= idleBox.height - 9,
     `dot ${idleBox.dotX} of ${idleCurve.liveWidth}, y ${idleBox.dotY} of ${idleBox.height}`,
+  );
+  // A flat zero line cannot change between seconds, so the live loop must not
+  // rewrite its path on every animation frame (61 writes/s before).
+  await panel.set(state({ generatedAt: Date.now(), series: { t0: Date.now() - 4_000, step: 250, v: [0, 0, 0, 0, 0, 0] } }));
+  await panel.wait(300);
+  const idleWrites = await panel.liveWrites(1_000);
+  check(
+    'an idle flat graph is drawn once a second, not once a frame',
+    idleWrites.writes >= 0 && idleWrites.writes <= 2,
+    `${idleWrites.writes} path writes in 1 s`,
   );
   await panel.set(state());
 
@@ -1619,6 +1680,17 @@ try {
       /now \d{1,2} [A-Z][a-z]{2} \d\d:\d\d:\d\d/.test(stepLeft.stepsAxisText ?? ''),
     `${stepLeft.stepsHoverHidden}/${stepLeft.stepsStartHidden}/${stepLeft.stepsNowHidden} ${stepLeft.stepsAxisText}`,
   );
+  const churn = await panel.hoverChurn(40);
+  check(
+    'a pointer move restyles the bars instead of redrawing the chart',
+    churn.added <= 2 &&
+      churn.bars >= 2 &&
+      churn.litCount === 1 &&
+      churn.litOpacity === '1.00' &&
+      churn.columnWidth > 0,
+    `${churn.added} nodes added over ${churn.moves} moves, ${churn.bars} bars, lit ${churn.litCount} at ${churn.litOpacity}, column ${churn.columnWidth}`,
+  );
+  await panel.leave('[data-chart="steps"]');
   await panel.set(state({ steps: [{ tokens: 900, ms: 5000, tps: 180, aborted: false }] }));
   await panel.hover('[data-chart="steps"]', 0.5);
   const oldStore = await panel.read();
@@ -1904,14 +1976,19 @@ try {
       Number.parseInt(eased.axisFrom, 10) === 71,
     `${early.axisFrom} → ${later.axisFrom} → ${eased.axisFrom}`,
   );
-  for (let notch = 0; notch < 10; notch += 1) await panel.wheel('[data-chart="live"]', 120);
-  const fiveMinutes = await panel.read();
+  // Eight more notches from 70.8 s land on 70.8 x 1.18^8 = 266 s: still inside
+  // the five-minute band that the 1 s series covers. Wait for the ease to
+  // finish so the assertion reads the target, not whichever frame it caught.
+  for (let notch = 0; notch < 8; notch += 1) await panel.wheel('[data-chart="live"]', 120);
+  await panel.wait(500);
+  const fourMinutes = await panel.read();
   check(
-    'UI-34 ten more notches reach five minutes on the 1 s series',
-    fiveMinutes.axisFrom === '5 min ago' && Boolean(fiveMinutes.livePathD),
-    `${fiveMinutes.axisFrom} d=${String(fiveMinutes.livePathD).slice(0, 20)}`,
+    'UI-34 eight more notches reach four minutes on the 1 s series',
+    fourMinutes.axisFrom === '4 min ago' && Boolean(fourMinutes.livePathD),
+    `${fourMinutes.axisFrom} d=${String(fourMinutes.livePathD).slice(0, 20)}`,
   );
   for (let notch = 0; notch < 18; notch += 1) await panel.wheel('[data-chart="live"]', 120);
+  await panel.wait(500);
   const widest = await panel.read();
   check(
     'UI-34 it reaches an hour on the 10 s series',
@@ -2317,6 +2394,27 @@ try {
     'UI-20 the status frame keeps its own drawing',
     /IN/.test(sIdle.text) && !/API/.test(sIdle.text) && !/\$/.test(sIdle.text),
     sIdle.text.slice(0, 60),
+  );
+  // The service sends this section only the fields it draws. A reduced answer
+  // must paint the same cells and spark: a field this frame still reads would
+  // show up as a missing cell or an exception.
+  const statusFull = state();
+  await status.set(statusFull);
+  const fullAnswerUi = await status.read();
+  const reducedAnswer = { ...statusFull };
+  for (const key of ['steps', 'seriesLong', 'seriesWide', 'subagents', 'cost', 'models', 'turn', 'rates', 'recording']) {
+    delete reducedAnswer[key];
+  }
+  await status.set(reducedAnswer);
+  const reducedUi = await status.read();
+  const reducedErrors = await status.errors();
+  check(
+    'status paints the same from the reduced answer the service sends',
+    reducedErrors.length === 0 &&
+      reducedUi.cells.join(',') === fullAnswerUi.cells.join(',') &&
+      reducedUi.values.join('|') === fullAnswerUi.values.join('|') &&
+      Boolean(reducedUi.sparkD),
+    `${reducedErrors.length} errors, ${reducedUi.values.join('|')} vs ${fullAnswerUi.values.join('|')}`,
   );
   check(
     'status colours the last measured step by its tier',

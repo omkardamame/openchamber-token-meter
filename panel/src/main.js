@@ -89,6 +89,13 @@ let lastDrawnHover = null;
 let plottedCeiling = 0;
 let drawnSteps = [];
 let drawnSlot = 0;
+// The bar nodes of the last full draw, so a pointer move can restyle one bar
+// and move the highlight column instead of rebuilding a thousand rects.
+let drawnBars = [];
+let drawnHoverCol = null;
+// The last idle flat-zero drawing, so the live loop can skip a picture that
+// cannot change (see drawLive).
+let lastIdleKey = null;
 const animateCurve = createCurveMotion();
 
 // A reader who asked the system for less motion gets the measured number
@@ -937,6 +944,24 @@ function drawLive(data) {
   rates.avg = Number(rates.avg) || 0;
   rates.peak = Number(rates.peak) || 0;
 
+  // A finished turn leaves a flat zero line. Redrawing it on every animation
+  // frame wrote the same path 61 times a second; one draw per second is enough
+  // for the peak's age label to keep ticking, and the pointer gets a draw of
+  // its own. Only a visible window with no rate at all takes this short path.
+  const flatZero = visible.length > 0 && visible.every((point) => point.v === 0);
+  if (flatZero && liveHoverX === null && liveHoverY === null) {
+    const idleTurnPeak = ceilingMode === 'turn' ? turnPeakOf(data) : 0;
+    const idleCeiling = rateCeiling(Math.max(idleTurnPeak > 0 ? idleTurnPeak : rates.peak, rates.avg));
+    // The left edge of a flat line is not a picture: a first sample a pixel
+    // younger or older looks the same, so the whole-second clock is the only
+    // thing that changes the drawing.
+    const idleKey = `${width}|${height}|${liveWindowMs}|${ceilingMode}|${idleTurnPeak}|${rates.avg}|${rates.peak}|${idleCeiling}|${Math.floor(now / 1_000)}`;
+    if (idleKey === lastIdleKey) return;
+    lastIdleKey = idleKey;
+  } else {
+    lastIdleKey = null;
+  }
+
   // Smooth in rate units, then map to the axis: geometry never feeds back into
   // a measured value, a reference line's rate or the hover readout.
   const smooth = [];
@@ -954,7 +979,7 @@ function drawLive(data) {
   const turnPeak = ceilingMode === 'turn' ? turnPeakOf(data) : 0;
   const turnMode = ceilingMode === 'turn' && turnPeak > 0;
   // Retain the existing peak selection (finished step or visible live burst).
-  // The axis has a 300 floor; a smaller peak is marked at its actual value.
+  // The ceiling is the peak itself; a smaller one is drawn at its actual value.
   const ceilingPeak = Math.max(turnMode ? turnPeak : rates.peak, liveTop);
   const max = rateCeiling(Math.max(ceilingPeak, rates.avg));
   const share = (value) => symlogShare(value, max);
@@ -1179,6 +1204,8 @@ function drawSteps(data) {
     ui.stepsHover.textContent = '';
     drawnSteps = [];
     drawnSlot = 0;
+    drawnBars = [];
+    drawnHoverCol = null;
     stepHover = null;
     if (data.steps === lastDrawnSteps && limit === lastDrawnLimit && drawKey === lastDrawnKey && width === lastDrawnW && height === lastDrawnH) return;
     lastDrawnSteps = data.steps;
@@ -1233,18 +1260,49 @@ function drawSteps(data) {
   // always describe the list that was last drawn.
   drawnSteps = steps;
   drawnSlot = slot;
-  // Nothing changed: keep the bars, and with them the column the pointer is
-  // reading. This runs four times a second and rebuilding a thousand rects each
-  // time was the most expensive thing on the page.
-  if (
+  const sameGeometry =
     data.steps === lastDrawnSteps &&
     limit === lastDrawnLimit &&
     drawKey === lastDrawnKey &&
     width === lastDrawnW &&
-    height === lastDrawnH &&
-    hover === lastDrawnHover
-  )
+    height === lastDrawnH;
+  // Nothing changed: keep the bars, and with them the column the pointer is
+  // reading. This runs four times a second and rebuilding a thousand rects each
+  // time was the most expensive thing on the page.
+  if (sameGeometry && hover === lastDrawnHover) return;
+  // Only the pointer moved: restyle the bar that left and the one that arrived,
+  // and slide the highlight column. Rebuilding every rect for a pointer move
+  // cost 6.6 ms with 1,000 bars.
+  if (sameGeometry && drawnBars.length === steps.length) {
+    const opacityAt = (index) => (index === hover ? 1 : 0.4 + 0.6 * (index / Math.max(1, drawnBars.length - 1)));
+    const paintBar = (index) => {
+      const node = drawnBars[index];
+      if (!node) return;
+      node.setAttribute('opacity', opacityAt(index).toFixed(2));
+      if (index === hover) node.setAttribute('data-role', 'step-hover');
+      else node.removeAttribute('data-role');
+    };
+    if (lastDrawnHover !== null) paintBar(lastDrawnHover);
+    if (hover === null) {
+      drawnHoverCol?.remove();
+      drawnHoverCol = null;
+    } else {
+      paintBar(hover);
+      if (!drawnHoverCol) {
+        drawnHoverCol = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+        drawnHoverCol.setAttribute('y', '0');
+        drawnHoverCol.setAttribute('height', String(height));
+        drawnHoverCol.setAttribute('fill', 'var(--oc-fg)');
+        drawnHoverCol.setAttribute('opacity', '0.08');
+        drawnHoverCol.setAttribute('data-role', 'step-hover-col');
+        svg.insertBefore(drawnHoverCol, drawnBars[0] ?? null);
+      }
+      drawnHoverCol.setAttribute('x', (hover * slot).toFixed(1));
+      drawnHoverCol.setAttribute('width', slot.toFixed(1));
+    }
+    lastDrawnHover = hover;
     return;
+  }
   lastDrawnSteps = data.steps;
   lastDrawnLimit = limit;
   lastDrawnKey = drawKey;
@@ -1265,7 +1323,7 @@ function drawSteps(data) {
     const opacity = index === hover ? 1 : 0.4 + 0.6 * (index / Math.max(1, steps.length - 1));
     const role = index === hover ? ' data-role="step-hover"' : '';
     pieces.push(
-      `<rect x="${x.toFixed(1)}" y="${y.toFixed(1)}" width="${barWidth.toFixed(1)}" height="${h.toFixed(1)}" rx="1.5" fill="${fill}" opacity="${opacity.toFixed(2)}"${role} />`,
+      `<rect data-bar="step" x="${x.toFixed(1)}" y="${y.toFixed(1)}" width="${barWidth.toFixed(1)}" height="${h.toFixed(1)}" rx="1.5" fill="${fill}" opacity="${opacity.toFixed(2)}"${role} />`,
     );
   });
   // The session's own average and best step, over the bars drawn: the same
@@ -1283,6 +1341,8 @@ function drawSteps(data) {
     );
   }
   svg.innerHTML = pieces.join('');
+  drawnBars = [...svg.querySelectorAll('rect[data-bar="step"]')];
+  drawnHoverCol = svg.querySelector('rect[data-role="step-hover-col"]');
 }
 
 const SUB_STATUS_TEXT = { tool: 'tool', 'waiting-permission': 'permission', 'waiting-question': 'question' };
