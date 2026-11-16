@@ -248,7 +248,9 @@ async function poll() {
     const result = await host.serviceRequest({
       method: 'GET',
       path: '/state',
-      query: { session: asked, steps: String(lastStepsSeq) },
+      // The status surface needs counters and the fine series only; the
+      // service leaves the step list and the zoomed-out series off the answer.
+      query: { session: asked, steps: String(lastStepsSeq), surface: 'status' },
     });
     // The section may have moved to another session while this was in flight;
     // the answer is about the session that left and must not paint.

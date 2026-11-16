@@ -1697,6 +1697,36 @@ check('service refuses a wrong bearer', wrongToken.status === 401, String(wrongT
 const served = await get(`session=${session.id}`);
 check('service answers with the same totals', served.status === 200 && served.body.totals.input === baseline.input, `${served.body.totals?.input} vs ${baseline.input}`);
 
+// The status frame draws a spark and counters: the step list and the zoomed-out
+// series are bytes it parses and discards. The panel still gets both.
+const statusShaped = await get(`session=${session.id}&surface=status&steps=-1`);
+check(
+  'the status surface gets only what it draws',
+  statusShaped.status === 200 &&
+    statusShaped.body.steps === undefined &&
+    statusShaped.body.seriesLong === undefined &&
+    statusShaped.body.seriesWide === undefined &&
+    statusShaped.body.subagents === undefined &&
+    statusShaped.body.cost === undefined &&
+    statusShaped.body.models === undefined &&
+    statusShaped.body.turn === undefined &&
+    statusShaped.body.rates === undefined &&
+    statusShaped.body.recording === undefined &&
+    Array.isArray(statusShaped.body.series?.v) &&
+    statusShaped.body.live !== undefined &&
+    statusShaped.body.totals?.input === baseline.input,
+  `keys ${Object.keys(statusShaped.body).sort().join(',')}`,
+);
+const panelShaped = await get(`session=${session.id}`);
+check(
+  'the panel surface still receives the step list and zoom series',
+  panelShaped.status === 200 &&
+    Array.isArray(panelShaped.body.steps) &&
+    panelShaped.body.steps.length > 0 &&
+    panelShaped.body.stepsKnown >= panelShaped.body.steps.length,
+  `${panelShaped.body.steps?.length} rows of ${panelShaped.body.stepsKnown}`,
+);
+
 // The route, not the function: a service given a book must answer /state with
 // API-value fields, which only the wired path can produce.
 const bookPort = 47829;

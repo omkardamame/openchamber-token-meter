@@ -779,12 +779,24 @@ export function createService({ fetchImpl = fetch, log = () => {}, base = BASE, 
       const snapshotAt = Date.now();
       sampleCollector(collector, snapshotAt, tree);
       const answer = snapshot(collector, snapshotAt, tree, priceBook, priceOverrides);
-      // The step list changes once per step; a client that already has this
-      // sequence keeps its copy instead of receiving the same rows again.
-      if (url.searchParams.get('steps') === String(answer.stepsSeq)) delete answer.steps;
+      // The Work Status section draws a spark and counters: `status`, `live`,
+      // `totals`, the fine series and the step sequence. Everything else it
+      // would parse and discard (the step list alone is 90% of a first answer).
+      // The panel keeps the full answer and only skips a list it already has.
+      const statusSurface = url.searchParams.get('surface') === 'status';
+      if (statusSurface) {
+        delete answer.steps;
+        delete answer.seriesLong;
+        delete answer.seriesWide;
+        delete answer.subagents;
+        delete answer.cost;
+        delete answer.models;
+        delete answer.turn;
+        delete answer.rates;
+      } else if (url.searchParams.get('steps') === String(answer.stepsSeq)) delete answer.steps;
       json(res, 200, {
         ...answer,
-        recording: recordingWire(collector),
+        ...(statusSurface ? {} : { recording: recordingWire(collector) }),
         stream: { state: state.stream, error: state.streamError, since: state.since },
         loading: Boolean(collector.loading),
       });
