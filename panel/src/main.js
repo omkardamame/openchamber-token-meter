@@ -954,8 +954,10 @@ function drawLive(data) {
     const idleCeiling = rateCeiling(Math.max(idleTurnPeak > 0 ? idleTurnPeak : rates.peak, rates.avg));
     // The left edge of a flat line is not a picture: a first sample a pixel
     // younger or older looks the same, so the whole-second clock is the only
-    // thing that changes the drawing.
-    const idleKey = `${width}|${height}|${liveWindowMs}|${ceilingMode}|${idleTurnPeak}|${rates.avg}|${rates.peak}|${idleCeiling}|${Math.floor(now / 1_000)}`;
+    // thing that changes the drawing. The session is in the key because the
+    // peak label is rebuilt from its own peak age on a switch.
+    const sessionKey = data.session ?? sessionId ?? '';
+    const idleKey = `${sessionKey}|${width}|${height}|${liveWindowMs}|${ceilingMode}|${idleTurnPeak}|${rates.avg}|${rates.peak}|${idleCeiling}|${Math.floor(now / 1_000)}`;
     if (idleKey === lastIdleKey) return;
     lastIdleKey = idleKey;
   } else {
@@ -2091,8 +2093,10 @@ host.onReady((ctx) => {
   ui.subsDetailList.replaceChildren();
   ui.subsDetailMeta.textContent = '';
   ui.subsToggle.hidden = true;
-  // The drawn chart belongs to the session that left: force the empty one.
+  // The drawn chart belongs to the session that left: force the empty one, and
+  // never let the idle skip compare against the previous session's drawing.
   lastDrawnSteps = null;
+  lastIdleKey = null;
   stepHover = null;
   liveHoverX = null;
   liveHoverY = null;

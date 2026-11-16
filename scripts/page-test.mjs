@@ -1046,6 +1046,23 @@ try {
     idleWrites.writes >= 0 && idleWrites.writes <= 2,
     `${idleWrites.writes} path writes in 1 s`,
   );
+  // The skip is for a picture that cannot change. A new peak changes the label
+  // and the ceiling, so it must draw at once even over a flat window.
+  const flatPeak = state({
+    generatedAt: Date.now(),
+    rates: { avg: 0, peak: 900, peakAt: Date.now() - 300_000 },
+    series: { t0: Date.now() - 4_000, step: 250, v: [0, 0, 0, 0] },
+  });
+  await panel.set(flatPeak);
+  await panel.wait(300);
+  await panel.set({ ...flatPeak, generatedAt: Date.now(), rates: { avg: 0, peak: 150, peakAt: Date.now() - 1_000 } });
+  const relabeled = await panel.read();
+  const peakLabels = relabeled.labels.filter((text) => /^peak \d/.test(text));
+  check(
+    'a flat graph still redraws when its peak label changes',
+    peakLabels.some((text) => /^peak 150 t\/s/.test(text)) && !peakLabels.some((text) => /^peak 900 t\/s/.test(text)),
+    peakLabels.join(' · ') || 'no peak label',
+  );
   await panel.set(state());
 
   // A resting session samples zeros; the axis floor is not a measured scale.
