@@ -10,7 +10,7 @@
 // atomically. The file is checked against a byte cap before it is read; a
 // broken or oversized file is reported and skipped instead of taking the
 // service down.
-import { readFileSync, statSync } from 'node:fs';
+import { readFileSync, readdirSync, statSync, unlinkSync } from 'node:fs';
 import { chmod, mkdir, rename, unlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 
@@ -181,6 +181,20 @@ export function createRecordingStore({ dataDir = null, log = () => {}, maxSessio
 
   function load() {
     if (!dir) return;
+    // A kill between writeFile(tmp) and rename leaves a full copy behind; no
+    // later run would ever remove it otherwise.
+    try {
+      for (const name of readdirSync(dir)) {
+        if (!name.startsWith(`${FILE_NAME}.tmp-`)) continue;
+        try {
+          unlinkSync(path.join(dir, name));
+        } catch {
+          /* best effort: a stale temp file is not worth failing the load */
+        }
+      }
+    } catch {
+      /* the directory may not exist yet */
+    }
     let info;
     try {
       info = statSync(file);
@@ -386,6 +400,8 @@ export function createRecordingStore({ dataDir = null, log = () => {}, maxSessio
       await chmod(tmp, 0o600);
       await rename(tmp, file);
       writeError = null;
+      // The corrupt file this store started from has now been replaced.
+      loadError = null;
       return true;
     } catch (error) {
       await unlink(tmp).catch(() => {});

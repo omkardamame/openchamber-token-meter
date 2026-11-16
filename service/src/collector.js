@@ -306,7 +306,9 @@ export function applyRecord(collector, record) {
 }
 
 function pushStep(collector, step) {
-  if (!step.tokens) return;
+  // A step that generated nothing (input only) still carries cost and tokens;
+  // history keeps it, so the live path must too. Only a truly empty step skips.
+  if (!(step.total > 0)) return;
   collector.stepsSeq += 1;
   collector.steps.push(step);
   if (collector.steps.length > MAX_STEPS) collector.steps.splice(0, collector.steps.length - MAX_STEPS);
@@ -1155,7 +1157,8 @@ export function snapshot(collector, now = Date.now(), tree = [collector], priceB
           // Headline: the API value. What these tokens would cost at the
           // model's own published list rates, never what was billed.
           total: round6(api.total),
-          lastTurn: api.total === null ? null : round6(collector.turnStartedAt ? apiTurn : 0),
+          // No known turn boundary is "unknown", not a real zero bill.
+          lastTurn: api.total === null || !collector.turnStartedAt ? null : round6(apiTurn),
           perMillion: round6(api.perMillion),
           // Secondary: what OpenCode recorded as charged. Zero on a plan.
           billed: {
@@ -1225,11 +1228,11 @@ export function snapshot(collector, now = Date.now(), tree = [collector], priceB
           // shape stays for anything that still asks for it.
           mode: 'billed',
           total: totalCost,
-          lastTurn: lastTurnCost,
+          lastTurn: collector.turnStartedAt ? lastTurnCost : null,
           // Effective, not list price: every token and cache read in the cost.
           perMillion: consumed > 0 ? Math.round((totalCost / consumed) * 1e6 * 1e4) / 1e4 : null,
           billed: {
-            lastTurn: lastTurnCost,
+            lastTurn: collector.turnStartedAt ? lastTurnCost : null,
             perMillion: consumed > 0 ? Math.round((totalCost / consumed) * 1e6 * 1e4) / 1e4 : null,
             total: totalCost,
           },
@@ -1311,7 +1314,10 @@ export function snapshot(collector, now = Date.now(), tree = [collector], priceB
       : {}),
     // Every member's counter only grows, so their sum changes as soon as a
     // step arrives anywhere in the tree and the client knows to fetch the list.
-    stepsSeq: members.reduce((sum, member) => sum + member.stepsSeq, 0),
+    // The epoch keeps this token monotonic across a collector that is evicted
+    // and recreated; a bare per-collector sum could repeat with new content and
+    // the frame would keep its old list.
+    stepsSeq: members.reduce((sum, member) => sum + (member.seqEpoch ?? 0) + member.stepsSeq, 0),
     // The cached wire rows; `steps=…` in the request drops this property from
     // its own answer, never from the cache.
     steps: wire,

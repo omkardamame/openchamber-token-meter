@@ -106,7 +106,11 @@ await loadHistory(collector, async (pathname) => (await realFetch(`${base}${path
 const snap = snapshot(collector);
 
 check('session picked has usage', rows.length > 0, `${session.id} · ${session.title?.slice(0, 40) ?? ''}`);
-check('history returns 100% of page', true, `${rows.length} newest steps read`);
+check(
+  'the page holds what the history read asked for',
+  rows.length > 0 && rows.length <= 100 && snap.totals.steps >= rows.length,
+  `${rows.length} newest steps read, ${snap.totals.steps} in the session`,
+);
 check('input total matches OpenCode', snap.totals.input === expected.input, `${snap.totals.input} vs ${expected.input}`);
 check('output total matches OpenCode', snap.totals.output === expected.output, `${snap.totals.output} vs ${expected.output}`);
 check('reasoning total matches OpenCode', snap.totals.reasoning === expected.reasoning, `${snap.totals.reasoning} vs ${expected.reasoning}`);
@@ -457,6 +461,30 @@ emitCost('session.step.started', { assistantMessageID: 'msg_cost_3', started: co
 emitCost('session.step.ended', costStep('msg_cost_3', 0.01), 4_000);
 const nextTurn = snapshot(costRun, costAt + 4_100);
 check('a new turn resets the last-turn cost', nextTurn.cost.lastTurn === 0.01, `$${nextTurn.cost.lastTurn}`);
+
+// A step that read input but generated nothing still carries cost and belongs
+// in the list the turn and the API value are computed from.
+const zeroRun = createCollector('ses_zero_output');
+const zeroAt = Date.now();
+const emitZero = (type, data, offset = 0) =>
+  applyEvent(zeroRun, { type, created: zeroAt + offset, data: { sessionID: 'ses_zero_output', ...data } });
+emitZero('session.execution.started', { started: zeroAt });
+emitZero('session.step.started', { assistantMessageID: 'msg_zero', started: zeroAt }, 100);
+emitZero('session.step.ended', {
+  assistantMessageID: 'msg_zero',
+  finish: 'stop',
+  cost: 0.4,
+  tokens: { input: 100_000, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+}, 500);
+const zeroSnap = snapshot(zeroRun, zeroAt + 600);
+check(
+  'a live step with no generated tokens still reaches the list and the turn',
+  zeroSnap.steps.length === 1 && zeroSnap.turn.steps === 1 && zeroSnap.cost.total === 0.4 && zeroSnap.turn.tokens === 0,
+  `steps ${zeroSnap.steps.length}, turn ${JSON.stringify(zeroSnap.turn)}, total ${zeroSnap.cost.total}`,
+);
+const noTurnCollector = createCollector('ses_no_turn');
+const noTurn = snapshot(noTurnCollector, Date.now(), [noTurnCollector], null);
+check('with no known turn the last-turn cost is unknown, not zero', noTurn.cost.lastTurn === null, String(noTurn.cost.lastTurn));
 
 // ---------------------------------------------------------------- snapshot cache
 // snapshot() runs six times a second, and its merged, sorted step list, its
@@ -1622,7 +1650,7 @@ check(
 );
 
 // ---------------------------------------------------------------- http service
-const port = 47821;
+const port = Number(process.env.COLLECTOR_TEST_PORT ?? 47821);
 const token = 'test-token';
 process.env.OPENCHAMBER_SERVICE_PORT = String(port);
 process.env.OPENCHAMBER_SERVICE_TOKEN = token;

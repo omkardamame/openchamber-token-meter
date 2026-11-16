@@ -264,7 +264,12 @@ export function computeApiValue(book, steps, { turnStartedAt = null, provider = 
     if (!group) {
       group = {
         apiValue: 0,
+        // Drift must compare the same steps: the API value and the recorded
+        // bill of the steps that have both, never the token value of usage the
+        // provider did not bill.
+        apiValueBilled: 0,
         billed: 0,
+        billedPriced: 0,
         cacheRead: 0,
         cacheWrite: 0,
         consumed: 0,
@@ -293,6 +298,11 @@ export function computeApiValue(book, steps, { turnStartedAt = null, provider = 
       group.priced += 1;
       group.pricedConsumed += row.consumed;
       group.apiValue += row.apiCost;
+      // Only steps the provider actually billed can say anything about drift.
+      if (row.billed > 0) {
+        group.apiValueBilled += row.apiCost;
+        group.billedPriced += row.billed;
+      }
       // The active side and its rates come from the last step that had a card.
       group.match = row.price.match;
       group.price = row.price;
@@ -311,8 +321,8 @@ export function computeApiValue(book, steps, { turnStartedAt = null, provider = 
     group.timeTier = group.price?.timeTier ?? null;
     group.tier = group.price?.tier ?? null;
     group.drift = null;
-    if (group.billed > 0 && group.apiValue > 0) {
-      const relative = (group.apiValue - group.billed) / group.billed;
+    if (group.billedPriced > 0 && group.apiValueBilled > 0) {
+      const relative = (group.apiValueBilled - group.billedPriced) / group.billedPriced;
       if (Math.abs(relative) > 0.01) {
         group.drift = relative;
         drifted.push({ model: group.model, relative });

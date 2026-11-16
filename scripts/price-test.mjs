@@ -211,6 +211,36 @@ const freed = clone(book);
 delete freed.providers.deepseek;
 check('PD-03 a provider that left is one line', same(diffBooks(book, freed), ['- deepseek (provider gone)']), JSON.stringify(diffBooks(book, freed)));
 
+// --- drift compares the same steps -------------------------------------------------
+// A plan bills some steps at 0 while their tokens still have a list value; that
+// is not the rate table disagreeing with the provider, and it must not hide a
+// real disagreement either.
+
+const card = (input, output) => ({ cost: { cacheRead: 0, cacheWrite: 0, input, output }, name: 'card', tiers: [] });
+const driftBook = {
+  checkedAt: '2026-11-16',
+  providers: { test: { models: { 'model-a': card(4, 20) }, name: 'Test', source: 'Test list' } },
+};
+const driftStep = (cost) => ({ at: 1_800_000_000_000, cacheRead: 0, cacheWrite: 0, cost, model: 'model-a', provider: 'test', tokens: 1000, total: 1_001_000 });
+const planMix = computeApiValue(driftBook, [driftStep(4.02), driftStep(0)]);
+check(
+  'CV-21 an unbilled step does not fake a price drift',
+  near(planMix.total, 8.04) && near(planMix.billed.total, 4.02) && planMix.drift === null && planMix.priceNote === null,
+  `total ${planMix.total}, billed ${planMix.billed.total}, drift ${JSON.stringify(planMix.drift)}, note ${planMix.priceNote}`,
+);
+const wrongCard = computeApiValue(driftBook, [driftStep(2.01)]);
+check(
+  'CV-22 a real disagreement still flags when every step is billed',
+  wrongCard.drift !== null && near(wrongCard.drift.relative, 1) && wrongCard.priceNote === 'drift',
+  JSON.stringify(wrongCard.drift),
+);
+const mixedWrong = computeApiValue(driftBook, [driftStep(2.01), driftStep(0)]);
+check(
+  'CV-23 a real disagreement is not diluted by unbilled tokens',
+  mixedWrong.drift !== null && near(mixedWrong.drift.relative, 1),
+  JSON.stringify(mixedWrong.drift),
+);
+
 const passed = results.filter((result) => result.ok).length;
 console.log(`\n${passed}/${results.length} price checks passed`);
 process.exit(process.exitCode ?? 0);

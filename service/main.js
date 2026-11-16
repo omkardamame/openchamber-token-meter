@@ -324,7 +324,9 @@ function computeApiValue(book, steps, { turnStartedAt = null, provider = null, m
     if (!group) {
       group = {
         apiValue: 0,
+        apiValueBilled: 0,
         billed: 0,
+        billedPriced: 0,
         cacheRead: 0,
         cacheWrite: 0,
         consumed: 0,
@@ -353,6 +355,10 @@ function computeApiValue(book, steps, { turnStartedAt = null, provider = null, m
       group.priced += 1;
       group.pricedConsumed += row.consumed;
       group.apiValue += row.apiCost;
+      if (row.billed > 0) {
+        group.apiValueBilled += row.apiCost;
+        group.billedPriced += row.billed;
+      }
       group.match = row.price.match;
       group.price = row.price;
       group.name = row.price.name ?? row.price.model;
@@ -370,8 +376,8 @@ function computeApiValue(book, steps, { turnStartedAt = null, provider = null, m
     group.timeTier = group.price?.timeTier ?? null;
     group.tier = group.price?.tier ?? null;
     group.drift = null;
-    if (group.billed > 0 && group.apiValue > 0) {
-      const relative = (group.apiValue - group.billed) / group.billed;
+    if (group.billedPriced > 0 && group.apiValueBilled > 0) {
+      const relative = (group.apiValueBilled - group.billedPriced) / group.billedPriced;
       if (Math.abs(relative) > 0.01) {
         group.drift = relative;
         drifted.push({ model: group.model, relative });
@@ -668,7 +674,7 @@ function applyRecord(collector, record) {
   collector.totalsFrom = "usage";
 }
 function pushStep(collector, step) {
-  if (!step.tokens)
+  if (!(step.total > 0))
     return;
   collector.stepsSeq += 1;
   collector.steps.push(step);
@@ -1358,7 +1364,7 @@ function snapshot(collector, now = Date.now(), tree = [collector], priceBook = n
     cost: priceBook ? {
       mode: "api",
       total: round6(api.total),
-      lastTurn: api.total === null ? null : round6(collector.turnStartedAt ? apiTurn : 0),
+      lastTurn: api.total === null || !collector.turnStartedAt ? null : round6(apiTurn),
       perMillion: round6(api.perMillion),
       billed: {
         lastTurn: round6(collector.turnStartedAt ? billedTurn : 0),
@@ -1414,10 +1420,10 @@ function snapshot(collector, now = Date.now(), tree = [collector], priceBook = n
     } : {
       mode: "billed",
       total: totalCost,
-      lastTurn: lastTurnCost,
+      lastTurn: collector.turnStartedAt ? lastTurnCost : null,
       perMillion: consumed > 0 ? Math.round(totalCost / consumed * 1e6 * 1e4) / 1e4 : null,
       billed: {
-        lastTurn: lastTurnCost,
+        lastTurn: collector.turnStartedAt ? lastTurnCost : null,
         perMillion: consumed > 0 ? Math.round(totalCost / consumed * 1e6 * 1e4) / 1e4 : null,
         total: totalCost
       },
@@ -1468,7 +1474,7 @@ function snapshot(collector, now = Date.now(), tree = [collector], priceBook = n
         v: wideSeries.map((bucket) => Math.round(bucket.sum / bucket.n * 10) / 10)
       }
     } : {},
-    stepsSeq: members.reduce((sum, member) => sum + member.stepsSeq, 0),
+    stepsSeq: members.reduce((sum, member) => sum + (member.seqEpoch ?? 0) + member.stepsSeq, 0),
     steps: wire,
     stepsFrom: shownSteps[0]?.at ?? null,
     stepsKnown,
@@ -5658,7 +5664,7 @@ function loadPriceOverrides({ file = priceOverrideFile(), log = () => {} } = {})
 }
 
 // service/src/recordings.js
-import { readFileSync as readFileSync2, statSync } from "node:fs";
+import { readFileSync as readFileSync2, readdirSync, statSync, unlinkSync } from "node:fs";
 import { chmod, mkdir, rename, unlink, writeFile } from "node:fs/promises";
 import path2 from "node:path";
 var VERSION = 1;
@@ -5805,6 +5811,15 @@ function createRecordingStore({ dataDir = null, log = () => {}, maxSessions = MA
   function load() {
     if (!dir)
       return;
+    try {
+      for (const name of readdirSync(dir)) {
+        if (!name.startsWith(`${FILE_NAME}.tmp-`))
+          continue;
+        try {
+          unlinkSync(path2.join(dir, name));
+        } catch {}
+      }
+    } catch {}
     let info;
     try {
       info = statSync(file);
@@ -5980,6 +5995,7 @@ function createRecordingStore({ dataDir = null, log = () => {}, maxSessions = MA
       await chmod(tmp, 384);
       await rename(tmp, file);
       writeError = null;
+      loadError = null;
       return true;
     } catch (error) {
       await unlink(tmp).catch(() => {});
@@ -6037,9 +6053,9 @@ var SUBAGENT_HISTORY_RETRY_MS = 15000;
 var TICK_MS = 250;
 var MAX_RECORDINGS = 200;
 var RECORDING_SAVE_MS = 5000;
-var RECORDING_SCAN_MS = 30000;
+var RECORDING_SCAN_MS = Math.max(100, Number(process.env.TOKEN_METER_SCAN_MS) || 30000);
 var DISCOVERY_FRESH_MS = 10 * 60000;
-var RECORD_FRESH_MS = 15000;
+var RECORD_FRESH_MS = Math.max(50, Number(process.env.TOKEN_METER_RECORD_FRESH_MS) || 15000);
 var AUTO_STEPS = 120;
 if (!PORT || !TOKEN) {
   console.error("token-meter: OPENCHAMBER_SERVICE_PORT and OPENCHAMBER_SERVICE_TOKEN are required");
@@ -6050,6 +6066,8 @@ function createService({ fetchImpl = fetch, log = () => {}, base = BASE, token =
   const state = { stream: "idle", streamError: null, stopping: false, controller: null, since: Date.now() };
   const priceOverrides = overrides ?? loadPriceOverrides({ file: priceOverrideFile(dataDir), log });
   const recordings = createRecordingStore({ dataDir, log, maxSessions: MAX_RECORDINGS });
+  let seqEpoch = 0;
+  const SEQ_STRIDE = 1e6;
   let captureError = null;
   let captureWarnAt = 0;
   let discoveryLoading = false;
@@ -6057,6 +6075,7 @@ function createService({ fetchImpl = fetch, log = () => {}, base = BASE, token =
   const working = (member) => Boolean(member.turnActive || WORKING_STATES.has(member.status));
   const makeCollector = (id) => {
     const collector = createCollector(id);
+    collector.seqEpoch = ++seqEpoch * SEQ_STRIDE;
     const saved = recordings.get(id);
     collector.captureStartedAt = saved?.startedAt ?? null;
     collector.captureEndedAt = saved?.endedAt ?? null;
@@ -6070,7 +6089,9 @@ function createService({ fetchImpl = fetch, log = () => {}, base = BASE, token =
   };
   const applyCaptureRecord = (collector, record) => {
     const recordAt = record?.time?.updated ?? record?.time?.created ?? null;
-    const preserveLive = collector.capturePendingRecord || recordAt !== null && (collector.captureEventAt ?? 0) > recordAt || recordAt !== null && recordAt <= Date.now() - RECORD_FRESH_MS && !collector.stream && collector.pendingTools === 0;
+    const saysWorking = Boolean(record?.time?.busy && (!record?.time?.idle || record.time.busy > record.time.idle));
+    const newerEvents = recordAt !== null && (collector.captureEventAt ?? 0) > recordAt;
+    const preserveLive = newerEvents || saysWorking && (collector.capturePendingRecord || recordAt !== null && recordAt <= Date.now() - RECORD_FRESH_MS);
     const liveState = preserveLive ? {
       status: collector.status,
       turnActive: collector.turnActive,
@@ -6186,7 +6207,7 @@ function createService({ fetchImpl = fetch, log = () => {}, base = BASE, token =
         reindex();
         continue;
       }
-      recordings.capture(member, member.series.at(-1)?.t ?? Date.now());
+      recordings.capture(member, Date.now());
       collectors.delete(member.id);
       reindex();
     }
@@ -6425,6 +6446,7 @@ function createService({ fetchImpl = fetch, log = () => {}, base = BASE, token =
             collector.stream = null;
             collector.pendingTools = 0;
             collector.captureFinishedAt = Date.now();
+            collector.capturePendingRecord = false;
           } else
             log(`token-meter: could not reconcile graph ${collector.id}: ${error?.message ?? error}`);
         }
@@ -6446,7 +6468,17 @@ function createService({ fetchImpl = fetch, log = () => {}, base = BASE, token =
     } else if (collector.captureStartedAt && !collector.captureEndedAt && !collector.capturePendingRecord) {
       const last = collector.series.at(-1)?.t ?? null;
       const settleAt = last === null ? now : last + 250;
-      const end = Math.max(collector.captureFinishedAt || now, settleAt);
+      if (!collector.series.some((point) => point.v > 0) && !recordings.get(collector.id)) {
+        collector.captureStartedAt = null;
+        collector.captureEndedAt = null;
+        collector.capturePendingRecord = false;
+        collector.captureDirty = false;
+        collector.series = [];
+        collector.seriesLong = [];
+        collector.seriesWide = [];
+        return;
+      }
+      const end = Math.max(collector.captureFinishedAt ?? 0, settleAt);
       tickFinal(collector, settleAt, tree);
       collector.captureEndedAt = end;
       recordings.capture(collector, end);
@@ -6580,7 +6612,7 @@ function createService({ fetchImpl = fetch, log = () => {}, base = BASE, token =
     for (const collector of collectors.values()) {
       if (!collector.captureDirty)
         continue;
-      recordings.capture(collector, collector.series.at(-1)?.t ?? Date.now());
+      recordings.capture(collector, Date.now());
       collector.captureDirty = false;
     }
     recordings.flush();
@@ -6685,7 +6717,7 @@ function createService({ fetchImpl = fetch, log = () => {}, base = BASE, token =
       state.controller?.abort();
       server.close();
       for (const collector of collectors.values())
-        recordings.capture(collector, collector.series.at(-1)?.t ?? Date.now());
+        recordings.capture(collector, Date.now());
       await recordings.flush();
     }
   };

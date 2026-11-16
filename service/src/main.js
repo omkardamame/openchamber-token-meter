@@ -51,13 +51,14 @@ const SUBAGENT_HISTORY_RETRY_MS = 15_000;
 const TICK_MS = 250;
 const MAX_RECORDINGS = 200;
 const RECORDING_SAVE_MS = 5_000;
-const RECORDING_SCAN_MS = 30_000;
+// Test seam only: the suites shorten the scan instead of waiting 30 s.
+const RECORDING_SCAN_MS = Math.max(100, Number(process.env.TOKEN_METER_SCAN_MS) || 30_000);
 // A record nobody has touched for this long is history, not a running turn.
 // Discovery uses it to avoid resurrecting a graph from a stale busy flag.
 const DISCOVERY_FRESH_MS = 10 * 60_000;
 // A record older than this cannot prove a turn is still running: OpenCode keeps
 // `busy` after a turn when the idle event was missed or the service restarted.
-const RECORD_FRESH_MS = 15_000;
+const RECORD_FRESH_MS = Math.max(50, Number(process.env.TOKEN_METER_RECORD_FRESH_MS) || 15_000);
 // An unopened session only feeds the live curve; opening it loads the full
 // thousand-step history. Keeping that history for every remembered session
 // would cost far more memory than the graph it draws.
@@ -75,6 +76,10 @@ export function createService({ fetchImpl = fetch, log = () => {}, base = BASE, 
   // Both are read once, here: no watcher, no per-poll file read.
   const priceOverrides = overrides ?? loadPriceOverrides({ file: priceOverrideFile(dataDir), log });
   const recordings = createRecordingStore({ dataDir, log, maxSessions: MAX_RECORDINGS });
+  // A session-lifetime base for `stepsSeq`: a recreated collector must not
+  // reproduce a token the frame already holds with different content.
+  let seqEpoch = 0;
+  const SEQ_STRIDE = 1_000_000;
   let captureError = null;
   let captureWarnAt = 0;
   let discoveryLoading = false;
@@ -82,6 +87,7 @@ export function createService({ fetchImpl = fetch, log = () => {}, base = BASE, 
   const working = (member) => Boolean(member.turnActive || WORKING_STATES.has(member.status));
   const makeCollector = (id) => {
     const collector = createCollector(id);
+    collector.seqEpoch = (++seqEpoch) * SEQ_STRIDE;
     const saved = recordings.get(id);
     collector.captureStartedAt = saved?.startedAt ?? null;
     collector.captureEndedAt = saved?.endedAt ?? null;
@@ -97,15 +103,16 @@ export function createService({ fetchImpl = fetch, log = () => {}, base = BASE, 
     // A record read can finish after newer SSE lifecycle events. Its counters
     // are still useful, but its stale busy flag must not resurrect a finished
     // recording or interrupt a new turn.
-    // A restored recording was active when the service last stopped, and a
-    // record untouched for a while only says a turn ran once. Neither may put a
-    // collector back into streaming: only a live event (or a fresh record with
-    // no in-flight stream) can.
+    // Trust is directional: a record may always settle a turn (it says idle),
+    // but only a live event or a fresh record that claims busy may start one.
+    // A stale `busy` is OpenCode keeping the flag after the turn, and a stale
+    // record must never pin a graph "live" forever either.
     const recordAt = record?.time?.updated ?? record?.time?.created ?? null;
+    const saysWorking = Boolean(record?.time?.busy && (!record?.time?.idle || record.time.busy > record.time.idle));
+    const newerEvents = recordAt !== null && (collector.captureEventAt ?? 0) > recordAt;
     const preserveLive =
-      collector.capturePendingRecord ||
-      (recordAt !== null && (collector.captureEventAt ?? 0) > recordAt) ||
-      (recordAt !== null && recordAt <= Date.now() - RECORD_FRESH_MS && !collector.stream && collector.pendingTools === 0);
+      newerEvents ||
+      (saysWorking && (collector.capturePendingRecord || (recordAt !== null && recordAt <= Date.now() - RECORD_FRESH_MS)));
     const liveState = preserveLive ? {
       status: collector.status, turnActive: collector.turnActive, stream: collector.stream,
       pendingTools: collector.pendingTools, model: collector.model, provider: collector.provider,
@@ -238,7 +245,7 @@ export function createService({ fetchImpl = fetch, log = () => {}, base = BASE, 
         reindex();
         continue;
       }
-      recordings.capture(member, member.series.at(-1)?.t ?? Date.now());
+      recordings.capture(member, Date.now());
       collectors.delete(member.id);
       reindex();
     }
@@ -480,6 +487,8 @@ export function createService({ fetchImpl = fetch, log = () => {}, base = BASE, 
             collector.stream = null;
             collector.pendingTools = 0;
             collector.captureFinishedAt = Date.now();
+            // The session is gone; a restored pending recording must settle.
+            collector.capturePendingRecord = false;
           } else log(`token-meter: could not reconcile graph ${collector.id}: ${error?.message ?? error}`);
         }
       }));
@@ -504,7 +513,24 @@ export function createService({ fetchImpl = fetch, log = () => {}, base = BASE, 
       // detected late), so a finished graph drops to zero instead of ending
       // high and being held at the edge by the frame.
       const settleAt = last === null ? now : last + 250;
-      const end = Math.max(collector.captureFinishedAt || now, settleAt);
+      // A turn that never generated (a permission or tool wait) is not a graph:
+      // keep the slot for a real one, and do not show a flat recorded line.
+      if (!collector.series.some((point) => point.v > 0) && !recordings.get(collector.id)) {
+        collector.captureStartedAt = null;
+        collector.captureEndedAt = null;
+        collector.capturePendingRecord = false;
+        collector.captureDirty = false;
+        // Nothing was generated, so there is no curve to keep (not even the
+        // idle zeros every tick just added).
+        collector.series = [];
+        collector.seriesLong = [];
+        collector.seriesWide = [];
+        return;
+      }
+      // Never invent "now" when nothing observed the end: a recording restored
+      // from disk settles next to its last sample, so its window still has the
+      // curve instead of being empty.
+      const end = Math.max(collector.captureFinishedAt ?? 0, settleAt);
       tickFinal(collector, settleAt, tree);
       collector.captureEndedAt = end;
       recordings.capture(collector, end);
@@ -644,7 +670,7 @@ export function createService({ fetchImpl = fetch, log = () => {}, base = BASE, 
     // Copy snapshots once per disk batch, not on every delta or 250 ms tick.
     for (const collector of collectors.values()) {
       if (!collector.captureDirty) continue;
-      recordings.capture(collector, collector.series.at(-1)?.t ?? Date.now());
+      recordings.capture(collector, Date.now());
       collector.captureDirty = false;
     }
     void recordings.flush();
@@ -764,7 +790,7 @@ export function createService({ fetchImpl = fetch, log = () => {}, base = BASE, 
       clearInterval(discoveryTimer);
       state.controller?.abort();
       server.close();
-      for (const collector of collectors.values()) recordings.capture(collector, collector.series.at(-1)?.t ?? Date.now());
+      for (const collector of collectors.values()) recordings.capture(collector, Date.now());
       await recordings.flush();
     },
   };

@@ -9,8 +9,10 @@ import path from 'node:path';
 process.env.OPENCHAMBER_SERVICE_PORT = '1';
 process.env.OPENCHAMBER_SERVICE_TOKEN = 'test-token';
 process.env.TOKEN_METER_NO_LISTEN = '1';
+process.env.TOKEN_METER_SCAN_MS = '150';
+process.env.TOKEN_METER_RECORD_FRESH_MS = '300';
 const { createService } = await import('../service/src/main.js');
-const dir = await mkdtemp(path.join(os.tmpdir(), 'token-recordings-'));
+let dir = await mkdtemp(path.join(os.tmpdir(), 'token-recordings-'));
 const records = new Map();
 const started = Date.now();
 const record = (id, parentID = null, busy = true) => ({
@@ -47,7 +49,8 @@ async function start() {
         historyReads += 1;
         return Response.json({ data: [] });
       }
-      return Response.json({ data: records.get(decodeURIComponent(u.pathname.split('/').at(-1))) ?? null });
+      const one = records.get(decodeURIComponent(u.pathname.split('/').at(-1)));
+      return one ? Response.json({ data: one }) : new Response('{"message":"not found"}', { status: 404 });
     },
   });
   const server = service.start();
@@ -179,6 +182,82 @@ try {
     assert.ok(child.series.v.some((v) => v > 0));
     assert.ok(parent.subagents.count >= 1);
   });
+  await stop();
+  // A missed success event leaves the collector working; a discovery read of an
+  // idle record must settle it, even though that record is older than 15 s.
+  records.set('ses_stale_idle', record('ses_stale_idle'));
+  await start();
+  await burst('ses_stale_idle');
+  // The record is written after the last event, then goes stale: the exact
+  // shape that used to pin the graph live forever.
+  records.set('ses_stale_idle', { ...record('ses_stale_idle'), time: { created: started - 60_000, updated: Date.now(), busy: Date.now() - 5_000, idle: Date.now() - 1_000 } });
+  await delay(900);
+  const staleIdle = await state('ses_stale_idle');
+  check('a stale idle record still ends a missed turn', () => {
+    assert.equal(staleIdle.recording.state, 'saved');
+    assert.equal(staleIdle.series.v.at(-1), 0);
+  });
+  await stop();
+
+  // A recording saved as active before an abrupt stop must settle beside its
+  // last sample, not at the moment it is reopened (an empty 60 s window).
+  const seedDir = await mkdtemp(path.join(os.tmpdir(), 'token-seed-'));
+  const seedStore = (await import('../service/src/recordings.js')).createRecordingStore({ dataDir: seedDir });
+  const lastSample = Date.now() - 20 * 60_000;
+  seedStore.capture({
+    id: 'ses_seeded_old', captureStartedAt: lastSample - 5000, captureEndedAt: null,
+    series: [{ t: lastSample - 1000, v: 40 }, { t: lastSample, v: 12 }],
+    seriesLong: [], seriesWide: [],
+  }, Date.now());
+  await seedStore.flush();
+  const keptDir = dir;
+  dir = seedDir; // start() reads this directory from now on
+  records.clear();
+  records.set('ses_seeded_old', { ...record('ses_seeded_old'), time: { created: lastSample - 60_000, updated: lastSample, busy: lastSample, idle: null } });
+  await start();
+  const seeded = await state('ses_seeded_old');
+  check('a restored recording ends beside its last sample, so its curve is visible', () => {
+    const lastAt = seeded.series.t0 + seeded.series.d.at(-1);
+    assert.equal(seeded.recording.state, 'saved');
+    assert.ok(seeded.recording.endedAt - lastAt < 1000);
+    assert.ok(seeded.series.v.length >= 2);
+  });
+  await stop();
+  await rm(seedDir, { recursive: true, force: true });
+  dir = keptDir;
+
+  // A deleted session settles instead of holding a live graph forever. One
+  // service: the burst runs, then the session disappears from OpenCode.
+  records.clear();
+  records.set('ses_deleted', record('ses_deleted'));
+  await start();
+  await burst('ses_deleted');
+  records.clear();
+  await delay(800);
+  const deleted = await state('ses_deleted');
+  check('a deleted session settles its graph instead of keeping it live', () => {
+    assert.equal(deleted.recording.state, 'saved');
+    assert.equal(deleted.series.v.at(-1), 0);
+  });
+  await stop();
+
+  // A permission wait is not generation: no flat "recorded graph" and no slot.
+  records.set('ses_perm', record('ses_perm'));
+  await start();
+  event('ses_perm', 'permission.asked', { permissionID: 'p1' });
+  await delay(80);
+  event('ses_perm', 'permission.replied', { permissionID: 'p1' });
+  records.set('ses_perm', { ...record('ses_perm'), time: { created: started - 60_000, updated: Date.now(), busy: started - 50_000, idle: Date.now() } });
+  event('ses_perm', 'session.execution.succeeded');
+  await delay(600);
+  const perm = await state('ses_perm');
+  check('a permission wait with no generation is not saved as a recording', () => {
+    assert.equal(perm.recording.state, 'unrecorded');
+    assert.equal(perm.series.v.length, 0);
+  });
+  await stop();
+
+  await start();
   records.set('ses_never_recorded', record('ses_never_recorded', null, false));
   const old = await state('ses_never_recorded');
   check('a finished session with no recording is not given a fabricated live curve', () => {
