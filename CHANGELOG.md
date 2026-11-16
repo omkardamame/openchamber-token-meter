@@ -1,17 +1,68 @@
 # Changelog
 
-Every release of Token Meter, newest first; a few concise bullets per release, grouped by area for a major — what shipped in that tag.
+Every release of Token Meter, newest first; one line per change, grouped by area — what shipped in that tag.
 
 ## [2.0.0] - 2026-11-17
 
+### Added
+
+- Every session records its own graph in the background, even if you never open it.
+- A session that was already running has a curve when you open it.
+- Six providers priced at their published rates, including context tiers and time-of-day rates.
+- Your own price overrides are respected.
+- A "no published price" note instead of a guessed number.
+- A flag when the recorded bill and published prices disagree.
+- Session and turn budgets, with a warning at the limit.
+- A subagent list with cost, tokens, average, peak and last activity.
+- Click a subagent to show only its steps.
+- A Models section with per-model cost.
+- Session details: in, out, think, totals, cache, TTFT and consumed.
+- Copy stats, including the session and its subagents.
+- A budget chip to set or clear a limit.
+- A local clock in 12 or 24 hour format.
+- Scroll to zoom between a minute and an hour; it resets a minute after you stop.
+- Drag the per-step chart to see earlier steps.
+- Hover a step for its rate, tokens, duration, date, time and cost.
+- Keyboard control for the subagent list.
+- Reduced motion is respected.
+
 ### Changed
 
-- **Breaking — Cost is API value.** The headline is what the tokens would cost at published list rates; the recorded bill sits beside it. Six providers (Anthropic, OpenAI, OpenCode Go, OpenCode Zen, DeepSeek, Command Code) with context tiers, time-of-day tariffs, manual overrides, a named lower bound when a model has no price, and drift that compares only billed steps. Optional session and turn budgets warn at their dollar limit.
-- **Live charts.** Both frames follow the real clock: the dot sits on `now`, the curve moves every frame, and a finished turn holds a flat zero into `now` instead of freezing. The red peak line is the session's actual peak and pins the top of the scale (no fixed 250/300), with smaller ticks that run up to the peak and a dynamic linear/log axis so a burst does not flatten normal rates. Scroll zooms smoothly out to an hour and resets a minute after you stop; the per-step chart pans and filters by subagent.
-- **Per-step and panel.** A bar's readout names its rate, in and out tokens, duration, date and time, cost, and the subagent when there is one. The panel adds a subagent roster (cost, tokens, average, peak and last active per child) with its own step filter, a model breakdown, `Session details`, copy stats covering the session and its children, a budget chip, and a local clock in 12 or 24 hour form. `Consumed` counts the whole tree.
-- **Recording without an open panel.** Every session records its own graph while OpenChamber runs — the latest hour, up to 200 sessions, rate samples only, never text — so a chat that started before you opened it still has its curve. Recordings survive a restart, settle to zero at the end, and a session that only waited on a permission is not saved as a graph.
-- **Fixes and hardening.** Stale totals, header, Models and footer across a session switch; `hidden` failing to hide; the last step not naming its subagent; the roster losing keyboard focus; the status banner clipping its last row; a zero-output step missing from the turn and cost; an unknown last turn printed as a dollar zero; a step list that could repeat its sequence token. The Steps block no longer overlaps the footer in a short panel.
-- **Speed and safety.** The turn cost keeps a compact timeline instead of a price row per step; the rail receives only the fields it draws; step hover restyles bars instead of rebuilding them; an idle graph draws once a second. The credential guard scans the working tree as well as history for this machine's live password and cannot miss a hit (it has its own test); `npm test` runs every suite; parallel runs get their own ports and browser session.
+- **Breaking:** Cost now shows published prices, not the recorded bill.
+- The graph follows the real clock and keeps moving after a turn.
+- After a turn the line settles flat at zero and stays at "now".
+- The red peak line is the real peak and always sits at the top.
+- The scale handles slow and bursty rates without flattening them.
+- Side numbers are smaller, and the top number is the peak.
+- The peak's age starts again whenever a new peak is reached.
+- "Session totals" is now "Session details".
+- Total consumed counts every subagent.
+- Subagent rows slide in and out instead of snapping.
+- The subagent list hides a minute after you stop using it.
+
+### Fixed
+
+- Switching sessions no longer leaves old totals, header, models or footer behind.
+- Sections that should be hidden stay hidden.
+- The last step says which subagent ran it.
+- The subagent list no longer closes while you are using the keyboard.
+- The rail's error message no longer cuts off the last row.
+- The steps chart no longer overlaps the footer in a short panel.
+- Steps that produced no output still count in cost and the turn.
+- No more $0.0000 when the turn start is unknown.
+- The step chart no longer freezes on an old list.
+- Recordings survive a restart.
+- A finished graph ends at zero instead of high.
+- A session that only waited for permission is not saved as a graph.
+
+### Under the hood
+
+- Long sessions use less memory.
+- The rail panel downloads only what it shows.
+- Hovering the steps chart no longer redraws it.
+- An idle graph redraws once a second instead of every frame.
+- The secret scan also checks uncommitted files and can no longer silently miss a leaked password.
+- `npm test` runs every suite.
 
 ## [1.9.1] - 2026-11-13
 
