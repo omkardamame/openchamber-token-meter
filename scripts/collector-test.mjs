@@ -1713,6 +1713,7 @@ check(
     statusShaped.body.rates === undefined &&
     statusShaped.body.recording === undefined &&
     Array.isArray(statusShaped.body.series?.v) &&
+    typeof statusShaped.body.stepsSeq === 'number' &&
     statusShaped.body.live !== undefined &&
     statusShaped.body.totals?.input === baseline.input,
   `keys ${Object.keys(statusShaped.body).sort().join(',')}`,
