@@ -52,6 +52,12 @@ const TICK_MS = 250;
 const MAX_RECORDINGS = 200;
 const RECORDING_SAVE_MS = 5_000;
 const RECORDING_SCAN_MS = 30_000;
+// A record nobody has touched for this long is history, not a running turn.
+// Discovery uses it to avoid resurrecting a graph from a stale busy flag.
+const DISCOVERY_FRESH_MS = 10 * 60_000;
+// A record older than this cannot prove a turn is still running: OpenCode keeps
+// `busy` after a turn when the idle event was missed or the service restarted.
+const RECORD_FRESH_MS = 15_000;
 // An unopened session only feeds the live curve; opening it loads the full
 // thousand-step history. Keeping that history for every remembered session
 // would cost far more memory than the graph it draws.
@@ -91,8 +97,16 @@ export function createService({ fetchImpl = fetch, log = () => {}, base = BASE, 
     // A record read can finish after newer SSE lifecycle events. Its counters
     // are still useful, but its stale busy flag must not resurrect a finished
     // recording or interrupt a new turn.
-    const newerEvent = (collector.captureEventAt ?? 0) > (record?.time?.updated ?? record?.time?.created ?? 0);
-    const liveState = newerEvent ? {
+    // A restored recording was active when the service last stopped, and a
+    // record untouched for a while only says a turn ran once. Neither may put a
+    // collector back into streaming: only a live event (or a fresh record with
+    // no in-flight stream) can.
+    const recordAt = record?.time?.updated ?? record?.time?.created ?? null;
+    const preserveLive =
+      collector.capturePendingRecord ||
+      (recordAt !== null && (collector.captureEventAt ?? 0) > recordAt) ||
+      (recordAt !== null && recordAt <= Date.now() - RECORD_FRESH_MS && !collector.stream && collector.pendingTools === 0);
+    const liveState = preserveLive ? {
       status: collector.status, turnActive: collector.turnActive, stream: collector.stream,
       pendingTools: collector.pendingTools, model: collector.model, provider: collector.provider,
     } : null;
@@ -439,6 +453,9 @@ export function createService({ fetchImpl = fetch, log = () => {}, base = BASE, 
         const idle = record?.time?.idle;
         const known = collectors.get(record?.id);
         if (!known && !(busy && (!idle || busy > idle))) continue;
+        // Only a freshly updated record can start a graph for a chat we have
+        // never seen: OpenCode can retain `busy` after the turn is over.
+        if (!known && !(record?.time?.updated > Date.now() - DISCOVERY_FRESH_MS)) continue;
         const collector = known ?? automaticCollector(record.id);
         if (!collector) continue;
         collector.captureLastCheckedAt = Date.now();
@@ -448,7 +465,7 @@ export function createService({ fetchImpl = fetch, log = () => {}, base = BASE, 
       // A busy chat can fall off the recent list or be deleted while the event
       // stream is disconnected. Recheck a bounded batch instead of retaining
       // zombie "active" collectors forever and exhausting the recording cap.
-      const unseen = [...collectors.values()].filter((item) => working(item) && !listed.has(item.id))
+      const unseen = [...collectors.values()].filter((item) => (working(item) || item.capturePendingRecord) && !listed.has(item.id))
         .sort((a, b) => (a.captureLastCheckedAt ?? 0) - (b.captureLastCheckedAt ?? 0)).slice(0, 8);
       await Promise.all(unseen.map(async (collector) => {
         collector.captureLastCheckedAt = Date.now();

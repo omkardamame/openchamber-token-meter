@@ -6038,6 +6038,8 @@ var TICK_MS = 250;
 var MAX_RECORDINGS = 200;
 var RECORDING_SAVE_MS = 5000;
 var RECORDING_SCAN_MS = 30000;
+var DISCOVERY_FRESH_MS = 10 * 60000;
+var RECORD_FRESH_MS = 15000;
 var AUTO_STEPS = 120;
 if (!PORT || !TOKEN) {
   console.error("token-meter: OPENCHAMBER_SERVICE_PORT and OPENCHAMBER_SERVICE_TOKEN are required");
@@ -6067,8 +6069,9 @@ function createService({ fetchImpl = fetch, log = () => {}, base = BASE, token =
     return collector;
   };
   const applyCaptureRecord = (collector, record) => {
-    const newerEvent = (collector.captureEventAt ?? 0) > (record?.time?.updated ?? record?.time?.created ?? 0);
-    const liveState = newerEvent ? {
+    const recordAt = record?.time?.updated ?? record?.time?.created ?? null;
+    const preserveLive = collector.capturePendingRecord || recordAt !== null && (collector.captureEventAt ?? 0) > recordAt || recordAt !== null && recordAt <= Date.now() - RECORD_FRESH_MS && !collector.stream && collector.pendingTools === 0;
+    const liveState = preserveLive ? {
       status: collector.status,
       turnActive: collector.turnActive,
       stream: collector.stream,
@@ -6396,6 +6399,8 @@ function createService({ fetchImpl = fetch, log = () => {}, base = BASE, token =
         const known = collectors.get(record?.id);
         if (!known && !(busy && (!idle || busy > idle)))
           continue;
+        if (!known && !(record?.time?.updated > Date.now() - DISCOVERY_FRESH_MS))
+          continue;
         const collector = known ?? automaticCollector(record.id);
         if (!collector)
           continue;
@@ -6404,7 +6409,7 @@ function createService({ fetchImpl = fetch, log = () => {}, base = BASE, token =
         if (record.parentID && !collectors.has(record.parentID))
           learnSession(record.id);
       }
-      const unseen = [...collectors.values()].filter((item) => working(item) && !listed.has(item.id)).sort((a, b) => (a.captureLastCheckedAt ?? 0) - (b.captureLastCheckedAt ?? 0)).slice(0, 8);
+      const unseen = [...collectors.values()].filter((item) => (working(item) || item.capturePendingRecord) && !listed.has(item.id)).sort((a, b) => (a.captureLastCheckedAt ?? 0) - (b.captureLastCheckedAt ?? 0)).slice(0, 8);
       await Promise.all(unseen.map(async (collector) => {
         collector.captureLastCheckedAt = Date.now();
         try {

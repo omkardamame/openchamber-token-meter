@@ -134,6 +134,30 @@ try {
     assert.ok(resumed.recording.lastSampleAt > restored.recording.lastSampleAt);
   });
   await stop();
+  // A recording that was active when the service stopped must not trust the
+  // record's retained busy flag after a restart: that turn ended meanwhile.
+  records.set('ses_crashed', record('ses_crashed'));
+  await start();
+  await burst('ses_crashed');
+  const beforeCrash = await state('ses_crashed');
+  check('a recording is active before an abrupt stop', () => assert.equal(beforeCrash.recording.state, 'live'));
+  await stop();
+  records.set('ses_crashed', { ...record('ses_crashed'), time: { created: started - 60_000, updated: started - 50_000, busy: started - 50_000 } });
+  await start();
+  await delay(400);
+  const revived = await state('ses_crashed');
+  check('a restored recording settles instead of trusting a stale busy flag', () => {
+    assert.equal(revived.recording.state, 'saved');
+    assert.equal(revived.series.v.at(-1), 0);
+  });
+  records.set('ses_stale_busy', { ...record('ses_stale_busy'), time: { created: started - 3_600_000, updated: started - 1_800_000, busy: started - 1_800_000, idle: null } });
+  await delay(400);
+  const stale = await state('ses_stale_busy');
+  check('an old busy record does not start a phantom live graph', () => {
+    assert.equal(stale.recording.state, 'unrecorded');
+    assert.equal(stale.series.v.length, 0);
+  });
+  await stop();
   records.clear();
   records.set('ses_boot_busy', record('ses_boot_busy'));
   await start();
