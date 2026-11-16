@@ -808,7 +808,11 @@ try {
   // non-finite inputs and tick spacing at short/tall chart sizes.
   check('scale: zero and the linear threshold are exact', symlogShare(0, 3000) === 0 && symlogShare(50, 3000) === 0.175 && symlogShare(100, 3000) === 0.35);
   check('scale: 250 stays legible beneath a 3k spike', Math.abs(symlogShare(250, 3000) - (0.35 + 0.65 * Math.log10(2.5) / Math.log10(30))) < 1e-12 && symlogShare(250, 3000) > 0.5);
-  check('scale: floor, clipping and non-finite values are safe', rateCeiling(0) === 300 && rateCeiling(NaN) === 300 && symlogShare(-1, 300) === 0 && symlogShare(Infinity, 300) === 0 && symlogShare(1000, 0) === 1);
+  check(
+    'scale: the ceiling is the peak, and invalid input is safe',
+    rateCeiling(0) === 1 && rateCeiling(NaN) === 1 && rateCeiling(Infinity) === 1 &&
+      symlogShare(-1, 300) === 0 && symlogShare(Infinity, 300) === 0 && symlogShare(1000, 0) === 1,
+  );
   const scaleValues = [0, 1, 50, 99.99999, 100, 100.00001, 250, 1000, 3000];
   check('scale: continuous and strictly increasing through 100', scaleValues.every((v, i) => i === 0 || symlogShare(v, 3000) > symlogShare(scaleValues[i - 1], 3000)) && Math.abs(symlogShare(100.00001, 3000) - symlogShare(99.99999, 3000)) < 1e-6);
   const tickCases = [74, 98, 184, 800].flatMap((height) => [300, 3000, 30000, 1e6].map((max) => ({ height, max, ticks: rateTicks(max, height) })));
@@ -903,7 +907,7 @@ try {
     String(idle.costTurnTitle),
   );
   const idleStepPlot = idle.chartGeometry[1].height - 12;
-  check('panel keeps a sub-300 peak below the ceiling', Math.abs(idle.stepsPeakTop - (6 + idleStepPlot * (1 - symlogShare(180, 300)))) < 0.11, String(idle.stepsPeakTop));
+  check('panel puts a low peak on the top edge instead of a fixed ceiling', Math.abs(idle.stepsPeakTop - 6) < 0.11, String(idle.stepsPeakTop));
   check('panel shows the last measured step', /last 33 t\/s/.test(idle.text), idle.text.slice(0, 60));
   check(
     'panel puts the last turn cost after the last measured step',
@@ -2101,7 +2105,7 @@ try {
     steps: graphRates.map((tps, i) => ({ tps, ms: 2000, tokens: tps * 2, at: Date.now() - (4 - i) * 1000, aborted: false })),
     series: { t0: Date.now() - 2000, step: 250, v: [250, 250, 250] },
   });
-  const expectedShare = (v, max = 3000) => v <= 100 ? 0.35 * v / 100 : 0.35 + 0.65 * Math.log10(v / 100) / Math.log10(max / 100);
+  const expectedShare = (v, max = 3000) => max <= 100 ? v / max : v <= 100 ? 0.35 * v / 100 : 0.35 + 0.65 * Math.log10(v / 100) / Math.log10(max / 100);
   const expectedY = (v, g, pad, max = 3000) => g.height - pad - expectedShare(v, max) * (g.height - 2 * pad);
   await panel.set(graphState);
   const graphRead = await settle(panel, (data) => Math.abs(data.chartGeometry[0].dotY - expectedY(250, data.chartGeometry[0], 8)) < 0.11);
@@ -2124,7 +2128,12 @@ try {
   check('graph: the axis grows dynamically beyond the example 3k spike', Math.abs(giantGraph.chartGeometry[0].dotY - expectedY(250, giantGraph.chartGeometry[0], 8, 12000)) < 0.11 && giantGraph.gridLabels.some((label) => label.endsWith('k')), giantGraph.gridLabels.join(' | '));
   await panel.set({ ...graphState, rates: { avg: 60, peak: 100 }, series: { ...graphState.series, v: [60] } });
   const slowGraph = await settle(panel, (data) => Math.abs(data.chartGeometry[0].dotY - expectedY(60, data.chartGeometry[0], 8, 300)) < 0.11);
-  check('graph: a single slow sample and a low peak use the 300 floor', Math.abs(slowGraph.chartGeometry[0].dotY - expectedY(60, slowGraph.chartGeometry[0], 8, 300)) < 0.11 && Math.abs(slowGraph.peakLineY - expectedY(100, slowGraph.chartGeometry[0], 8, 300)) < 0.11);
+  check(
+    'graph: a low peak is the ceiling, with no fixed floor',
+    Math.abs(slowGraph.chartGeometry[0].dotY - expectedY(60, slowGraph.chartGeometry[0], 8, 100)) < 0.11 &&
+      Math.abs(slowGraph.peakLineY - expectedY(100, slowGraph.chartGeometry[0], 8, 100)) < 0.11,
+    `dot ${slowGraph.chartGeometry[0].dotY}, peak ${slowGraph.peakLineY}`,
+  );
 
   // --- budget ----------------------------------------------------------------
   // A limit is set from the Cost block's chip, stored in the extension's server

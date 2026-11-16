@@ -12,17 +12,19 @@
  */
 export const LINEAR_SHARE = 0.76;
 
-// Panel axes: the first 100 t/s get 35% of the plot; bursts share the
-// logarithmic remainder. This is display geometry, never a change to rates.
-export const RATE_FLOOR = 300;
-
+// Panel axes: the first 100 t/s get 35% of the plot and bursts share the
+// logarithmic remainder. The ceiling is the actual peak: a session under
+// 100 t/s is drawn linearly at full height so its peak is the top edge, never
+// a fixed 250/300 that would leave the peak halfway up. Display geometry only.
 export function rateCeiling(value) {
-  return Number.isFinite(value) ? Math.max(RATE_FLOOR, value) : RATE_FLOOR;
+  return Number.isFinite(value) && value > 0 ? Math.max(1, value) : 1;
 }
 
 export function symlogShare(value, maximum) {
   const max = rateCeiling(maximum);
   const v = Number.isFinite(value) ? Math.min(max, Math.max(0, value)) : 0;
+  // No log band exists below the threshold: use the whole height.
+  if (max <= 100) return v / max;
   return v <= 100 ? 0.35 * v / 100 : 0.35 + 0.65 * Math.log10(v / 100) / Math.log10(max / 100);
 }
 
@@ -34,7 +36,7 @@ export function rateTickLabel(value) {
  * Greedy pixel spacing keeps labels apart even in the short history chart. */
 export function rateTicks(maximum, height, minGap = 22) {
   const max = rateCeiling(maximum);
-  const candidates = new Set([0, 50, 100]);
+  const candidates = new Set([0, 10, 20, 25, 50, 75, 100].filter((value) => value <= max));
   for (let power = 2; power <= Math.floor(Math.log10(max)); power += 1) {
     for (const multiple of [1, 2, 2.5, 3, 5]) {
       const value = multiple * 10 ** power;
