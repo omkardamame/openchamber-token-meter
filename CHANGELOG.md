@@ -4,47 +4,52 @@ Every release of Token Meter, newest first; one line per change, grouped by area
 
 ## [2.0.0] - 2026-11-17
 
-### Changed
+Published prices, live charts that never freeze, and every session recording itself.
+
+### 💰 Pricing
 
 - **Breaking:** Cost now shows published prices, not the recorded bill.
-- Six providers with context tiers, time-of-day rates and your own overrides.
-- "No published price" instead of a guessed number, and a flag when the bill and prices disagree.
-- The graph follows the real clock: it keeps moving after a turn, settles flat at zero and stays at "now".
-- The peak line is the real peak, pinned to the top, and the axis scales to it.
-- Total consumed counts every subagent.
+- **Six providers**, with context tiers, time-of-day rates and your own overrides.
+- **"No published price"** instead of a guess, plus a flag when the bill and prices disagree.
+- **Budgets** for a session or a turn, with a warning at the limit.
 
-### Added
+### 📈 Charts
 
-- Session and turn budgets, with a warning at the limit.
-- A subagent list with each child's cost, tokens, average, peak and last activity.
-- Click a subagent to see only its steps.
-- A Models section with per-model cost.
-- Session details: in, out, think, totals, cache, TTFT and consumed.
-- Copy stats, including the session and its subagents.
-- A local clock in 12 or 24 hour format.
-- Scroll to zoom between a minute and an hour.
-- Drag the per-step chart to see earlier steps.
-- Hover a step for its rate, tokens, duration, date, time and cost.
-- Keyboard control and reduced motion.
-- Every session records its graph in the background, so a chat already running has its curve when you open it.
+- **Live clock:** the graph keeps moving after a turn, settles flat at zero and stays at "now".
+- **Peak line:** the real peak, pinned to the top; the axis scales to it.
+- **Zoom:** scroll from a minute to an hour.
+- **Steps:** drag to see earlier steps; hover for rate, tokens, duration, date, time and cost.
 
-### Fixed
+### 💾 Recording
+
+- **Every session records its graph**, so a chat already running has its curve when you open it.
+- **Restart-safe:** recordings survive a restart, and only real turns are saved.
+
+### 🧩 Panel
+
+- **Subagents:** cost, tokens, average, peak and last activity per child; click one to filter the steps.
+- **Models:** per-model cost.
+- **Session details:** in, out, think, totals, cache, TTFT and consumed.
+- **Copy stats** now include the session and its subagents.
+- **Local clock** in 12 or 24 hour format.
+- **Keyboard control** and **reduced motion**.
+
+### 🐛 Fixes
 
 - Switching sessions no longer shows the previous session's numbers.
-- A finished graph ends at zero instead of stopping high.
-- Recordings survive a restart, and only real turns are saved.
 - The step chart no longer freezes on an old list.
 - Steps that produced no output still count in cost and the turn.
 - No more $0.0000 for an unknown last turn.
+- Total consumed counts every subagent.
 - The rail's error message no longer cuts off the last row.
 - The steps chart no longer overlaps the footer in a short panel.
 
-### Performance
+### ⚡ Performance
 
-- Long sessions hold about half the memory: 163 MB → 79 MB at the 1,000-step cap.
-- The rail's answer on a long session: 108 KB → 3 KB (97% smaller).
-- Step hover with 1,000 steps: 6.6 ms → 0.2 ms per move.
-- An idle panel redraws the graph 30× less often: 61 → 2 writes a second.
+- **Memory:** 163 MB → 79 MB on a 1,000-step session.
+- **Rail answer:** 108 KB → 3 KB (97% smaller).
+- **Step hover:** 6.6 ms → 0.2 ms per move.
+- **Idle redraws:** 61 → 2 a second (30× fewer).
 
 ## [1.9.1] - 2026-11-13
 
