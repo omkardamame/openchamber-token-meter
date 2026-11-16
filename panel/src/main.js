@@ -127,22 +127,8 @@ function paintTier() {
   else delete ui.tpsValue.dataset.tier;
 }
 
-/**
- * The moment a saved graph ended, or null while the session is live, has no
- * recording, or speaks the older wire without one. A saved graph never advances:
- * its history would slide off the window in minutes and an old session would
- * look empty.
- */
-function savedEndOf(data) {
-  if (data?.recording?.state !== 'saved') return null;
-  const at = Number(data.recording.endedAt);
-  return Number.isFinite(at) && at > 0 ? at : null;
-}
-
 /** The host's clock at the last answer, advanced by the time since it arrived. */
 function projectedNow(data) {
-  const endedAt = savedEndOf(data);
-  if (endedAt !== null) return endedAt;
   return (data.generatedAt || Date.now()) + Math.min(1500, performance.now() - receivedAt);
 }
 
@@ -930,29 +916,19 @@ function drawLive(data) {
       ? data.pointsLong
       : data.points;
   const series = Array.isArray(source) ? source : [];
-  const endedAt = savedEndOf(data);
-  // A saved graph gets one second of display-only zeros after its end, so the
-  // stop reads as a decay instead of a cliff on the plot's edge. Nothing is
-  // added to the samples, the axis title or the store.
-  const now = endedAt !== null ? endedAt + 1_000 : projectedNow(data);
+  const now = projectedNow(data);
   const from = now - liveWindowMs;
   const windowSeconds = Math.round(liveWindowMs / 1_000);
-  // Seconds up close, minutes once the number would be noise. A saved graph's
-  // window sits before the moment it ended, not before the clock on the wall.
-  const span =
+  // Seconds up close, minutes once the number would be noise.
+  ui.axisFrom.textContent =
     windowSeconds >= 3_600
-      ? '1 h'
+      ? '1 h ago'
       : windowSeconds >= 120
-        ? `${Math.floor(windowSeconds / 60)} min`
-        : `${windowSeconds} s`;
-  ui.axisFrom.textContent = `${span} ${endedAt === null ? 'ago' : 'before end'}`;
-  ui.axisTo.textContent = endedAt === null ? 'now' : 'ended';
-  if (endedAt === null) ui.axisTo.removeAttribute('title');
-  else ui.axisTo.title = dateClock(endedAt);
+        ? `${Math.floor(windowSeconds / 60)} min ago`
+        : `${windowSeconds} s ago`;
+  ui.axisTo.textContent = 'now';
+  ui.axisTo.removeAttribute('title');
   const visible = series.filter((point) => point.t >= from && point.t <= now);
-  if (endedAt !== null) {
-    for (let offset = 250; offset <= 1_000; offset += 250) visible.push({ t: endedAt + offset, v: 0 });
-  }
   const peakValue = visible.reduce((max, point) => Math.max(max, point.v), 0);
   // References drawn on the chart: the session's average and its best step,
   // worked out by the service over every step it knows.
@@ -963,12 +939,9 @@ function drawLive(data) {
   // Smooth in rate units, then map to the axis: geometry never feeds back into
   // a measured value, a reference line's rate or the hover readout.
   const smooth = [];
-  const savedCurve = endedAt !== null;
   for (const point of visible) {
     const previous = smooth[smooth.length - 1];
-    // Live samples are smoothed for motion; a replay is the measured history
-    // itself, and a single settling zero must reach the baseline.
-    const value = savedCurve || previous === undefined ? point.v : previous + (point.v - previous) * 0.3;
+    const value = previous === undefined ? point.v : previous + (point.v - previous) * 0.3;
     smooth.push(value);
   }
   const liveTop = smooth.reduce((best, value) => Math.max(best, value), 0);
@@ -980,13 +953,10 @@ function drawLive(data) {
   const max = rateCeiling(Math.max(ceilingPeak, rates.avg));
   const share = (value) => symlogShare(value, max);
   const lineY = (value) => height - pad - share(value) * (height - pad * 2);
-  // A saved graph has a frozen clock and stops redrawing after its poll; an
-  // eased sample would stay at its seeded height forever (the settling zero
-  // looked like a cut-off curve). Saved geometry is drawn at its target.
   const plotted = animateCurve(
     visible.map((point, index) => ({ t: point.t, v: share(smooth[index]) })),
     performance.now(),
-    REDUCED_MOTION || endedAt !== null,
+    REDUCED_MOTION,
   );
   const plottedY = (index) => height - pad - plotted[index].v * (height - pad * 2);
   const xOf = (point) => ((point.t - from) / liveWindowMs) * width;
@@ -1039,8 +1009,7 @@ function drawLive(data) {
     }
     if (labelY > height - 2) labelY = (avgLabelY ?? labelY) - 13;
     placeY(nodes.peak, y, width);
-    const ageText = age ? (endedAt === null ? ` · ${age} ago` : ` · ${dateClock(peakSince)}`) : '';
-    nodes['peak-label'].textContent = `${turnMode ? 'turn peak' : 'peak'} ${Math.round(ceilingPeak)} t/s${ageText}`;
+    nodes['peak-label'].textContent = `${turnMode ? 'turn peak' : 'peak'} ${Math.round(ceilingPeak)} t/s${age ? ` · ${age} ago` : ''}`;
     nodes['peak-label'].setAttribute('y', labelY.toFixed(1));
     showPart(nodes.peak, true);
     showPart(nodes['peak-label'], true);
@@ -1118,13 +1087,10 @@ function drawLive(data) {
       ? `peak ${Math.round(ceilingPeak)} t/s · ${compact(step.tokens)} tok in ${seconds(step.ms)}${step.sub ? ' · subagent' : ''}`
       : `peak ${Math.round(ceilingPeak)} t/s`;
   } else {
-    const hoverAge = endedAt === null
-      ? `${Math.max(0, Math.round((now - hovered?.at) / 1_000))} s ago`
-      : dateClock(hovered?.at);
     ui.peak.textContent = hovered
-      ? `${Math.round(hovered.value)} t/s · ${hoverAge}`
+      ? `${Math.round(hovered.value)} t/s · ${Math.max(0, Math.round((now - hovered.at) / 1_000))} s ago`
       : peakValue > 0
-        ? `${endedAt === null ? 'live peak' : 'window peak'} ${compact(peakValue)} t/s`
+        ? `live peak ${compact(peakValue)} t/s`
         : '';
   }
 }
@@ -1220,19 +1186,10 @@ function drawSteps(data) {
   const firstDrawn = steps[0]?.at ?? data.stepsFrom;
   ui.stepsStart.textContent = firstDrawn ? `start ${dateClock(firstDrawn)}` : '';
   ui.stepsStart.title = 'the first step on the chart';
-  const savedEnd = savedEndOf(data);
   const lastDrawnAt = steps.at(-1)?.at ?? null;
   const atRightEdge = stepPan === 0;
-  ui.stepsNow.textContent = savedEnd !== null
-    ? `ended ${dateClock(savedEnd)}`
-    : atRightEdge
-      ? `now ${dateClock(Date.now())}`
-      : `last ${dateClock(lastDrawnAt)}`;
-  ui.stepsNow.title = savedEnd !== null
-    ? 'the end of the recorded graph'
-    : atRightEdge
-      ? 'the current time'
-      : 'the newest step on the chart';
+  ui.stepsNow.textContent = atRightEdge ? `now ${dateClock(Date.now())}` : `last ${dateClock(lastDrawnAt)}`;
+  ui.stepsNow.title = atRightEdge ? 'the current time' : 'the newest step on the chart';
   // Tokens over stream time across the bars on screen: the green line and the
   // label describe the same steps the chart draws.
   const totalTokens = steps.reduce((sum, step) => sum + step.tokens, 0);
@@ -1674,7 +1631,6 @@ function render(data) {
   const origin = working ? 'live' : totals.source === 'history' ? 'from history' : '';
   ui.source.textContent = origin;
   const recording = data.recording ?? null;
-  const endingAt = savedEndOf(data);
   const noLiveSamples = !Array.isArray(data.points) || data.points.length === 0;
   ui.foot.textContent = data.error
     ? `cannot read history: ${data.error}`
@@ -1686,9 +1642,7 @@ function render(data) {
           ? `${partialSubs} subagent histor${partialSubs === 1 ? 'y is' : 'ies are'} partial`
           : historyPartial
             ? 'history is partial'
-            : endingAt !== null
-              ? `recorded graph · ${dateClock(endingAt)}`
-              : recording?.state === 'unrecorded' && data.status === 'idle' && noLiveSamples
+            : recording?.state === 'unrecorded' && data.status === 'idle' && noLiveSamples
                 ? 'no live recording yet · the next turn records automatically'
                 : data.stream?.state === 'open'
                   ? 'live from OpenCode events'
@@ -1988,12 +1942,8 @@ host.onReady((ctx) => {
           if (Math.abs(liveTargetMs - liveWindowMs) < 40) liveWindowMs = liveTargetMs;
         }
         // One live draw per animation callback, including during zoom. Less
-        // motion keeps poll-based updates and an immediate zoom instead. A saved
-        // graph has a frozen clock: its poll already draws it, so only a zoom
-        // gesture asks for more frames.
-        if (current && (!REDUCED_MOTION || liveZoomChanged) && (liveZoomChanged || savedEndOf(current) === null)) {
-          drawLive(current);
-        }
+        // motion keeps poll-based updates and an immediate zoom instead.
+        if (current && (!REDUCED_MOTION || liveZoomChanged)) drawLive(current);
         if (
           subsDetailOpen &&
           !ui.subsDetail.matches(':hover') &&

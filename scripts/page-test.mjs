@@ -1583,211 +1583,32 @@ try {
     `${leftLive.peakText} / cross ${leftLive.liveCross}`,
   );
 
-  // --- saved recording replay ------------------------------------------------
-  // A finished recording is anchored to its own end, not to the moment the
-  // answer was generated. Every poll carries a fresh generatedAt; anchored to
-  // that, a recording that ended hours ago has no samples in its own window and
-  // the chart draws empty.
-  const recordedEnd = Date.now() - 3 * 3_600_000;
-  const recordedSeries = {
-    t0: recordedEnd - 59_750,
-    step: 250,
-    v: Array.from({ length: 240 }, (_, index) => 20 + (index % 7) * 3),
-  };
-  const recordedLong = {
-    t0: recordedEnd - 300_000,
-    step: 1_000,
-    d: Array.from({ length: 300 }, (_, index) => index * 1_000),
-    v: Array.from({ length: 300 }, (_, index) => 20 + (index % 7) * 3),
-  };
-  const recordedWide = {
-    t0: recordedEnd - 3_600_000,
-    step: 10_000,
-    d: Array.from({ length: 360 }, (_, index) => index * 10_000),
-    v: Array.from({ length: 360 }, (_, index) => 10 + (index % 11) * 2),
-  };
-  const savedState = state({
-    generatedAt: Date.now(),
-    recording: {
-      state: 'saved',
-      startedAt: recordedEnd - 600_000,
-      endedAt: recordedEnd,
-      lastSampleAt: recordedEnd - 250,
-      error: null,
-    },
-    series: recordedSeries,
-    seriesLong: recordedLong,
-    seriesWide: recordedWide,
-    rates: { avg: 40, peak: 900, peakAt: recordedEnd - 8 * 60_000 },
-  });
-  await panel.set(savedState);
-  const savedUi = await panel.read();
-  check(
-    'saved: a recording older than an hour keeps its history on screen',
-    Boolean(savedUi.livePathD) && savedUi.liveDots >= 1 && savedUi.liveRight === savedUi.liveWidth,
-    `path ${Boolean(savedUi.livePathD)}, dot ${savedUi.chartGeometry[0].dotX} of ${savedUi.liveWidth}`,
-  );
-  check(
-    'saved: the right axis says ended at its own clock',
-    savedUi.axisTo === 'ended' && savedUi.axisToTitle === dateClockOf(recordedEnd),
-    `${savedUi.axisTo} · ${savedUi.axisToTitle}`,
-  );
-  check(
-    'saved: the left axis counts back from the end',
-    savedUi.axisFrom === '60 s before end',
-    String(savedUi.axisFrom),
-  );
-  check(
-    'saved: the footer names the recorded graph and its end',
-    savedUi.footText === `recorded graph · ${dateClockOf(recordedEnd)}`,
-    String(savedUi.footText),
-  );
-  check(
-    'saved: the readouts use the recorded clock, not the wall clock',
-    !/\bago\b/.test(savedUi.peakLabelText ?? '') &&
-      /^window peak /.test(savedUi.peakText ?? '') &&
-      /^ended \d{1,2} [A-Z][a-z]{2} \d\d:\d\d:\d\d/.test(savedUi.stepsNowText ?? ''),
-    `${savedUi.peakLabelText} · ${savedUi.peakText} · ${savedUi.stepsNowText}`,
-  );
-  await panel.wait(700);
-  const savedFrozen = await panel.read();
-  check(
-    'saved: a frozen clock leaves the path and the right dot still',
-    savedFrozen.livePathD === savedUi.livePathD &&
-      savedFrozen.chartGeometry[0].dotX === savedFrozen.liveWidth,
-    `same path ${savedFrozen.livePathD === savedUi.livePathD}, dot ${savedFrozen.chartGeometry[0].dotX}`,
-  );
-  // A settled recording ends at zero; easing it would freeze it at its seeded
-  // height because a saved graph stops redrawing.
-  const settledEnd = Date.now() - 30_000;
-  await panel.set(state({
-    generatedAt: Date.now(),
-    recording: { state: 'saved', startedAt: settledEnd - 60_000, endedAt: settledEnd, lastSampleAt: settledEnd, error: null },
-    series: { t0: settledEnd - 40_000, step: 250, v: [10, 80, 120, 90, 0] },
-  }));
-  const settledCurve = await panel.read();
-  const liveBox = settledCurve.chartGeometry[0];
-  check(
-    'saved: a settling zero is drawn at the baseline, not left mid-ease',
-    liveBox.dotY !== null && liveBox.dotY >= liveBox.height - 9,
-    `dot y ${liveBox.dotY} of ${liveBox.height}`,
-  );
-
-  for (let notch = 0; notch < 10; notch += 1) await panel.wheel('[data-chart="live"]', 120);
-  await panel.wait(300);
-  const savedFive = await panel.read();
-  check(
-    'saved: five minutes read as before the end',
-    savedFive.axisFrom === '5 min before end',
-    String(savedFive.axisFrom),
-  );
-  for (let notch = 0; notch < 18; notch += 1) await panel.wheel('[data-chart="live"]', 120);
-  await panel.wait(600);
-  const savedHour = await panel.read();
-  check(
-    'saved: the widest window still shows the old recording',
-    savedHour.axisFrom === '1 h before end' &&
-      Boolean(savedHour.livePathD) &&
-      savedHour.liveRight === savedHour.liveWidth,
-    `${savedHour.axisFrom}, path ${Boolean(savedHour.livePathD)}`,
-  );
-  for (let notch = 0; notch < 32; notch += 1) await panel.wheel('[data-chart="live"]', -120);
-  const savedClose = await panel.read();
-  check(
-    'saved: the wheel narrows back to the floor',
-    savedClose.axisFrom === '60 s before end',
-    String(savedClose.axisFrom),
-  );
-
+  // A finished recording keeps the live clock: history leaves the window as
+  // time passes instead of freezing at an "ended" edge with a flat tail.
+  const finishedAt = Date.now() - 3 * 3_600_000;
   await panel.set(
     state({
-      status: 'streaming',
       generatedAt: Date.now(),
-      recording: {
-        state: 'live',
-        startedAt: Date.now() - 30_000,
-        endedAt: null,
-        lastSampleAt: Date.now() - 250,
-        error: null,
-      },
-      series: { t0: Date.now() - 5_000, step: 250, v: [30, 34, 36] },
+      recording: { state: 'saved', startedAt: finishedAt - 60_000, endedAt: finishedAt, lastSampleAt: finishedAt, error: null },
+      series: { t0: finishedAt - 59_750, step: 250, v: Array.from({ length: 240 }, () => 30) },
     }),
   );
-  const liveAgain = await panel.read();
+  const finishedUi = await panel.read();
   check(
-    'saved: a new live turn returns the edge to now',
-    liveAgain.axisTo === 'now' &&
-      liveAgain.axisToTitle === '' &&
-      liveAgain.axisFrom === '60 s ago' &&
-      Boolean(liveAgain.livePathD) &&
-      liveAgain.chartGeometry[0].dotX === liveAgain.liveWidth,
-    `${liveAgain.axisFrom} / ${liveAgain.axisTo} / dot ${liveAgain.chartGeometry[0].dotX}`,
+    'a finished recording keeps scrolling with the live clock',
+    finishedUi.axisFrom === '60 s ago' &&
+      finishedUi.axisTo === 'now' &&
+      finishedUi.axisToTitle === '' &&
+      !/recorded graph/.test(finishedUi.footText ?? '') &&
+      finishedUi.gridLabels.length === 0,
+    `${finishedUi.axisFrom} / ${finishedUi.axisTo} / title ${JSON.stringify(finishedUi.axisToTitle)} / ${finishedUi.footText} / ticks ${finishedUi.gridLabels.join(',')}`,
   );
-
-  await panel.set(state());
-  const legacyAxis = await panel.read();
+  await panel.set(state({ status: 'idle', recording: { state: 'unrecorded', startedAt: null, endedAt: null, lastSampleAt: null, error: null }, series: { t0: Date.now() - 1000, step: 250, v: [] } }));
+  const unrecordedUi = await panel.read();
   check(
-    'saved: an answer without a recording keeps the live labels',
-    legacyAxis.axisTo === 'now' &&
-      legacyAxis.axisToTitle === '' &&
-      legacyAxis.axisFrom === '60 s ago',
-    `${legacyAxis.axisFrom} / ${legacyAxis.axisTo} / ${JSON.stringify(legacyAxis.axisToTitle)}`,
-  );
-
-  const unrecorded = state({
-    series: null,
-    recording: {
-      state: 'unrecorded',
-      startedAt: null,
-      endedAt: null,
-      lastSampleAt: null,
-      error: null,
-    },
-  });
-  await panel.set(unrecorded);
-  const freshIdle = await panel.read();
-  check(
-    'saved: a never-recorded idle session explains the empty graph',
-    freshIdle.footText === 'no live recording yet · the next turn records automatically',
-    String(freshIdle.footText),
-  );
-  await panel.set({ ...unrecorded, historyPartial: true });
-  const freshPartial = await panel.read();
-  check(
-    'saved: partial history outranks the missing-recording note',
-    freshPartial.footText === 'history is partial',
-    String(freshPartial.footText),
-  );
-  await panel.set({ ...unrecorded, subagents: { ...unrecorded.subagents, count: 5, loading: 2 } });
-  const freshLoading = await panel.read();
-  check(
-    'saved: loading history outranks the missing-recording note',
-    freshLoading.footText === 'reading 2 subagent histories',
-    String(freshLoading.footText),
-  );
-
-  await panel.set({
-    ...unrecorded,
-    recording: { ...unrecorded.recording, error: 'disk full' },
-  });
-  const saveError = await panel.read();
-  check(
-    'saved: a recording failure reaches the footer with its reason',
-    /^unable to save graph: disk full$/.test(saveError.footText ?? ''),
-    String(saveError.footText),
-  );
-
-  await panel.set({ ...savedState, subagents: { ...savedState.subagents, count: 5, loading: 2 } });
-  const savedLoading = await panel.read();
-  check(
-    'saved: loading history still wins over the recorded footer',
-    savedLoading.footText === 'reading 2 subagent histories',
-    String(savedLoading.footText),
-  );
-  check(
-    'saved replay runs without an exception',
-    (await panel.errors()).length === 0,
-    (await panel.errors()).join(' | '),
+    'a never-recorded idle session still says so',
+    /no live recording yet/.test(unrecordedUi.footText ?? ''),
+    String(unrecordedUi.footText),
   );
   await panel.set(state());
 
@@ -2529,39 +2350,18 @@ try {
   const statusFinal = await status.read();
   check('status draws the session it switched to', /7\.0k/.test(statusFinal.text), statusFinal.text.slice(0, 60));
 
-  // The spark is anchored to the same saved end. Its answer carries a fresh
-  // generatedAt, so only the recording's own clock keeps an old graph visible.
+  // A finished recording's spark keeps the live clock too: it scrolls away
+  // with time rather than freezing on an old end.
   const sparkEnd = Date.now() - 2 * 3_600_000;
   await status.set(
     state({
       generatedAt: Date.now(),
-      recording: {
-        state: 'saved',
-        startedAt: sparkEnd - 600_000,
-        endedAt: sparkEnd,
-        lastSampleAt: sparkEnd - 250,
-        error: null,
-      },
-      series: {
-        t0: sparkEnd - 59_750,
-        step: 250,
-        v: Array.from({ length: 240 }, (_, index) => 20 + (index % 7) * 3),
-      },
+      recording: { state: 'saved', startedAt: sparkEnd - 600_000, endedAt: sparkEnd, lastSampleAt: sparkEnd - 250, error: null },
+      series: { t0: sparkEnd - 59_750, step: 250, v: Array.from({ length: 240 }, () => 30) },
     }),
   );
-  const savedSpark = await status.read();
-  check(
-    'status: a saved recording keeps its spark visible',
-    Boolean(savedSpark.sparkD) && String(savedSpark.sparkD).includes('C'),
-    String(savedSpark.sparkD).slice(0, 50),
-  );
-  await status.wait(700);
-  const savedSparkStill = await status.read();
-  check(
-    'status: a saved spark stays still while the clock is frozen',
-    savedSparkStill.sparkD === savedSpark.sparkD,
-    `same ${savedSparkStill.sparkD === savedSpark.sparkD}`,
-  );
+  const oldSpark = await status.read();
+  check('status treats an old recording as history, not a frozen graph', oldSpark.sparkD === null, String(oldSpark.sparkD).slice(0, 40));
   await status.set(state());
 
   // The dot as well: a generating session's breathing dot is not the next one's.
