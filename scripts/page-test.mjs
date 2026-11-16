@@ -1657,6 +1657,22 @@ try {
       savedFrozen.chartGeometry[0].dotX === savedFrozen.liveWidth,
     `same path ${savedFrozen.livePathD === savedUi.livePathD}, dot ${savedFrozen.chartGeometry[0].dotX}`,
   );
+  // A settled recording ends at zero; easing it would freeze it at its seeded
+  // height because a saved graph stops redrawing.
+  const settledEnd = Date.now() - 30_000;
+  await panel.set(state({
+    generatedAt: Date.now(),
+    recording: { state: 'saved', startedAt: settledEnd - 60_000, endedAt: settledEnd, lastSampleAt: settledEnd, error: null },
+    series: { t0: settledEnd - 40_000, step: 250, v: [10, 80, 120, 90, 0] },
+  }));
+  const settledCurve = await panel.read();
+  const liveBox = settledCurve.chartGeometry[0];
+  check(
+    'saved: a settling zero is drawn at the baseline, not left mid-ease',
+    liveBox.dotY !== null && liveBox.dotY >= liveBox.height - 9,
+    `dot y ${liveBox.dotY} of ${liveBox.height}`,
+  );
+
   for (let notch = 0; notch < 10; notch += 1) await panel.wheel('[data-chart="live"]', 120);
   await panel.wait(300);
   const savedFive = await panel.read();

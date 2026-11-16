@@ -930,8 +930,11 @@ function drawLive(data) {
       ? data.pointsLong
       : data.points;
   const series = Array.isArray(source) ? source : [];
-  const now = projectedNow(data);
   const endedAt = savedEndOf(data);
+  // A saved graph gets one second of display-only zeros after its end, so the
+  // stop reads as a decay instead of a cliff on the plot's edge. Nothing is
+  // added to the samples, the axis title or the store.
+  const now = endedAt !== null ? endedAt + 1_000 : projectedNow(data);
   const from = now - liveWindowMs;
   const windowSeconds = Math.round(liveWindowMs / 1_000);
   // Seconds up close, minutes once the number would be noise. A saved graph's
@@ -947,6 +950,9 @@ function drawLive(data) {
   if (endedAt === null) ui.axisTo.removeAttribute('title');
   else ui.axisTo.title = dateClock(endedAt);
   const visible = series.filter((point) => point.t >= from && point.t <= now);
+  if (endedAt !== null) {
+    for (let offset = 250; offset <= 1_000; offset += 250) visible.push({ t: endedAt + offset, v: 0 });
+  }
   const peakValue = visible.reduce((max, point) => Math.max(max, point.v), 0);
   // References drawn on the chart: the session's average and its best step,
   // worked out by the service over every step it knows.
@@ -957,9 +963,12 @@ function drawLive(data) {
   // Smooth in rate units, then map to the axis: geometry never feeds back into
   // a measured value, a reference line's rate or the hover readout.
   const smooth = [];
+  const savedCurve = endedAt !== null;
   for (const point of visible) {
     const previous = smooth[smooth.length - 1];
-    const value = previous === undefined ? point.v : previous + (point.v - previous) * 0.3;
+    // Live samples are smoothed for motion; a replay is the measured history
+    // itself, and a single settling zero must reach the baseline.
+    const value = savedCurve || previous === undefined ? point.v : previous + (point.v - previous) * 0.3;
     smooth.push(value);
   }
   const liveTop = smooth.reduce((best, value) => Math.max(best, value), 0);
@@ -971,7 +980,14 @@ function drawLive(data) {
   const max = rateCeiling(Math.max(ceilingPeak, rates.avg));
   const share = (value) => symlogShare(value, max);
   const lineY = (value) => height - pad - share(value) * (height - pad * 2);
-  const plotted = animateCurve(visible.map((point, index) => ({ t: point.t, v: share(smooth[index]) })), performance.now(), REDUCED_MOTION);
+  // A saved graph has a frozen clock and stops redrawing after its poll; an
+  // eased sample would stay at its seeded height forever (the settling zero
+  // looked like a cut-off curve). Saved geometry is drawn at its target.
+  const plotted = animateCurve(
+    visible.map((point, index) => ({ t: point.t, v: share(smooth[index]) })),
+    performance.now(),
+    REDUCED_MOTION || endedAt !== null,
+  );
   const plottedY = (index) => height - pad - plotted[index].v * (height - pad * 2);
   const xOf = (point) => ((point.t - from) / liveWindowMs) * width;
   const baseline = height - pad;
