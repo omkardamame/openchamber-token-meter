@@ -5651,6 +5651,364 @@ function loadPriceOverrides({ file = priceOverrideFile(), log = () => {} } = {})
   return overrides;
 }
 
+// service/src/recordings.js
+import { readFileSync as readFileSync2, statSync } from "node:fs";
+import { chmod, mkdir, rename, unlink, writeFile } from "node:fs/promises";
+import path2 from "node:path";
+var VERSION = 1;
+var FILE_NAME = "graphs.json";
+var MAX_FILE_BYTES = 16 * 1024 * 1024;
+var WINDOW_MS = 60 * 60000;
+var MAX_SESSIONS = 200;
+var CAPS = { series: 240, seriesLong: 300, seriesWide: 360 };
+var SESSION_ID = /^ses[\w-]{1,120}$/;
+var isTime = (value) => typeof value === "number" && Number.isFinite(value) && value > 0;
+function clampMaxSessions(value) {
+  if (typeof value !== "number" || !Number.isFinite(value))
+    return MAX_SESSIONS;
+  return Math.min(MAX_SESSIONS, Math.max(1, Math.trunc(value)));
+}
+function copySeries(points) {
+  return points.map((point) => ({ t: point.t, v: point.v }));
+}
+function copyBuckets(points) {
+  return points.map((point) => ({ t: point.t, sum: point.sum, n: point.n }));
+}
+function copyRecord(record) {
+  return {
+    id: record.id,
+    startedAt: record.startedAt,
+    endedAt: record.endedAt,
+    updatedAt: record.updatedAt,
+    series: copySeries(record.series),
+    seriesLong: copyBuckets(record.seriesLong),
+    seriesWide: copyBuckets(record.seriesWide)
+  };
+}
+function normalizeSeries(input, kind, cap, windowEnd) {
+  if (!Array.isArray(input))
+    return { points: [], invalid: 0 };
+  const byTime = new Map;
+  let invalid = 0;
+  for (const point of input) {
+    if (!point || typeof point !== "object" || Array.isArray(point)) {
+      invalid += 1;
+      continue;
+    }
+    const t = point.t;
+    if (!isTime(t)) {
+      invalid += 1;
+      continue;
+    }
+    if (windowEnd !== null && (t < windowEnd - WINDOW_MS || t > windowEnd))
+      continue;
+    if (kind === "v") {
+      const v = point.v;
+      if (typeof v !== "number" || !Number.isFinite(v) || v < 0) {
+        invalid += 1;
+        continue;
+      }
+      byTime.set(t, { t, v });
+    } else {
+      const sum = point.sum;
+      const n = point.n;
+      if (typeof sum !== "number" || !Number.isFinite(sum) || sum < 0 || !Number.isInteger(n) || n <= 0) {
+        invalid += 1;
+        continue;
+      }
+      byTime.set(t, { t, sum, n });
+    }
+  }
+  const points = [...byTime.values()].sort((a, b) => a.t - b.t);
+  return { points: points.slice(Math.max(0, points.length - cap)), invalid };
+}
+function createRecordingStore({ dataDir = null, log = () => {}, maxSessions = MAX_SESSIONS } = {}) {
+  const dir = typeof dataDir === "string" && dataDir.length > 0 ? dataDir : null;
+  const report = typeof log === "function" ? log : () => {};
+  const limit = clampMaxSessions(maxSessions);
+  const records = new Map;
+  const file = dir ? path2.join(dir, FILE_NAME) : null;
+  let dirty = false;
+  let loadError = null;
+  let writeError = null;
+  let flushQueue = Promise.resolve();
+  let tmpCounter = 0;
+  function loadFailure(message) {
+    loadError = message;
+    report(`token-meter: ${message}`);
+  }
+  function evictOldest() {
+    let oldest = null;
+    for (const record of records.values()) {
+      if (!oldest || record.updatedAt < oldest.updatedAt)
+        oldest = record;
+    }
+    if (!oldest)
+      return null;
+    records.delete(oldest.id);
+    return oldest;
+  }
+  function trimToLimit() {
+    let dropped = 0;
+    while (records.size > limit) {
+      if (!evictOldest())
+        break;
+      dropped += 1;
+    }
+    if (dropped > 0) {
+      report(`token-meter: recording store: dropped ${dropped} least-recent recording${dropped === 1 ? "" : "s"} (max ${limit})`);
+    }
+  }
+  function readRecord(raw) {
+    if (!raw || typeof raw !== "object" || Array.isArray(raw))
+      return { reason: "not an object" };
+    if (typeof raw.id !== "string" || !SESSION_ID.test(raw.id))
+      return { reason: "invalid session id" };
+    if (!isTime(raw.startedAt))
+      return { reason: "startedAt is not a finite positive timestamp" };
+    if (raw.endedAt !== null && !isTime(raw.endedAt)) {
+      return { reason: "endedAt is neither null nor a finite positive timestamp" };
+    }
+    if (!isTime(raw.updatedAt))
+      return { reason: "updatedAt is not a finite positive timestamp" };
+    if (!Array.isArray(raw.series) || !Array.isArray(raw.seriesLong) || !Array.isArray(raw.seriesWide)) {
+      return { reason: "series fields are not arrays" };
+    }
+    const series = normalizeSeries(raw.series, "v", CAPS.series, null);
+    const seriesLong = normalizeSeries(raw.seriesLong, "long", CAPS.seriesLong, null);
+    const seriesWide = normalizeSeries(raw.seriesWide, "wide", CAPS.seriesWide, null);
+    const invalid = series.invalid + seriesLong.invalid + seriesWide.invalid;
+    if (invalid > 0) {
+      report(`token-meter: recording store: ${raw.id}: ignored ${invalid} invalid sample${invalid === 1 ? "" : "s"} from ${file}`);
+    }
+    if (series.points.length + seriesLong.points.length + seriesWide.points.length === 0) {
+      return { reason: "no valid samples" };
+    }
+    return {
+      record: {
+        id: raw.id,
+        startedAt: raw.startedAt,
+        endedAt: raw.endedAt,
+        updatedAt: raw.updatedAt,
+        series: series.points,
+        seriesLong: seriesLong.points,
+        seriesWide: seriesWide.points
+      }
+    };
+  }
+  function load() {
+    if (!dir)
+      return;
+    let info;
+    try {
+      info = statSync(file);
+    } catch (error) {
+      if (error?.code === "ENOENT")
+        return;
+      loadFailure(`recording store: could not stat ${file}: ${error?.message ?? error}`);
+      return;
+    }
+    if (!info.isFile()) {
+      loadFailure(`recording store: ${file} is not a regular file; starting empty`);
+      return;
+    }
+    if (info.size > MAX_FILE_BYTES) {
+      loadFailure(`recording store: ${file} is ${info.size} bytes, over the ${MAX_FILE_BYTES}-byte cap; not read`);
+      return;
+    }
+    let text;
+    try {
+      text = readFileSync2(file, "utf8");
+    } catch (error) {
+      loadFailure(`recording store: could not read ${file}: ${error?.message ?? error}`);
+      return;
+    }
+    if (Buffer.byteLength(text, "utf8") > MAX_FILE_BYTES) {
+      loadFailure(`recording store: ${file} grew past the ${MAX_FILE_BYTES}-byte cap; not loaded`);
+      return;
+    }
+    let parsed;
+    try {
+      parsed = JSON.parse(text);
+    } catch {
+      loadFailure(`recording store: ${file} is not valid JSON; starting empty`);
+      return;
+    }
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      loadFailure(`recording store: ${file} is not a recording file; starting empty`);
+      return;
+    }
+    if (parsed.version !== VERSION) {
+      const found = typeof parsed.version === "number" ? `version ${parsed.version}` : "a non-numeric version";
+      loadFailure(`recording store: ${file} has ${found}; expected version ${VERSION}; starting empty`);
+      return;
+    }
+    if (!Array.isArray(parsed.recordings)) {
+      loadFailure(`recording store: ${file} has no recordings array; starting empty`);
+      return;
+    }
+    parsed.recordings.forEach((raw, index) => {
+      const result = readRecord(raw);
+      if (!result.record) {
+        report(`token-meter: recording store: ${file}: recording #${index + 1} ignored (${result.reason})`);
+        return;
+      }
+      const record = result.record;
+      const previous = records.get(record.id);
+      if (previous) {
+        if (previous.updatedAt >= record.updatedAt) {
+          report(`token-meter: recording store: ${file}: duplicate ${record.id} ignored (older copy)`);
+          return;
+        }
+        report(`token-meter: recording store: ${file}: duplicate ${record.id} replaced by newer copy`);
+      }
+      records.set(record.id, record);
+    });
+    trimToLimit();
+  }
+  function capture(collector, now) {
+    if (!collector || typeof collector !== "object" || Array.isArray(collector)) {
+      report("token-meter: recording store: capture needs a collector object");
+      return null;
+    }
+    const id = collector.id;
+    if (typeof id !== "string" || !SESSION_ID.test(id)) {
+      report('token-meter: recording store: capture ignored (session id is not "ses…")');
+      return null;
+    }
+    let at = now;
+    if (!isTime(at)) {
+      at = Date.now();
+      report(`token-meter: recording ${id}: capture time is not a finite positive number; using the clock`);
+    }
+    const existing = records.get(id);
+    let startedAt = null;
+    if (isTime(collector.captureStartedAt)) {
+      startedAt = collector.captureStartedAt;
+    } else if (collector.captureStartedAt != null) {
+      report(`token-meter: recording ${id}: captureStartedAt is not a finite positive number`);
+    }
+    if (startedAt === null)
+      startedAt = existing ? existing.startedAt : at;
+    let endedAt = null;
+    if (isTime(collector.captureEndedAt)) {
+      endedAt = collector.captureEndedAt;
+    } else if (collector.captureEndedAt != null) {
+      report(`token-meter: recording ${id}: captureEndedAt is not a finite positive number; recording stays active`);
+    }
+    const windowEnd = endedAt ?? at;
+    const series = normalizeSeries(collector.series, "v", CAPS.series, windowEnd);
+    const seriesLong = normalizeSeries(collector.seriesLong, "long", CAPS.seriesLong, windowEnd);
+    const seriesWide = normalizeSeries(collector.seriesWide, "wide", CAPS.seriesWide, windowEnd);
+    const invalid = series.invalid + seriesLong.invalid + seriesWide.invalid;
+    if (invalid > 0) {
+      report(`token-meter: recording ${id}: ignored ${invalid} invalid sample${invalid === 1 ? "" : "s"}`);
+    }
+    if (series.points.length + seriesLong.points.length + seriesWide.points.length === 0) {
+      return existing ? copyRecord(existing) : null;
+    }
+    const record = {
+      id,
+      startedAt,
+      endedAt,
+      updatedAt: at,
+      series: series.points,
+      seriesLong: seriesLong.points,
+      seriesWide: seriesWide.points
+    };
+    records.set(id, record);
+    trimToLimit();
+    dirty = true;
+    const kept = records.get(id);
+    return kept ? copyRecord(kept) : null;
+  }
+  function get(id) {
+    if (typeof id !== "string")
+      return null;
+    const record = records.get(id);
+    return record ? copyRecord(record) : null;
+  }
+  function recordsById() {
+    return [...records.values()].sort((a, b) => a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
+  }
+  function encode() {
+    const list = recordsById();
+    const full = JSON.stringify({ version: VERSION, recordings: list });
+    if (Buffer.byteLength(full, "utf8") <= MAX_FILE_BYTES)
+      return full;
+    const prefix = `{"version":${VERSION},"recordings":[`;
+    const suffix = "]}";
+    const newestFirst = [...list].sort((a, b) => b.updatedAt - a.updatedAt || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+    const encoded = newestFirst.map((record) => ({ record, text: JSON.stringify(record) }));
+    let bytes = Buffer.byteLength(prefix + suffix, "utf8") + encoded.reduce((total, entry) => total + Buffer.byteLength(entry.text, "utf8"), 0) + Math.max(0, encoded.length - 1);
+    let kept = encoded;
+    let dropped = 0;
+    while (kept.length > 1 && bytes > MAX_FILE_BYTES) {
+      const removed = kept.pop();
+      bytes -= Buffer.byteLength(removed.text, "utf8") + (kept.length > 0 ? 1 : 0);
+      records.delete(removed.record.id);
+      dropped += 1;
+    }
+    if (bytes > MAX_FILE_BYTES) {
+      throw new Error(`one recording is larger than the ${MAX_FILE_BYTES}-byte file cap`);
+    }
+    if (dropped > 0) {
+      report(`token-meter: recording store: dropped ${dropped} least-recent recording${dropped === 1 ? "" : "s"} to stay under the ${MAX_FILE_BYTES}-byte file cap`);
+    }
+    return prefix + kept.map((entry) => entry.text).join(",") + suffix;
+  }
+  async function flushOnce() {
+    if (!dirty)
+      return true;
+    let text;
+    try {
+      text = encode();
+    } catch (error) {
+      return writeFailure(error, false);
+    }
+    dirty = false;
+    const tmp = path2.join(dir, `${FILE_NAME}.tmp-${process.pid}-${++tmpCounter}-${Math.random().toString(36).slice(2)}`);
+    try {
+      await mkdir(dir, { recursive: true, mode: 448 });
+      await writeFile(tmp, text, { encoding: "utf8", mode: 384, flag: "wx" });
+      await chmod(tmp, 384);
+      await rename(tmp, file);
+      writeError = null;
+      return true;
+    } catch (error) {
+      await unlink(tmp).catch(() => {});
+      return writeFailure(error, true);
+    }
+  }
+  function writeFailure(error, markDirty) {
+    if (markDirty)
+      dirty = true;
+    writeError = `recording store: could not write ${file}: ${error?.message ?? error}`;
+    report(`token-meter: ${writeError}`);
+    return false;
+  }
+  function flush() {
+    if (!dir)
+      return Promise.resolve(true);
+    const run = flushQueue.then(() => flushOnce());
+    flushQueue = run.then(() => {
+      return;
+    }, () => {
+      return;
+    });
+    return run;
+  }
+  load();
+  return {
+    capture,
+    flush,
+    get,
+    get error() {
+      return writeError ?? loadError;
+    }
+  };
+}
+
 // service/src/main.js
 var PORT = Number(process.env.OPENCHAMBER_SERVICE_PORT);
 var TOKEN = process.env.OPENCHAMBER_SERVICE_TOKEN ?? "";
@@ -5671,6 +6029,9 @@ var MAX_SUBAGENTS = 200;
 var MAX_SUBAGENT_AGE_MS = 60 * 60000;
 var SUBAGENT_HISTORY_RETRY_MS = 15000;
 var TICK_MS = 250;
+var MAX_RECORDINGS = 200;
+var RECORDING_SAVE_MS = 5000;
+var RECORDING_SCAN_MS = 30000;
 if (!PORT || !TOKEN) {
   console.error("token-meter: OPENCHAMBER_SERVICE_PORT and OPENCHAMBER_SERVICE_TOKEN are required");
   process.exit(1);
@@ -5679,6 +6040,46 @@ function createService({ fetchImpl = fetch, log = () => {}, base = BASE, token =
   const collectors = new Map;
   const state = { stream: "idle", streamError: null, stopping: false, controller: null, since: Date.now() };
   const priceOverrides = overrides ?? loadPriceOverrides({ file: priceOverrideFile(dataDir), log });
+  const recordings = createRecordingStore({ dataDir, log, maxSessions: MAX_RECORDINGS });
+  let captureError = null;
+  let captureWarnAt = 0;
+  let discoveryLoading = false;
+  const working = (member) => member.turnActive || ["streaming", "tool", "waiting-permission", "waiting-question"].includes(member.status);
+  const makeCollector = (id) => {
+    const collector = createCollector(id);
+    const saved = recordings.get(id);
+    collector.captureStartedAt = saved?.startedAt ?? null;
+    collector.captureEndedAt = saved?.endedAt ?? null;
+    collector.capturePendingRecord = Boolean(saved && !saved.endedAt);
+    if (saved) {
+      collector.series = saved.series;
+      collector.seriesLong = saved.seriesLong;
+      collector.seriesWide = saved.seriesWide;
+    }
+    return collector;
+  };
+  const applyCaptureRecord = (collector, record) => {
+    const newerEvent = (collector.captureEventAt ?? 0) > (record?.time?.updated ?? record?.time?.created ?? 0);
+    const liveState = newerEvent ? {
+      status: collector.status,
+      turnActive: collector.turnActive,
+      stream: collector.stream,
+      pendingTools: collector.pendingTools,
+      model: collector.model,
+      provider: collector.provider
+    } : null;
+    applyRecord(collector, record);
+    if (liveState)
+      Object.assign(collector, liveState);
+    if (record?.parentID && record.parentID !== collector.id)
+      collector.parentId = record.parentID;
+    collector.capturePendingRecord = false;
+    collector.captureRecordKnown = true;
+    if (typeof record?.time?.idle === "number")
+      collector.captureFinishedAt = Math.max(collector.captureFinishedAt ?? 0, record.time.idle);
+    if (working(collector))
+      collector.captureEndedAt = null;
+  };
   const upstreamIsLoopback = (() => {
     try {
       const host = new URL(base).hostname;
@@ -5689,17 +6090,20 @@ function createService({ fetchImpl = fetch, log = () => {}, base = BASE, token =
   })();
   const subscribeTypes = [...LIVE_TYPES].filter((type) => type !== "session.usage.recorded");
   let filterStream = true;
-  const apiGet = async (path2) => {
+  const apiGet = async (path3) => {
     if (!base)
       throw new Error("OpenCode access is not available");
     if (!upstreamIsLoopback)
       throw new Error("OpenCode access is not on loopback; refusing to send the token");
-    const answer = await fetchImpl(`${base}${path2}`, {
+    const answer = await fetchImpl(`${base}${path3}`, {
       headers: { authorization: `Bearer ${token}`, accept: "application/json" },
       ...typeof AbortSignal?.timeout === "function" ? { signal: AbortSignal.timeout(API_TIMEOUT_MS) } : {}
     });
-    if (!answer.ok)
-      throw new Error(`OpenCode answered ${answer.status}`);
+    if (!answer.ok) {
+      const error = new Error(`OpenCode answered ${answer.status}`);
+      error.status = answer.status;
+      throw error;
+    }
     return answer.json();
   };
   const authorized = (header) => {
@@ -5712,7 +6116,7 @@ function createService({ fetchImpl = fetch, log = () => {}, base = BASE, token =
   const getCollector = (id) => {
     let collector = collectors.get(id);
     if (!collector) {
-      collector = createCollector(id);
+      collector = makeCollector(id);
       collectors.set(id, collector);
     }
     collector.touchedAt = Date.now();
@@ -5720,12 +6124,14 @@ function createService({ fetchImpl = fetch, log = () => {}, base = BASE, token =
     collector.watchedAt = collector.touchedAt;
     const watched = [...collectors.values()].filter((item) => item.watched);
     if (watched.length > MAX_COLLECTORS) {
-      const idle = watched.filter((item) => item !== collector && !item.turnActive && !treeOf(item).some((member) => member.status === "streaming")).sort((a, b) => a.watchedAt - b.watchedAt)[0];
+      const idle = watched.filter((item) => item !== collector && !treeOf(item).some(working)).sort((a, b) => a.watchedAt - b.watchedAt)[0];
       if (idle)
         dropTree(idle);
     }
     refreshLineage(collector);
     readTurnStart(collector);
+    if (collector.capturePendingRecord)
+      learnSession(id);
     return collector;
   };
   const treeOf = (root) => {
@@ -5750,6 +6156,7 @@ function createService({ fetchImpl = fetch, log = () => {}, base = BASE, token =
         member.parentId = null;
         continue;
       }
+      recordings.capture(member, member.series.at(-1)?.t ?? Date.now());
       collectors.delete(member.id);
     }
   };
@@ -5757,14 +6164,14 @@ function createService({ fetchImpl = fetch, log = () => {}, base = BASE, token =
   const ensureSubagent = (id, record, parentId) => {
     let collector = collectors.get(id);
     if (!collector) {
-      collector = createCollector(id);
+      collector = makeCollector(id);
       collector.parentId = parentId ?? record?.parentID ?? null;
       collectors.set(id, collector);
     } else if (!collector.parentId) {
       collector.parentId = parentId ?? record?.parentID ?? null;
     }
     if (record)
-      applyRecord(collector, record);
+      applyCaptureRecord(collector, record);
     collector.touchedAt = Date.now();
     return collector;
   };
@@ -5809,7 +6216,7 @@ function createService({ fetchImpl = fetch, log = () => {}, base = BASE, token =
       }
       const ownAnswer = await own;
       if (ownAnswer?.data)
-        applyRecord(root, ownAnswer.data);
+        applyCaptureRecord(root, ownAnswer.data);
       root.lineageAt = Date.now();
       root.lineageTriedAt = 0;
     } catch (error) {
@@ -5820,41 +6227,69 @@ function createService({ fetchImpl = fetch, log = () => {}, base = BASE, token =
   };
   const learning = new Set;
   const missedAt = new Map;
+  const automaticCollector = (id) => {
+    if (!/^ses[\w-]{1,120}$/.test(id))
+      return null;
+    if (collectors.has(id))
+      return collectors.get(id);
+    if (collectors.size >= MAX_RECORDINGS) {
+      const oldest = [...collectors.values()].filter((item) => !item.watched && !treeOf(item).some(working)).sort((a, b) => a.touchedAt - b.touchedAt)[0];
+      if (oldest)
+        dropTree(oldest);
+      else {
+        captureError = `automatic graph recording reached ${MAX_RECORDINGS} simultaneous sessions`;
+        if (Date.now() - captureWarnAt > RECORDING_SCAN_MS) {
+          captureWarnAt = Date.now();
+          log(`token-meter: ${captureError}`);
+        }
+        return null;
+      }
+    }
+    captureError = null;
+    const collector = makeCollector(id);
+    collectors.set(id, collector);
+    return collector;
+  };
   const learnSession = async (id) => {
-    if (!base || !upstreamIsLoopback || learning.has(id) || watchedRoots().length === 0)
+    if (state.stopping || !base || !upstreamIsLoopback || learning.has(id))
       return;
     const now = Date.now();
     if (missedAt.has(id) && now - missedAt.get(id) < LINEAGE_RETRY_MS)
       return;
     learning.add(id);
     try {
-      const chain = [];
       let cursor = id;
-      let attached = false;
+      const seen = new Set;
+      let learned = false;
       for (let depth = 0;depth <= LINEAGE_DEPTH; depth += 1) {
+        if (seen.has(cursor))
+          break;
+        seen.add(cursor);
         const record = (await apiGet(`/api/session/${encodeURIComponent(cursor)}`))?.data;
+        if (state.stopping)
+          return;
         if (!record?.id)
           break;
-        chain.push(record);
+        learned = true;
+        const member = automaticCollector(record.id);
+        if (!member)
+          break;
+        member.captureLastCheckedAt = Date.now();
+        applyCaptureRecord(member, record);
         const parentId = record.parentID;
         if (!parentId)
           break;
-        if (collectors.has(parentId)) {
-          attached = true;
+        if (collectors.has(parentId))
           break;
-        }
         cursor = parentId;
       }
-      if (!attached) {
+      if (learned)
+        missedAt.delete(id);
+      else {
         if (missedAt.size > 500)
           missedAt.clear();
         missedAt.set(id, Date.now());
-        return;
       }
-      for (let index = chain.length - 1;index >= 0; index -= 1) {
-        ensureSubagent(chain[index].id, chain[index], chain[index].parentID);
-      }
-      missedAt.delete(id);
     } catch (error) {
       if (missedAt.size > 500)
         missedAt.clear();
@@ -5886,20 +6321,109 @@ function createService({ fetchImpl = fetch, log = () => {}, base = BASE, token =
     }
   };
   const dispatch = (event) => {
-    if (!wantsEvent(event?.type))
+    if (state.stopping || !wantsEvent(event?.type))
       return;
-    const sessionId = event?.data?.sessionID;
+    const sessionId = event?.data?.sessionID ?? event?.data?.form?.sessionID;
     if (sessionId) {
-      const collector = collectors.get(sessionId);
-      if (collector)
-        applyEvent(collector, event);
-      else
+      const existed = collectors.has(sessionId);
+      const collector = automaticCollector(sessionId);
+      if (!collector)
+        return;
+      if (!existed && /^session\.(text|reasoning|tool\.input)\./.test(event.type)) {
+        collector.status = "streaming";
+        collector.turnActive = true;
+      }
+      collector.touchedAt = Date.now();
+      collector.captureEventAt = Math.max(collector.captureEventAt ?? 0, typeof event.created === "number" ? event.created : Date.now());
+      if (/^session\.execution\.(succeeded|failed|interrupted)$/.test(event.type))
+        collector.captureFinishedAt = collector.captureEventAt;
+      collector.capturePendingRecord = false;
+      applyEvent(collector, event);
+      if (working(collector))
+        collector.captureEndedAt = null;
+      if (!collector.captureStartedAt || !working(collector))
+        sampleCollector(collector, Date.now(), treeOf(collector));
+      if (!collector.captureRecordKnown)
         learnSession(sessionId);
       return;
     }
     for (const collector of collectors.values())
       applyEvent(collector, event);
   };
+  const discoverRunning = async () => {
+    if (discoveryLoading || state.stopping || !base || !upstreamIsLoopback)
+      return;
+    discoveryLoading = true;
+    try {
+      const answer = await apiGet(`/api/session?limit=${MAX_RECORDINGS}`);
+      if (state.stopping)
+        return;
+      const rows = Array.isArray(answer?.data) ? answer.data : [];
+      const listed = new Set(rows.map((record) => record?.id));
+      for (const record of rows) {
+        const busy = record?.time?.busy;
+        const idle = record?.time?.idle;
+        const known = collectors.get(record?.id);
+        if (!known && !(busy && (!idle || busy > idle)))
+          continue;
+        const collector = known ?? automaticCollector(record.id);
+        if (!collector)
+          continue;
+        collector.captureLastCheckedAt = Date.now();
+        applyCaptureRecord(collector, record);
+        if (record.parentID && !collectors.has(record.parentID))
+          learnSession(record.id);
+      }
+      const unseen = [...collectors.values()].filter((item) => working(item) && !listed.has(item.id)).sort((a, b) => (a.captureLastCheckedAt ?? 0) - (b.captureLastCheckedAt ?? 0)).slice(0, 8);
+      await Promise.all(unseen.map(async (collector) => {
+        collector.captureLastCheckedAt = Date.now();
+        try {
+          const record = (await apiGet(`/api/session/${encodeURIComponent(collector.id)}`))?.data;
+          if (!state.stopping && record)
+            applyCaptureRecord(collector, record);
+        } catch (error) {
+          if (state.stopping)
+            return;
+          if (error.status === 404) {
+            collector.status = "idle";
+            collector.turnActive = false;
+            collector.stream = null;
+            collector.pendingTools = 0;
+            collector.captureFinishedAt = Date.now();
+          } else
+            log(`token-meter: could not reconcile graph ${collector.id}: ${error?.message ?? error}`);
+        }
+      }));
+    } catch (error) {
+      log(`token-meter: could not discover running graphs: ${error?.message ?? error}`);
+    } finally {
+      discoveryLoading = false;
+    }
+  };
+  const sampleCollector = (collector, now, tree) => {
+    const active = tree.some(working);
+    if (active) {
+      collector.capturePendingRecord = false;
+      collector.captureEndedAt = null;
+      collector.captureStartedAt ??= now;
+      tick(collector, now, tree);
+      collector.captureDirty = true;
+    } else if (collector.captureStartedAt && !collector.captureEndedAt && !collector.capturePendingRecord) {
+      const last = collector.series.at(-1)?.t ?? now;
+      const end = Math.max(last, collector.captureFinishedAt || now);
+      tick(collector, end, tree);
+      collector.captureEndedAt = end;
+      recordings.capture(collector, end);
+      collector.captureDirty = false;
+    }
+  };
+  const recordingWire = (collector) => ({
+    state: collector.captureStartedAt ? collector.captureEndedAt ? "saved" : "live" : "unrecorded",
+    startedAt: collector.captureStartedAt ?? null,
+    endedAt: collector.captureEndedAt ?? null,
+    lastSampleAt: collector.series.at(-1)?.t ?? null,
+    error: recordings.error ?? captureError
+  });
   async function consume(body) {
     const decoder = new TextDecoder;
     let buffer = "";
@@ -5994,15 +6518,16 @@ function createService({ fetchImpl = fetch, log = () => {}, base = BASE, token =
   }
   const ticker = setInterval(() => {
     const now = Date.now();
-    for (const collector of watchedRoots()) {
-      if (now - collector.watchedAt > COLLECTOR_TTL_MS) {
+    for (const collector of [...collectors.values()]) {
+      const tree = treeOf(collector);
+      const active = tree.some(working);
+      if (!active && now - Math.max(collector.watchedAt, collector.touchedAt) > COLLECTOR_TTL_MS) {
         dropTree(collector);
         continue;
       }
-      const tree = treeOf(collector);
-      if (now - collector.watchedAt > HOT_MS && !tree.some((member) => member.status === "streaming"))
+      sampleCollector(collector, now, tree);
+      if (!collector.watched || now - collector.watchedAt > HOT_MS)
         continue;
-      tick(collector, now, tree);
       refreshLineage(collector);
       for (const member of tree) {
         const mayLoad = member !== collector && member.historyAt === 0 && !member.loading && !member.turnActive && member.status !== "streaming" && now - member.historyTriedAt >= SUBAGENT_HISTORY_RETRY_MS;
@@ -6012,6 +6537,18 @@ function createService({ fetchImpl = fetch, log = () => {}, base = BASE, token =
     }
   }, TICK_MS);
   ticker.unref?.();
+  const saveTimer = setInterval(() => {
+    for (const collector of collectors.values()) {
+      if (!collector.captureDirty)
+        continue;
+      recordings.capture(collector, collector.series.at(-1)?.t ?? Date.now());
+      collector.captureDirty = false;
+    }
+    recordings.flush();
+  }, RECORDING_SAVE_MS);
+  const discoveryTimer = setInterval(() => void discoverRunning(), RECORDING_SCAN_MS);
+  saveTimer.unref?.();
+  discoveryTimer.unref?.();
   const json = (res, status, body) => {
     const payload = JSON.stringify(body);
     res.writeHead(status, {
@@ -6078,12 +6615,14 @@ function createService({ fetchImpl = fetch, log = () => {}, base = BASE, token =
         await collector.loading;
       }
       const tree = treeOf(collector);
-      tick(collector, now, tree);
-      const answer = snapshot(collector, now, tree, priceBook, priceOverrides);
+      const snapshotAt = Date.now();
+      sampleCollector(collector, snapshotAt, tree);
+      const answer = snapshot(collector, snapshotAt, tree, priceBook, priceOverrides);
       if (url.searchParams.get("steps") === String(answer.stepsSeq))
         delete answer.steps;
       json(res, 200, {
         ...answer,
+        recording: recordingWire(collector),
         stream: { state: state.stream, error: state.streamError, since: state.since },
         loading: Boolean(collector.loading)
       });
@@ -6096,13 +6635,19 @@ function createService({ fetchImpl = fetch, log = () => {}, base = BASE, token =
     start() {
       server.listen(port, "127.0.0.1");
       streamLoop();
+      discoverRunning();
       return server;
     },
-    stop() {
+    async stop() {
       state.stopping = true;
       clearInterval(ticker);
+      clearInterval(saveTimer);
+      clearInterval(discoveryTimer);
       state.controller?.abort();
       server.close();
+      for (const collector of collectors.values())
+        recordings.capture(collector, collector.series.at(-1)?.t ?? Date.now());
+      await recordings.flush();
     }
   };
 }
@@ -6114,8 +6659,8 @@ if (isMain) {
   const service = createService({ log: (message) => console.error(message) });
   service.start().on("listening", () => console.error(`token-meter: service on 127.0.0.1:${PORT}`));
   for (const signal of ["SIGINT", "SIGTERM"]) {
-    process.on(signal, () => {
-      service.stop();
+    process.on(signal, async () => {
+      await service.stop();
       process.exit(0);
     });
   }

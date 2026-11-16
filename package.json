@@ -43,6 +43,7 @@
       "service": {
         "entry": "service/main.js",
         "runtime": "host",
+        "keepRunning": true,
         "provides": [
           "opencode"
         ]

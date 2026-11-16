@@ -4,7 +4,8 @@
 # A step counts only when its own exit code says so: nothing here reads an
 # output to decide whether it passed. Build first, alone, because every suite
 # runs the built files; then price (binds nothing), collector (47821/47829) and
-# page (41873) together, since their ports do not overlap; then the two scans,
+# page (41873), recording integration (ephemeral port) and recording storage
+# together, since their ports do not overlap; then the two scans,
 # one after the other, so they never read a file while a suite is writing.
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -49,8 +50,8 @@ fi
 
 run_step 'check' bun run check
 
-# ---- the three independent suites, together -------------------------------
-suites=(price collector page)
+# ---- the independent suites, together ------------------------------------
+suites=(price collector page recording recording-store)
 codes=()
 pids=()
 for name in "${suites[@]}"; do

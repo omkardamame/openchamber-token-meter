@@ -16,6 +16,7 @@ import {
 } from './collector.js';
 import { PRICE_BOOK } from '../../shared/price-book.js';
 import { loadPriceOverrides, priceOverrideFile } from './prices.js';
+import { createRecordingStore } from './recordings.js';
 
 const PORT = Number(process.env.OPENCHAMBER_SERVICE_PORT);
 const TOKEN = process.env.OPENCHAMBER_SERVICE_TOKEN ?? '';
@@ -47,6 +48,9 @@ const MAX_SUBAGENTS = 200;
 const MAX_SUBAGENT_AGE_MS = 60 * 60_000;
 const SUBAGENT_HISTORY_RETRY_MS = 15_000;
 const TICK_MS = 250;
+const MAX_RECORDINGS = 200;
+const RECORDING_SAVE_MS = 5_000;
+const RECORDING_SCAN_MS = 30_000;
 
 if (!PORT || !TOKEN) {
   console.error('token-meter: OPENCHAMBER_SERVICE_PORT and OPENCHAMBER_SERVICE_TOKEN are required');
@@ -59,6 +63,41 @@ export function createService({ fetchImpl = fetch, log = () => {}, base = BASE, 
   // Prices are a committed snapshot plus an optional hand-written correction.
   // Both are read once, here: no watcher, no per-poll file read.
   const priceOverrides = overrides ?? loadPriceOverrides({ file: priceOverrideFile(dataDir), log });
+  const recordings = createRecordingStore({ dataDir, log, maxSessions: MAX_RECORDINGS });
+  let captureError = null;
+  let captureWarnAt = 0;
+  let discoveryLoading = false;
+  const working = (member) => member.turnActive || ['streaming', 'tool', 'waiting-permission', 'waiting-question'].includes(member.status);
+  const makeCollector = (id) => {
+    const collector = createCollector(id);
+    const saved = recordings.get(id);
+    collector.captureStartedAt = saved?.startedAt ?? null;
+    collector.captureEndedAt = saved?.endedAt ?? null;
+    collector.capturePendingRecord = Boolean(saved && !saved.endedAt);
+    if (saved) {
+      collector.series = saved.series;
+      collector.seriesLong = saved.seriesLong;
+      collector.seriesWide = saved.seriesWide;
+    }
+    return collector;
+  };
+  const applyCaptureRecord = (collector, record) => {
+    // A record read can finish after newer SSE lifecycle events. Its counters
+    // are still useful, but its stale busy flag must not resurrect a finished
+    // recording or interrupt a new turn.
+    const newerEvent = (collector.captureEventAt ?? 0) > (record?.time?.updated ?? record?.time?.created ?? 0);
+    const liveState = newerEvent ? {
+      status: collector.status, turnActive: collector.turnActive, stream: collector.stream,
+      pendingTools: collector.pendingTools, model: collector.model, provider: collector.provider,
+    } : null;
+    applyRecord(collector, record);
+    if (liveState) Object.assign(collector, liveState);
+    if (record?.parentID && record.parentID !== collector.id) collector.parentId = record.parentID;
+    collector.capturePendingRecord = false;
+    collector.captureRecordKnown = true;
+    if (typeof record?.time?.idle === 'number') collector.captureFinishedAt = Math.max(collector.captureFinishedAt ?? 0, record.time.idle);
+    if (working(collector)) collector.captureEndedAt = null;
+  };
 
   const upstreamIsLoopback = (() => {
     try {
@@ -83,7 +122,11 @@ export function createService({ fetchImpl = fetch, log = () => {}, base = BASE, 
       headers: { authorization: `Bearer ${token}`, accept: 'application/json' },
       ...(typeof AbortSignal?.timeout === 'function' ? { signal: AbortSignal.timeout(API_TIMEOUT_MS) } : {}),
     });
-    if (!answer.ok) throw new Error(`OpenCode answered ${answer.status}`);
+    if (!answer.ok) {
+      const error = new Error(`OpenCode answered ${answer.status}`);
+      error.status = answer.status;
+      throw error;
+    }
     return answer.json();
   };
 
@@ -97,7 +140,7 @@ export function createService({ fetchImpl = fetch, log = () => {}, base = BASE, 
   const getCollector = (id) => {
     let collector = collectors.get(id);
     if (!collector) {
-      collector = createCollector(id);
+      collector = makeCollector(id);
       collectors.set(id, collector);
     }
     collector.touchedAt = Date.now();
@@ -113,14 +156,16 @@ export function createService({ fetchImpl = fetch, log = () => {}, base = BASE, 
         .filter(
           (item) =>
             item !== collector &&
-            !item.turnActive &&
-            !treeOf(item).some((member) => member.status === 'streaming'),
+            !treeOf(item).some(working),
         )
         .sort((a, b) => a.watchedAt - b.watchedAt)[0];
       if (idle) dropTree(idle);
     }
     void refreshLineage(collector);
     void readTurnStart(collector);
+    // A recording restored as active may have finished while the service was
+    // down; its own record settles the status the stream cannot replay.
+    if (collector.capturePendingRecord) void learnSession(id);
     return collector;
   };
 
@@ -154,6 +199,7 @@ export function createService({ fetchImpl = fetch, log = () => {}, base = BASE, 
         member.parentId = null;
         continue;
       }
+      recordings.capture(member, member.series.at(-1)?.t ?? Date.now());
       collectors.delete(member.id);
     }
   };
@@ -163,13 +209,13 @@ export function createService({ fetchImpl = fetch, log = () => {}, base = BASE, 
   const ensureSubagent = (id, record, parentId) => {
     let collector = collectors.get(id);
     if (!collector) {
-      collector = createCollector(id);
+      collector = makeCollector(id);
       collector.parentId = parentId ?? record?.parentID ?? null;
       collectors.set(id, collector);
     } else if (!collector.parentId) {
       collector.parentId = parentId ?? record?.parentID ?? null;
     }
-    if (record) applyRecord(collector, record);
+    if (record) applyCaptureRecord(collector, record);
     collector.touchedAt = Date.now();
     return collector;
   };
@@ -220,7 +266,7 @@ export function createService({ fetchImpl = fetch, log = () => {}, base = BASE, 
         }
       }
       const ownAnswer = await own;
-      if (ownAnswer?.data) applyRecord(root, ownAnswer.data);
+      if (ownAnswer?.data) applyCaptureRecord(root, ownAnswer.data);
       root.lineageAt = Date.now();
       root.lineageTriedAt = 0;
     } catch (error) {
@@ -238,36 +284,59 @@ export function createService({ fetchImpl = fetch, log = () => {}, base = BASE, 
    */
   const learning = new Set();
   const missedAt = new Map();
+  // Learn lineage after attaching the event immediately. Waiting for an HTTP
+  // record used to discard every early delta of a session with no panel open.
+  const automaticCollector = (id) => {
+    if (!/^ses[\w-]{1,120}$/.test(id)) return null;
+    if (collectors.has(id)) return collectors.get(id);
+    if (collectors.size >= MAX_RECORDINGS) {
+      const oldest = [...collectors.values()].filter((item) => !item.watched && !treeOf(item).some(working))
+        .sort((a, b) => a.touchedAt - b.touchedAt)[0];
+      if (oldest) dropTree(oldest);
+      else {
+        captureError = `automatic graph recording reached ${MAX_RECORDINGS} simultaneous sessions`;
+        if (Date.now() - captureWarnAt > RECORDING_SCAN_MS) {
+          captureWarnAt = Date.now();
+          log(`token-meter: ${captureError}`);
+        }
+        return null;
+      }
+    }
+    captureError = null;
+    const collector = makeCollector(id);
+    collectors.set(id, collector);
+    return collector;
+  };
   const learnSession = async (id) => {
-    if (!base || !upstreamIsLoopback || learning.has(id) || watchedRoots().length === 0) return;
+    if (state.stopping || !base || !upstreamIsLoopback || learning.has(id)) return;
     const now = Date.now();
     if (missedAt.has(id) && now - missedAt.get(id) < LINEAGE_RETRY_MS) return;
     learning.add(id);
     try {
-      const chain = [];
       let cursor = id;
-      let attached = false;
+      const seen = new Set();
+      let learned = false;
       for (let depth = 0; depth <= LINEAGE_DEPTH; depth += 1) {
+        if (seen.has(cursor)) break;
+        seen.add(cursor);
         const record = (await apiGet(`/api/session/${encodeURIComponent(cursor)}`))?.data;
+        if (state.stopping) return;
         if (!record?.id) break;
-        chain.push(record);
+        learned = true;
+        const member = automaticCollector(record.id);
+        if (!member) break;
+        member.captureLastCheckedAt = Date.now();
+        applyCaptureRecord(member, record);
         const parentId = record.parentID;
         if (!parentId) break;
-        if (collectors.has(parentId)) {
-          attached = true;
-          break;
-        }
+        if (collectors.has(parentId)) break;
         cursor = parentId;
       }
-      if (!attached) {
+      if (learned) missedAt.delete(id);
+      else {
         if (missedAt.size > 500) missedAt.clear();
         missedAt.set(id, Date.now());
-        return;
       }
-      for (let index = chain.length - 1; index >= 0; index -= 1) {
-        ensureSubagent(chain[index].id, chain[index], chain[index].parentID);
-      }
-      missedAt.delete(id);
     } catch (error) {
       if (missedAt.size > 500) missedAt.clear();
       missedAt.set(id, Date.now());
@@ -302,17 +371,105 @@ export function createService({ fetchImpl = fetch, log = () => {}, base = BASE, 
   };
 
   const dispatch = (event) => {
-    if (!wantsEvent(event?.type)) return;
-    const sessionId = event?.data?.sessionID;
+    if (state.stopping || !wantsEvent(event?.type)) return;
+    const sessionId = event?.data?.sessionID ?? event?.data?.form?.sessionID;
     if (sessionId) {
-      const collector = collectors.get(sessionId);
-      if (collector) applyEvent(collector, event);
-      else void learnSession(sessionId);
+      const existed = collectors.has(sessionId);
+      const collector = automaticCollector(sessionId);
+      if (!collector) return;
+      // A service opened mid-step may first see a delta, not a step-start.
+      if (!existed && /^session\.(text|reasoning|tool\.input)\./.test(event.type)) {
+        collector.status = 'streaming';
+        collector.turnActive = true;
+      }
+      collector.touchedAt = Date.now();
+      collector.captureEventAt = Math.max(collector.captureEventAt ?? 0, typeof event.created === 'number' ? event.created : Date.now());
+      if (/^session\.execution\.(succeeded|failed|interrupted)$/.test(event.type)) collector.captureFinishedAt = collector.captureEventAt;
+      collector.capturePendingRecord = false;
+      applyEvent(collector, event);
+      if (working(collector)) collector.captureEndedAt = null;
+      if (!collector.captureStartedAt || !working(collector)) sampleCollector(collector, Date.now(), treeOf(collector));
+      if (!collector.captureRecordKnown) void learnSession(sessionId);
       return;
     }
     // A form may name its session only inside the form itself.
     for (const collector of collectors.values()) applyEvent(collector, event);
   };
+
+  // Bootstrap sessions already running when OpenChamber starts. SSE remains
+  // the primary source; this bounded scan also recovers after a stream outage.
+  const discoverRunning = async () => {
+    if (discoveryLoading || state.stopping || !base || !upstreamIsLoopback) return;
+    discoveryLoading = true;
+    try {
+      const answer = await apiGet(`/api/session?limit=${MAX_RECORDINGS}`);
+      if (state.stopping) return;
+      const rows = Array.isArray(answer?.data) ? answer.data : [];
+      const listed = new Set(rows.map((record) => record?.id));
+      for (const record of rows) {
+        const busy = record?.time?.busy;
+        const idle = record?.time?.idle;
+        const known = collectors.get(record?.id);
+        if (!known && !(busy && (!idle || busy > idle))) continue;
+        const collector = known ?? automaticCollector(record.id);
+        if (!collector) continue;
+        collector.captureLastCheckedAt = Date.now();
+        applyCaptureRecord(collector, record);
+        if (record.parentID && !collectors.has(record.parentID)) void learnSession(record.id);
+      }
+      // A busy chat can fall off the recent list or be deleted while the event
+      // stream is disconnected. Recheck a bounded batch instead of retaining
+      // zombie "active" collectors forever and exhausting the recording cap.
+      const unseen = [...collectors.values()].filter((item) => working(item) && !listed.has(item.id))
+        .sort((a, b) => (a.captureLastCheckedAt ?? 0) - (b.captureLastCheckedAt ?? 0)).slice(0, 8);
+      await Promise.all(unseen.map(async (collector) => {
+        collector.captureLastCheckedAt = Date.now();
+        try {
+          const record = (await apiGet(`/api/session/${encodeURIComponent(collector.id)}`))?.data;
+          if (!state.stopping && record) applyCaptureRecord(collector, record);
+        } catch (error) {
+          if (state.stopping) return;
+          if (error.status === 404) {
+            collector.status = 'idle';
+            collector.turnActive = false;
+            collector.stream = null;
+            collector.pendingTools = 0;
+            collector.captureFinishedAt = Date.now();
+          } else log(`token-meter: could not reconcile graph ${collector.id}: ${error?.message ?? error}`);
+        }
+      }));
+    } catch (error) {
+      log(`token-meter: could not discover running graphs: ${error?.message ?? error}`);
+    } finally {
+      discoveryLoading = false;
+    }
+  };
+
+  const sampleCollector = (collector, now, tree) => {
+    const active = tree.some(working);
+    if (active) {
+      collector.capturePendingRecord = false;
+      collector.captureEndedAt = null;
+      collector.captureStartedAt ??= now;
+      tick(collector, now, tree);
+      collector.captureDirty = true;
+    } else if (collector.captureStartedAt && !collector.captureEndedAt && !collector.capturePendingRecord) {
+      const last = collector.series.at(-1)?.t ?? now;
+      const end = Math.max(last, collector.captureFinishedAt || now);
+      tick(collector, end, tree);
+      collector.captureEndedAt = end;
+      recordings.capture(collector, end);
+      collector.captureDirty = false;
+    }
+  };
+
+  const recordingWire = (collector) => ({
+    state: collector.captureStartedAt ? collector.captureEndedAt ? 'saved' : 'live' : 'unrecorded',
+    startedAt: collector.captureStartedAt ?? null,
+    endedAt: collector.captureEndedAt ?? null,
+    lastSampleAt: collector.series.at(-1)?.t ?? null,
+    error: recordings.error ?? captureError,
+  });
 
   async function consume(body) {
     const decoder = new TextDecoder();
@@ -403,17 +560,15 @@ export function createService({ fetchImpl = fetch, log = () => {}, base = BASE, 
 
   const ticker = setInterval(() => {
     const now = Date.now();
-    for (const collector of watchedRoots()) {
-      if (now - collector.watchedAt > COLLECTOR_TTL_MS) {
+    for (const collector of [...collectors.values()]) {
+      const tree = treeOf(collector);
+      const active = tree.some(working);
+      if (!active && now - Math.max(collector.watchedAt, collector.touchedAt) > COLLECTOR_TTL_MS) {
         dropTree(collector);
         continue;
       }
-      const tree = treeOf(collector);
-      // Keep sampling while the panel asks for answers, and while any subagent
-      // is still streaming: the curve must not freeze the moment the parent
-      // goes quiet and hands its turn to a child.
-      if (now - collector.watchedAt > HOT_MS && !tree.some((member) => member.status === 'streaming')) continue;
-      tick(collector, now, tree);
+      sampleCollector(collector, now, tree);
+      if (!collector.watched || now - collector.watchedAt > HOT_MS) continue;
       void refreshLineage(collector);
       for (const member of tree) {
         // A subagent's history is read for the step chart; its totals come from
@@ -431,6 +586,18 @@ export function createService({ fetchImpl = fetch, log = () => {}, base = BASE, 
     }
   }, TICK_MS);
   ticker.unref?.();
+  const saveTimer = setInterval(() => {
+    // Copy snapshots once per disk batch, not on every delta or 250 ms tick.
+    for (const collector of collectors.values()) {
+      if (!collector.captureDirty) continue;
+      recordings.capture(collector, collector.series.at(-1)?.t ?? Date.now());
+      collector.captureDirty = false;
+    }
+    void recordings.flush();
+  }, RECORDING_SAVE_MS);
+  const discoveryTimer = setInterval(() => void discoverRunning(), RECORDING_SCAN_MS);
+  saveTimer.unref?.();
+  discoveryTimer.unref?.();
 
   const json = (res, status, body) => {
     const payload = JSON.stringify(body);
@@ -511,13 +678,15 @@ export function createService({ fetchImpl = fetch, log = () => {}, base = BASE, 
         await collector.loading;
       }
       const tree = treeOf(collector);
-      tick(collector, now, tree);
-      const answer = snapshot(collector, now, tree, priceBook, priceOverrides);
+      const snapshotAt = Date.now();
+      sampleCollector(collector, snapshotAt, tree);
+      const answer = snapshot(collector, snapshotAt, tree, priceBook, priceOverrides);
       // The step list changes once per step; a client that already has this
       // sequence keeps its copy instead of receiving the same rows again.
       if (url.searchParams.get('steps') === String(answer.stepsSeq)) delete answer.steps;
       json(res, 200, {
         ...answer,
+        recording: recordingWire(collector),
         stream: { state: state.stream, error: state.streamError, since: state.since },
         loading: Boolean(collector.loading),
       });
@@ -531,13 +700,18 @@ export function createService({ fetchImpl = fetch, log = () => {}, base = BASE, 
     start() {
       server.listen(port, '127.0.0.1');
       void streamLoop();
+      void discoverRunning();
       return server;
     },
-    stop() {
+    async stop() {
       state.stopping = true;
       clearInterval(ticker);
+      clearInterval(saveTimer);
+      clearInterval(discoveryTimer);
       state.controller?.abort();
       server.close();
+      for (const collector of collectors.values()) recordings.capture(collector, collector.series.at(-1)?.t ?? Date.now());
+      await recordings.flush();
     },
   };
 }
@@ -551,8 +725,8 @@ if (isMain) {
   const service = createService({ log: (message) => console.error(message) });
   service.start().on('listening', () => console.error(`token-meter: service on 127.0.0.1:${PORT}`));
   for (const signal of ['SIGINT', 'SIGTERM']) {
-    process.on(signal, () => {
-      service.stop();
+    process.on(signal, async () => {
+      await service.stop();
       process.exit(0);
     });
   }

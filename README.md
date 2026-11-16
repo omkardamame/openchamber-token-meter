@@ -16,8 +16,9 @@ kept step with its count and time axis.
 
 ## Install
 
-Settings → Extensions → paste this, choose **Add**, allow the two permissions
-(a local service, read from OpenCode):
+Settings → Extensions → paste this, choose **Add**, and allow the local service,
+OpenCode reads and background running. An existing installation may ask for
+approval again when background recording is added:
 
 ```
 https://github.com/omkardamame/openchamber-token-meter.git
@@ -35,6 +36,12 @@ https://github.com/omkardamame/openchamber-token-meter.git
   Clean ticks adapt to the range and chart height; the red `peak` and green `avg`
   lines use the same mapping. A peak below 300 stays below the top, not inflated
   to the ceiling. Rates and hover readouts stay in t/s.
+- **Automatic recording** — graphs start without opening a panel, while the
+  OpenChamber host is running. The latest hour of samples for up to 200 sessions
+  is saved locally across restarts; newer recordings evict older ones. Opening
+  a finished session replays its saved curve with an `ended` axis. A new turn
+  resumes the live clock. Sessions never recorded have no invented live curve;
+  their per-step history is still available. Details: [recording decision](docs/decisions/001-background-recordings.md).
 - **Subagents** — each subagent still working, its own live rate, and how many
   of the tree are running. `N subagents` opens a roster of every subagent
   session in the tree (an hour wide) with what each consumed, cost, its average
