@@ -41,9 +41,10 @@ Every release of Token Meter, newest first; one line per change, grouped by area
 
 ### Performance
 
-- Long sessions use less memory.
-- Hovering the steps chart is instant on long sessions.
-- An idle panel uses less CPU.
+- Long sessions hold about half the memory: 163 MB → 79 MB at the 1,000-step cap.
+- The rail's answer on a long session: 108 KB → 3 KB (97% smaller).
+- Step hover with 1,000 steps: 6.6 ms → 0.2 ms per move.
+- An idle panel redraws the graph 30× less often: 61 → 2 writes a second.
 
 ## [1.9.1] - 2026-11-13
 
