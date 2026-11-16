@@ -1044,28 +1044,33 @@ function drawLive(data) {
     showPart(nodes['cross-dot'], false);
   }
 
+  // Hold the latest value to the edge only while it is current: a working
+  // session (its next sample is a quarter second away) or a sample under 3 s
+  // old. Otherwise an idle graph would draw one long horizontal line from the
+  // last sample to now; it ends at the sample and scrolls instead.
+  const newest = visible[visible.length - 1];
+  const hold = Boolean(newest) && now - newest.t <= 3_000;
   if (smooth.length > 1) {
     const points = plotted.map((point, index) => ({ x: xOf(visible[index]), y: plottedY(index) }));
     const line = smoothPath(points);
     const first = points[0];
     const last = points[points.length - 1];
-    // Hold the latest known value to the now edge. Do not stretch the sample
-    // timeline or append invented measurements to the history/hover data.
-    const heldLine = last.x < width ? `${line} L ${width.toFixed(1)},${last.y.toFixed(1)}` : line;
+    const endX = hold && last.x < width ? width : last.x;
+    const heldLine = endX > last.x ? `${line} L ${endX.toFixed(1)},${last.y.toFixed(1)}` : line;
     nodes.line.setAttribute('d', heldLine);
     nodes.fill.setAttribute(
       'd',
-      `${heldLine} L ${width.toFixed(1)},${baseline.toFixed(1)} L ${first.x.toFixed(1)},${baseline.toFixed(1)} Z`,
+      `${heldLine} L ${endX.toFixed(1)},${baseline.toFixed(1)} L ${first.x.toFixed(1)},${baseline.toFixed(1)} Z`,
     );
-    nodes.dot.setAttribute('cx', width.toFixed(1));
+    nodes.dot.setAttribute('cx', endX.toFixed(1));
     nodes.dot.setAttribute('cy', last.y.toFixed(1));
     showPart(nodes.line, true);
     showPart(nodes.fill, true);
     showPart(nodes.dot, true);
     showPart(nodes.baseline, false);
   } else if (smooth.length === 1) {
-    // A single sample has no history curve, but its held value still sits at now.
-    nodes.dot.setAttribute('cx', width.toFixed(1));
+    // A single sample sits at its own time unless it is still current.
+    nodes.dot.setAttribute('cx', (hold ? width : xOf(visible[0])).toFixed(1));
     nodes.dot.setAttribute('cy', plottedY(0).toFixed(1));
     showPart(nodes.dot, true);
     hidePath(nodes.line);

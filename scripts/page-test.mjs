@@ -852,7 +852,16 @@ try {
   const idle = await panel.read();
   check('panel keeps the live caption uncluttered', idle.liveCaption === 'live', JSON.stringify(idle.liveCaption));
   check('panel removes the first-token sentence but retains TTFT in the grid', !/first token took/.test(idle.text) && idle.values.includes('6.5 s'), idle.text.slice(0, 130));
-  check('the live dot is anchored to now even between idle polls', idle.chartGeometry[0].dotX === idle.liveWidth && idle.liveRight === idle.liveWidth, `${idle.chartGeometry[0].dotX}/${idle.liveRight} of ${idle.liveWidth}`);
+  await panel.set(
+    state({ status: 'streaming', generatedAt: Date.now(), series: { t0: Date.now() - 2000, step: 250, v: [40, 60] } }),
+  );
+  const anchored = await panel.read();
+  check(
+    'a current live sample keeps the dot on the now edge',
+    anchored.chartGeometry[0].dotX === anchored.liveWidth && anchored.liveRight === anchored.liveWidth,
+    `${anchored.chartGeometry[0].dotX}/${anchored.liveRight} of ${anchored.liveWidth}`,
+  );
+  await panel.set(state());
   check('panel draws all eight cells', idle.cells.join(',') === 'In,Out,Think,Total out,Cache,Cache hit,TTFT,Consumed', idle.cells.join(','));
   // `.block` sets display: flex, which outranks the browser's own [hidden]
   // rule: a single-model session drew an empty "Models" heading.
@@ -919,7 +928,24 @@ try {
   const historyPart = held.livePathD.split(' L ')[0];
   const coordinates = historyPart.match(/-?[\d]+(?:\.[\d]+)?/g).map(Number);
   const oldEndX = coordinates.at(-2);
-  check('the curve holds its latest value to now without stretching old samples', held.liveRight === held.liveWidth && oldEndX < held.liveWidth * 0.85 && held.livePathD.includes(` L ${held.liveWidth.toFixed(1)},`), `${oldEndX} historical end, ${held.liveRight} held end of ${held.liveWidth}`);
+  check(
+    'an old sample ends at its own time instead of being held to the edge',
+    held.liveRight < held.liveWidth * 0.85 &&
+      oldEndX < held.liveWidth * 0.85 &&
+      !held.livePathD.includes(` L ${held.liveWidth.toFixed(1)},`),
+    `${oldEndX} historical end, ${held.liveRight} curve end of ${held.liveWidth}`,
+  );
+
+  // An idle graph must not hold its last sample to the edge as one long line.
+  const staleAt = Date.now() - 10_000;
+  await panel.set(state({ generatedAt: Date.now(), series: { t0: staleAt, step: 1000, v: [40, 60] } }));
+  const staleCurve = await panel.read();
+  check(
+    'an idle graph ends at its last sample instead of holding a long line',
+    staleCurve.chartGeometry[0].dotX !== null && staleCurve.chartGeometry[0].dotX < staleCurve.liveWidth - 5 && staleCurve.liveRight < staleCurve.liveWidth - 5,
+    `dot ${staleCurve.chartGeometry[0].dotX}, right ${staleCurve.liveRight} of ${staleCurve.liveWidth}`,
+  );
+  await panel.set(state());
 
   // A resting session samples zeros; the axis floor is not a measured scale.
   await panel.set({ ...oneBase, series: { t0: Date.now() - 2000, step: 250, v: [0, 0, 0, 0] } });
