@@ -2,13 +2,13 @@
 
 Every release of Token Meter, newest first; one or two concise bullets per release — what shipped in that tag.
 
-## [2.0.0] - 2026-11-16
+## [2.0.0] - 2026-11-17
 
 ### Changed
 
-- **Faster and lighter:** the service keeps a compact timeline for the turn's cost instead of a price object per step (about half the retained memory at the 1,000-step cap), the Work Status rail receives only the fields it draws (a 97% smaller first answer on a long session), and the panel restyles step bars on hover instead of rebuilding them and redraws a finished graph once a second instead of on every frame.
-- **Breaking:** Cost now headlines API value at published rates, not the recorded bill; billed cost remains alongside it. Six-provider pricing includes context tiers, time tariffs, manual overrides and named gaps in partial totals. Optional session and turn budgets warn when their dollar limits are reached.
-- Both panel charts use a dynamic linear/log scale whose ceiling is the session's actual peak (no fixed 250/300), with smaller side numbers, the peak as the top tick and unchanged t/s measurements; burst spikes no longer flatten normal rates. Graphs record every session in the background while OpenChamber runs (latest hour, up to 200 sessions, rate samples only), so a chat generating before you open it already has its curve; both frames always follow the live clock and hold a flat zero to `now` after a turn. Charts zoom to an hour, pan through steps and filter by subagent; the panel adds a subagent roster, model breakdown, dated in/out readouts, copy stats and a local clock. Hardening fixes stale session displays, hidden sections, filter redraws, subagent labels, animation-loop recovery, the end-of-turn scale remap, drift comparing only billed steps, restart-safe recordings and the footer overlapping a short panel, with keyboard roster controls and reduced-motion support.
+- **Breaking — Cost is API value.** The headline is what the tokens cost at published rates; the recorded bill stays beside it. Six providers with context tiers, time tariffs, manual overrides and named gaps in partial totals, plus optional session and turn budgets.
+- **Charts, recording, panel.** Both frames follow the live clock and hold a flat zero to `now` after a turn; the ceiling is the session's actual peak, on a linear/log scale you can zoom to an hour, pan and filter by subagent. Sessions record themselves while OpenChamber runs (latest hour, up to 200, rates only — never text), so a chat already generating has its curve. The panel adds a subagent roster, model breakdown, dated in/out readouts, copy stats, a local clock, keyboard access and reduced motion.
+- **Fixes and speed.** Drift compares only billed steps; recordings survive a restart and settle to zero; the status banner no longer clips; the Steps block no longer overlaps the footer; the credential guard can no longer miss a leak. A finished graph draws once a second instead of every frame, step hover restyles bars instead of rebuilding them, and the rail receives only the fields it draws.
 
 ## [1.9.1] - 2026-11-13
 
