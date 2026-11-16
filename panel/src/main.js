@@ -127,8 +127,22 @@ function paintTier() {
   else delete ui.tpsValue.dataset.tier;
 }
 
+/**
+ * The moment a saved graph ended, or null while the session is live, has no
+ * recording, or speaks the older wire without one. A saved graph never advances:
+ * its history would slide off the window in minutes and an old session would
+ * look empty.
+ */
+function savedEndOf(data) {
+  if (data?.recording?.state !== 'saved') return null;
+  const at = Number(data.recording.endedAt);
+  return Number.isFinite(at) && at > 0 ? at : null;
+}
+
 /** The host's clock at the last answer, advanced by the time since it arrived. */
 function projectedNow(data) {
+  const endedAt = savedEndOf(data);
+  if (endedAt !== null) return endedAt;
   return (data.generatedAt || Date.now()) + Math.min(1500, performance.now() - receivedAt);
 }
 
@@ -160,7 +174,7 @@ function build() {
         <span class="speed-last last-line"><span class="last-rate"></span><span class="last-rest"></span></span>
       </div>
       <div class="chart-wrap"><svg class="chart" data-chart="live" aria-hidden="true"></svg></div>
-      <div class="axis"><span class="axis-from">60 s ago</span><span class="axis-peak"></span><span>now</span></div>
+      <div class="axis"><span class="axis-from">60 s ago</span><span class="axis-peak"></span><span class="axis-to">now</span></div>
     </section>
 
     <section class="block subagents" hidden>
@@ -223,6 +237,7 @@ function build() {
     live: app.querySelector('[data-chart="live"]'),
     peak: app.querySelector('.axis-peak'),
     axisFrom: app.querySelector('.axis-from'),
+    axisTo: app.querySelector('.axis-to'),
     grid: app.querySelector('.grid'),
     source: app.querySelector('.totals-source'),
     costTotal: app.querySelector('.cost-total'),
@@ -914,15 +929,21 @@ function drawLive(data) {
       : data.points;
   const series = Array.isArray(source) ? source : [];
   const now = projectedNow(data);
+  const endedAt = savedEndOf(data);
   const from = now - liveWindowMs;
   const windowSeconds = Math.round(liveWindowMs / 1_000);
-  // Seconds up close, minutes once the number would be noise.
-  ui.axisFrom.textContent =
+  // Seconds up close, minutes once the number would be noise. A saved graph's
+  // window sits before the moment it ended, not before the clock on the wall.
+  const span =
     windowSeconds >= 3_600
-      ? '1 h ago'
+      ? '1 h'
       : windowSeconds >= 120
-        ? `${Math.floor(windowSeconds / 60)} min ago`
-        : `${windowSeconds} s ago`;
+        ? `${Math.floor(windowSeconds / 60)} min`
+        : `${windowSeconds} s`;
+  ui.axisFrom.textContent = `${span} ${endedAt === null ? 'ago' : 'before end'}`;
+  ui.axisTo.textContent = endedAt === null ? 'now' : 'ended';
+  if (endedAt === null) ui.axisTo.removeAttribute('title');
+  else ui.axisTo.title = dateClock(endedAt);
   const visible = series.filter((point) => point.t >= from && point.t <= now);
   const peakValue = visible.reduce((max, point) => Math.max(max, point.v), 0);
   // References drawn on the chart: the session's average and its best step,
@@ -1605,21 +1626,30 @@ function render(data) {
     data.status === 'waiting-question';
   const origin = working ? 'live' : totals.source === 'history' ? 'from history' : '';
   ui.source.textContent = origin;
+  const recording = data.recording ?? null;
+  const endingAt = savedEndOf(data);
+  const noLiveSamples = !Array.isArray(data.points) || data.points.length === 0;
   ui.foot.textContent = data.error
     ? `cannot read history: ${data.error}`
-    : loadingSubs > 0
-      ? `reading ${loadingSubs} subagent histor${loadingSubs === 1 ? 'y' : 'ies'}`
-      : partialSubs > 0
-        ? `${partialSubs} subagent histor${partialSubs === 1 ? 'y is' : 'ies are'} partial`
-        : historyPartial
-          ? 'history is partial'
-          : data.stream?.state === 'open'
-            ? 'live from OpenCode events'
-            : data.stream?.state === 'retrying'
-              ? 'events reconnecting'
-              : data.stream?.state === 'off'
-                ? 'totals update each turn · live rate unavailable'
-                : 'connecting to OpenCode events';
+    : recording?.error
+      ? `unable to save graph: ${recording.error}`
+      : loadingSubs > 0
+        ? `reading ${loadingSubs} subagent histor${loadingSubs === 1 ? 'y' : 'ies'}`
+        : partialSubs > 0
+          ? `${partialSubs} subagent histor${partialSubs === 1 ? 'y is' : 'ies are'} partial`
+          : historyPartial
+            ? 'history is partial'
+            : endingAt !== null
+              ? `recorded graph · ${dateClock(endingAt)}`
+              : recording?.state === 'unrecorded' && data.status === 'idle' && noLiveSamples
+                ? 'no live recording yet · the next turn records automatically'
+                : data.stream?.state === 'open'
+                  ? 'live from OpenCode events'
+                  : data.stream?.state === 'retrying'
+                    ? 'events reconnecting'
+                    : data.stream?.state === 'off'
+                      ? 'totals update each turn · live rate unavailable'
+                      : 'connecting to OpenCode events';
 }
 
 function handleError(error) {
@@ -1906,8 +1936,12 @@ host.onReady((ctx) => {
           if (Math.abs(liveTargetMs - liveWindowMs) < 40) liveWindowMs = liveTargetMs;
         }
         // One live draw per animation callback, including during zoom. Less
-        // motion keeps poll-based updates and an immediate zoom instead.
-        if (current && (!REDUCED_MOTION || liveZoomChanged)) drawLive(current);
+        // motion keeps poll-based updates and an immediate zoom instead. A saved
+        // graph has a frozen clock: its poll already draws it, so only a zoom
+        // gesture asks for more frames.
+        if (current && (!REDUCED_MOTION || liveZoomChanged) && (liveZoomChanged || savedEndOf(current) === null)) {
+          drawLive(current);
+        }
         if (subsDetailOpen && !ui.subsDetail.matches(':hover') && at > subsDetailUntil) {
           subsDetailOpen = false;
           subsDetailKey = '';

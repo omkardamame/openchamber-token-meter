@@ -72,8 +72,20 @@ function paintTier() {
   else delete ui.tps.dataset.tier;
 }
 
+/**
+ * The moment a saved graph ended, or null while the session is live, has no
+ * recording, or speaks the older wire without one. A saved graph never advances.
+ */
+function savedEndOf(data) {
+  if (data?.recording?.state !== 'saved') return null;
+  const at = Number(data.recording.endedAt);
+  return Number.isFinite(at) && at > 0 ? at : null;
+}
+
 /** The host's clock at the last answer, advanced by the time since it arrived. */
 function projectedNow(data) {
+  const endedAt = savedEndOf(data);
+  if (endedAt !== null) return endedAt;
   return (data.generatedAt || Date.now()) + Math.min(1500, performance.now() - receivedAt);
 }
 
@@ -316,7 +328,9 @@ host.onReady((ctx) => {
       lastFrame = stamp;
       if (!document.hidden) {
         animateSpeed(dt);
-        if (current && !REDUCED_MOTION) drawSpark(current);
+        // A saved graph has a frozen clock: its poll already drew it, so the
+        // display loop must not keep re-animating a path that cannot move.
+        if (current && !REDUCED_MOTION && savedEndOf(current) === null) drawSpark(current);
       }
     };
     requestAnimationFrame(paint);
