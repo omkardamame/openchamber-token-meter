@@ -515,7 +515,12 @@ export function createService({ fetchImpl = fetch, log = () => {}, base = BASE, 
       collector.captureStartedAt ??= now;
       tick(collector, now, tree);
       collector.captureDirty = true;
-    } else if (collector.captureStartedAt && !collector.captureEndedAt && !collector.capturePendingRecord) {
+    } else if (collector.capturePendingRecord) {
+      // A restored recording waits for its record read before it can end. Until
+      // then the session is idle, and the graph must still reach `now` at zero
+      // instead of freezing on its last rate.
+      tick(collector, now, tree);
+    } else if (collector.captureStartedAt && !collector.captureEndedAt) {
       const last = collector.series.at(-1)?.t ?? null;
       // Settle one cadence after the last tick (not halfway across a long gap
       // detected late), so a finished graph drops to zero instead of ending

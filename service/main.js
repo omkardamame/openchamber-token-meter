@@ -6473,7 +6473,9 @@ function createService({ fetchImpl = fetch, log = () => {}, base = BASE, token =
       collector.captureStartedAt ??= now;
       tick(collector, now, tree);
       collector.captureDirty = true;
-    } else if (collector.captureStartedAt && !collector.captureEndedAt && !collector.capturePendingRecord) {
+    } else if (collector.capturePendingRecord) {
+      tick(collector, now, tree);
+    } else if (collector.captureStartedAt && !collector.captureEndedAt) {
       const last = collector.series.at(-1)?.t ?? null;
       const settleAt = last === null ? now : last + 250;
       if (!collector.series.some((point) => point.v > 0) && !recordings.get(collector.id)) {

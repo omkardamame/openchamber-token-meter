@@ -944,6 +944,11 @@ function drawLive(data) {
     const value = previous === undefined ? point.v : previous + (point.v - previous) * 0.3;
     smooth.push(value);
   }
+  // A finished turn's final sample is zero; easing it would leave the held
+  // tail above the baseline (the "long line at 100" the owner saw). The end
+  // point is the measured value, so it is drawn as measured.
+  const newestSample = visible[visible.length - 1];
+  if (newestSample && newestSample.v === 0 && smooth.length) smooth[smooth.length - 1] = 0;
   const liveTop = smooth.reduce((best, value) => Math.max(best, value), 0);
   const turnPeak = ceilingMode === 'turn' ? turnPeakOf(data) : 0;
   const turnMode = ceilingMode === 'turn' && turnPeak > 0;
@@ -1044,18 +1049,15 @@ function drawLive(data) {
     showPart(nodes['cross-dot'], false);
   }
 
-  // Hold the latest value to the edge only while it is current: a working
-  // session (its next sample is a quarter second away) or a sample under 3 s
-  // old. Otherwise an idle graph would draw one long horizontal line from the
-  // last sample to now; it ends at the sample and scrolls instead.
-  const newest = visible[visible.length - 1];
-  const hold = Boolean(newest) && now - newest.t <= 3_000;
+  // The line always reaches `now`: a live reading is current, and a finished
+  // one is zero at its end, so the held tail is the flat line the meter has
+  // always drawn rather than a gap before the edge.
   if (smooth.length > 1) {
     const points = plotted.map((point, index) => ({ x: xOf(visible[index]), y: plottedY(index) }));
     const line = smoothPath(points);
     const first = points[0];
     const last = points[points.length - 1];
-    const endX = hold && last.x < width ? width : last.x;
+    const endX = last.x < width ? width : last.x;
     const heldLine = endX > last.x ? `${line} L ${endX.toFixed(1)},${last.y.toFixed(1)}` : line;
     nodes.line.setAttribute('d', heldLine);
     nodes.fill.setAttribute(
@@ -1069,8 +1071,8 @@ function drawLive(data) {
     showPart(nodes.dot, true);
     showPart(nodes.baseline, false);
   } else if (smooth.length === 1) {
-    // A single sample sits at its own time unless it is still current.
-    nodes.dot.setAttribute('cx', (hold ? width : xOf(visible[0])).toFixed(1));
+    // One sample is still a reading at now.
+    nodes.dot.setAttribute('cx', width.toFixed(1));
     nodes.dot.setAttribute('cy', plottedY(0).toFixed(1));
     showPart(nodes.dot, true);
     hidePath(nodes.line);

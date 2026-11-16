@@ -929,21 +929,21 @@ try {
   const coordinates = historyPart.match(/-?[\d]+(?:\.[\d]+)?/g).map(Number);
   const oldEndX = coordinates.at(-2);
   check(
-    'an old sample ends at its own time instead of being held to the edge',
-    held.liveRight < held.liveWidth * 0.85 &&
-      oldEndX < held.liveWidth * 0.85 &&
-      !held.livePathD.includes(` L ${held.liveWidth.toFixed(1)},`),
-    `${oldEndX} historical end, ${held.liveRight} curve end of ${held.liveWidth}`,
+    'the curve always reaches the now edge',
+    held.liveRight === held.liveWidth && held.livePathD.includes(` L ${held.liveWidth.toFixed(1)},`),
+    `${oldEndX} last sample, ${held.liveRight} curve end of ${held.liveWidth}`,
   );
 
-  // An idle graph must not hold its last sample to the edge as one long line.
-  const staleAt = Date.now() - 10_000;
-  await panel.set(state({ generatedAt: Date.now(), series: { t0: staleAt, step: 1000, v: [40, 60] } }));
-  const staleCurve = await panel.read();
+  // A finished graph holds its zero to the edge: a flat line at `now`, never a
+  // gap before it.
+  const idleAt = Date.now() - 10_000;
+  await panel.set(state({ generatedAt: Date.now(), series: { t0: idleAt, step: 1000, v: [40, 0] } }));
+  const idleCurve = await panel.read();
+  const idleBox = idleCurve.chartGeometry[0];
   check(
-    'an idle graph ends at its last sample instead of holding a long line',
-    staleCurve.chartGeometry[0].dotX !== null && staleCurve.chartGeometry[0].dotX < staleCurve.liveWidth - 5 && staleCurve.liveRight < staleCurve.liveWidth - 5,
-    `dot ${staleCurve.chartGeometry[0].dotX}, right ${staleCurve.liveRight} of ${staleCurve.liveWidth}`,
+    'a finished graph holds its flat zero to the now edge',
+    idleBox.dotX === idleCurve.liveWidth && idleCurve.liveRight === idleCurve.liveWidth && idleBox.dotY >= idleBox.height - 9,
+    `dot ${idleBox.dotX} of ${idleCurve.liveWidth}, y ${idleBox.dotY} of ${idleBox.height}`,
   );
   await panel.set(state());
 

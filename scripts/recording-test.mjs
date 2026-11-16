@@ -12,6 +12,7 @@ process.env.TOKEN_METER_NO_LISTEN = '1';
 process.env.TOKEN_METER_SCAN_MS = '150';
 process.env.TOKEN_METER_RECORD_FRESH_MS = '300';
 const { createService } = await import('../service/src/main.js');
+const { createRecordingStore } = await import('../service/src/recordings.js');
 let dir = await mkdtemp(path.join(os.tmpdir(), 'token-recordings-'));
 const records = new Map();
 const started = Date.now();
@@ -49,7 +50,13 @@ async function start() {
         historyReads += 1;
         return Response.json({ data: [] });
       }
-      const one = records.get(decodeURIComponent(u.pathname.split('/').at(-1)));
+      const id = decodeURIComponent(u.pathname.split('/').at(-1));
+      // A record read that is slow must not stop the idle graph reaching now.
+      if (id === 'ses_pending_zero') {
+        await new Promise((resolve) => setTimeout(resolve, 1500));
+        return new Response('{"message":"slow"}', { status: 503 });
+      }
+      const one = records.get(id);
       return one ? Response.json({ data: one }) : new Response('{"message":"not found"}', { status: 404 });
     },
   });
@@ -256,6 +263,24 @@ try {
   check('a permission wait with no generation is not saved as a recording', () => {
     assert.equal(perm.recording.state, 'unrecorded');
     assert.equal(perm.series.v.length, 0);
+  });
+  await stop();
+
+  // While a restored recording waits for its record read, an idle graph must
+  // still emit zero samples, or its last rate is held as a long line.
+  await stop();
+  const pendingSeed = createRecordingStore({ dataDir: dir });
+  pendingSeed.capture({
+    id: 'ses_pending_zero', captureStartedAt: Date.now() - 30_000, captureEndedAt: null,
+    series: [{ t: Date.now() - 30_000, v: 90 }], seriesLong: [], seriesWide: [],
+  }, Date.now());
+  await pendingSeed.flush();
+  await start();
+  await delay(600);
+  const pending = await state('ses_pending_zero');
+  check('an idle pending graph reaches now at zero', () => {
+    assert.equal(pending.recording.state, 'live');
+    assert.equal(pending.series.v.at(-1), 0);
   });
   await stop();
 
