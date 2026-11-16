@@ -62,7 +62,6 @@ Every release of Token Meter, newest first; one line per change, grouped by area
 - Hovering the steps chart no longer redraws it.
 - An idle graph redraws once a second instead of every frame.
 - The secret scan also checks uncommitted files and can no longer silently miss a leaked password.
-- `npm test` runs every suite.
 
 ## [1.9.1] - 2026-11-13
 
