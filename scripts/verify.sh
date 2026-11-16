@@ -50,6 +50,10 @@ fi
 
 run_step 'check' bun run check
 
+# Ports are per run so two gates (or a stale suite) can overlap safely.
+export PAGE_TEST_PORT="${PAGE_TEST_PORT:-$((41000 + ($$ % 900)))}"
+export COLLECTOR_TEST_PORT="${COLLECTOR_TEST_PORT:-$((43000 + ($$ % 900)))}"
+
 # ---- the independent suites, together ------------------------------------
 suites=(price collector page recording recording-store)
 codes=()
@@ -77,6 +81,7 @@ done
 
 # ---- the file scans, one at a time ----------------------------------------
 run_step 'secret-scan' bash scripts/secret-scan.sh
+run_step 'secret-scan-test' bash scripts/secret-scan-test.sh
 run_step 'check-changelog' bash scripts/check-changelog.sh
 
 if [ "${#failed[@]}" -ne 0 ]; then

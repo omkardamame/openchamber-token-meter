@@ -3,7 +3,7 @@
 // An optional file in the service's data directory lets the owner correct a
 // card without waiting for a release:
 //
-//   ~/.local/share/openchamber-tokens/price-overrides.json
+//   $OPENCHAMBER_SERVICE_DATA_DIR/price-overrides.json
 //   { "anthropic/claude-opus-5-5": { "input": 3.5, "output": 18,
 //                                    "cacheRead": 0.18, "cacheWrite": 4.5 } }
 //

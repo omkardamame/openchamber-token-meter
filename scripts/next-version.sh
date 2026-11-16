@@ -17,7 +17,9 @@ base=${last#v}
 IFS=. read -r major minor patch <<< "$base"
 
 shipped=$(git diff --name-only "${last}..HEAD" -- panel status service shared | wc -l | tr -d ' ')
-manifest=$(git diff "${last}..HEAD" -- package.json | grep -c '^[+-].*"openchamber"' || true)
+# Any manifest change ships; a nested contribution key can move without the
+# top-level one. A version bump alone is bookkeeping, not a change to ship.
+manifest=$(git diff -U0 "${last}..HEAD" -- package.json | grep -E '^[+-][^+-]' | grep -vc '"version"' || true)
 subjects=$(git log --format=%s "${last}..HEAD" 2>/dev/null || true)
 breaking=$(printf '%s\n' "$subjects" | grep -cE '^breaking(\(|:|!)|^[a-z]+(\([^)]*\))?!:' || true)
 features=$(printf '%s\n' "$subjects" | grep -cE '^feat(\(|:)' || true)

@@ -20,13 +20,13 @@ if ! grep -qE "^## \[${version//./\\.}\]" CHANGELOG.md; then
 fi
 
 notes=$(mktemp)
+trap 'rm -f "$notes"' EXIT
 awk -v v="## [${version}]" 'index($0,v)==1 {flag=1; next} /^## \[/ {flag=0} flag' CHANGELOG.md > "$notes"
 [ -s "$notes" ] || { echo "gh-release: the ${tag} section is empty" >&2; exit 1; }
 
 if [ "$print_only" -eq 1 ]; then
   sed -n '1,12p' "$notes"
   echo '…'
-  rm -f "$notes"
   exit 0
 fi
 
@@ -37,4 +37,3 @@ else
   gh release create "$tag" --title "${tag}" --notes-file "$notes" >/dev/null
   echo "gh-release: ${tag} published"
 fi
-rm -f "$notes"
