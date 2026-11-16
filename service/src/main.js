@@ -548,6 +548,11 @@ export function createService({ fetchImpl = fetch, log = () => {}, base = BASE, 
       collector.captureEndedAt = end;
       recordings.capture(collector, end);
       collector.captureDirty = false;
+    } else if (collector.watched && (collector.captureStartedAt || collector.series.length)) {
+      // A watched session that has a curve keeps drawing a flat line after its
+      // turn: the meter has always shown zero right up to `now`. A session
+      // never recorded stays empty so the frame can say so.
+      tick(collector, now, tree);
     }
     // Only the automatic tail is bounded: once a history has been read (a
     // watched session or a subagent of one) its chart keeps every step it loaded.

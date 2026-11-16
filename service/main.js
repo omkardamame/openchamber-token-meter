@@ -6493,6 +6493,8 @@ function createService({ fetchImpl = fetch, log = () => {}, base = BASE, token =
       collector.captureEndedAt = end;
       recordings.capture(collector, end);
       collector.captureDirty = false;
+    } else if (collector.watched && (collector.captureStartedAt || collector.series.length)) {
+      tick(collector, now, tree);
     }
     if (!collector.watched && collector.historyAt === 0 && collector.steps.length > AUTO_STEPS) {
       collector.steps.splice(0, collector.steps.length - AUTO_STEPS);
