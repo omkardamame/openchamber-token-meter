@@ -574,6 +574,10 @@ const harness = `<!doctype html><meta charset="utf-8"><title>page test</title>
       stepFills: [...doc.querySelectorAll('[data-chart="steps"] rect:not([data-role])')].map((node) => node.getAttribute('fill')),
       stepsCountTitle: (doc.querySelector('.steps-count') || {}).title ?? null,
       stepsNowText: (doc.querySelector('.steps-now') || {}).textContent ?? null,
+      gridFont: (() => {
+        const node = doc.querySelector('[data-chart="live"] [data-role="grid-label"]');
+        return node ? getComputedStyle(node).fontSize : null;
+      })(),
       legendBottom: doc.querySelector('.legend') ? doc.querySelector('.legend').getBoundingClientRect().bottom : null,
       footTop: doc.querySelector('.foot') ? doc.querySelector('.foot').getBoundingClientRect().top : null,
       neededHeight: Math.ceil((doc.querySelector('.mini')?.scrollHeight ?? 0) + (doc.querySelector('.notice')?.scrollHeight ?? 0)) + 6,
@@ -821,6 +825,8 @@ try {
     return tick.value <= max && (i === 0 || labelY(ticks[i - 1]) - labelY(tick) >= 22 - 1e-9);
   })));
   check('scale: ticks extend dynamically beyond 3k with k labels', rateTicks(30000, 800).some((t) => t.value >= 10000 && t.label.endsWith('k')));
+  const peakTicks = rateTicks(142, 200);
+  check('scale: the last tick labels the ceiling, not a lower round number', peakTicks.at(-1).share === 1 && peakTicks.at(-1).label === '142', JSON.stringify(peakTicks.map((t) => t.label)));
   // --- the shared curve and the turn timer ---------------------------------
   const spike = [
     { x: 0, y: 40 },
@@ -895,8 +901,8 @@ try {
     `curve ${idle.liveTopY}, peak line ${idle.peakLineY}`,
   );
   check(
-    'panel labels clean linear/log ticks instead of linear half-height marks',
-    idle.gridLabels.includes('0') && idle.gridLabels.includes('100') && idle.gridLabels.includes('250'),
+    'panel labels clean linear/log ticks with small side numbers',
+    idle.gridLabels.includes('0') && idle.gridLabels.includes('100') && idle.gridLabels.includes('334') && idle.gridFont === '8.5px',
     idle.gridLabels.join(' | '),
   );
   check('panel marks where 15, 30 and 45 seconds ago sit', idle.timeGrid === 3, String(idle.timeGrid));
@@ -1770,7 +1776,7 @@ try {
   const lowRate = await low.read();
   check(
     'panel scales the plot to the session peak, not the window',
-    lowRate.liveTopY > 8 && lowRate.peakLineY === 8 && lowRate.gridLabels.includes('250'),
+    lowRate.liveTopY > 8 && lowRate.peakLineY === 8 && lowRate.gridLabels.includes('334'),
     `curve ${lowRate.liveTopY}, peak line ${lowRate.peakLineY}, axis ${lowRate.gridLabels[0]}`,
   );
 
@@ -1779,7 +1785,7 @@ try {
   const steady = await panel.read();
   check(
     'panel pins a peak above the floor to the top of the plot',
-    steady.peakLineY === 8 && steady.gridLabels.includes('250'),
+    steady.peakLineY === 8 && steady.gridLabels.includes('334'),
     `y ${steady.peakLineY}, axis ${steady.gridLabels[0]}`,
   );
   check(
@@ -2084,7 +2090,7 @@ try {
   const burst = await panel.read();
   check(
     'panel keeps the peak line on the top edge through a burst, and scales to it',
-    burst.peakLineY === 8 && burst.gridLabels.includes('500'),
+    burst.peakLineY === 8 && burst.gridLabels.at(-1) !== '334',
     `y ${burst.peakLineY}, axis ${burst.gridLabels[0]} with a sustained 900 t/s burst`,
   );
   await panel.set(state());

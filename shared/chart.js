@@ -54,6 +54,18 @@ export function rateTicks(maximum, height, minGap = 22) {
       previousLabelY = labelY;
     }
   }
+  // Label the ceiling itself: below a burst's next clean tick the axis would
+  // otherwise stop at 100 while the red peak sits above it.
+  const ceiling = { value: max, share: 1, label: rateTickLabel(Math.round(max)) };
+  // Drop trailing ticks the ceiling would crowd out, then label the top. The
+  // label sits inside the plot near the edge (`+10`), so compare label
+  // positions, not shares.
+  const labelYAt = (share) => {
+    const y = height - share * height;
+    return y < 10 ? y + 10 : y - 3;
+  };
+  while (ticks.length && labelYAt(ticks[ticks.length - 1].share) - labelYAt(1) < minGap) ticks.pop();
+  ticks.push(ceiling);
   return ticks;
 }
 

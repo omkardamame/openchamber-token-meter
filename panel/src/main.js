@@ -847,7 +847,7 @@ function scaleGrid(maximum, width, height, pad) {
   return rateTicks(maximum, height - 2 * pad).map((tick) => {
     const y = height - pad - tick.share * (height - 2 * pad);
     return `<line x1="0" x2="${width}" y1="${y.toFixed(1)}" y2="${y.toFixed(1)}" stroke="var(--oc-border)" stroke-dasharray="2 4" opacity="0.6" />` +
-      `<text x="2" y="${(y < pad + 10 ? y + 10 : y - 3).toFixed(1)}" fill="var(--oc-muted)" font-size="9.5" data-role="grid-label">${tick.label}</text>`;
+      `<text x="2" y="${(y < pad + 10 ? y + 10 : y - 3).toFixed(1)}" fill="var(--oc-muted)" font-size="8.5" data-role="grid-label">${tick.label}</text>`;
   }).join('');
 }
 
