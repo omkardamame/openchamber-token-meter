@@ -487,7 +487,7 @@ function paintCost(data) {
         // The record can hold more steps than the meter keeps; say so, so the
         // Consumed cell and this rate can be reconciled.
         data.stepsKnown && data.steps?.length && data.stepsKnown > data.steps.length
-          ? ` · the record holds ${compact(data.stepsKnown)} steps, ${compact(data.steps.length)} priced`
+          ? ` · the record holds ${compact(data.stepsKnown)} steps, ${compact(data.steps.length)} kept`
           : ''
       }`
     : 'effective: this session’s cost divided by every token it processed';
@@ -500,6 +500,8 @@ function paintCost(data) {
   const tariff = cost.tariff && (cardIsCurrent || sameModel) && (!modelLabel || cost.tariff.model === modelLabel) ? cost.tariff : null;
   const rates = cost.rates && (cardIsCurrent || sameModel) ? cost.rates : null;
   const steps = data.stepsKnown ?? data.totals?.steps ?? 0;
+  // A record-seeded answer can carry real usage before any step list arrives.
+  const hasUsage = (data.totals?.consumed ?? 0) > 0;
 
   // Without a book the service sends the recorded cost and rates recovered from
   // its steps. That path keeps its own drawing: an older service must read
@@ -511,7 +513,7 @@ function paintCost(data) {
 
   // Nothing has finished yet: a card in the book says what the model will cost,
   // not what this session has run. Say that instead of drawing a table of zeroes.
-  if (steps === 0) {
+  if (steps === 0 && !hasUsage) {
     const line = el('div', 'rate-source');
     line.textContent = 'waiting for the first step';
     ui.costRates.replaceChildren(line);
@@ -1021,7 +1023,8 @@ function drawLive(data) {
     }
     if (labelY > height - 2) labelY = (avgLabelY ?? labelY) - 13;
     placeY(nodes.peak, y, width);
-    nodes['peak-label'].textContent = `${turnMode ? 'turn peak' : 'peak'} ${Math.round(ceilingPeak)} t/s${age ? ` · ${age} ago` : ''}`;
+    const ageText = age ? (endedAt === null ? ` · ${age} ago` : ` · ${dateClock(peakSince)}`) : '';
+    nodes['peak-label'].textContent = `${turnMode ? 'turn peak' : 'peak'} ${Math.round(ceilingPeak)} t/s${ageText}`;
     nodes['peak-label'].setAttribute('y', labelY.toFixed(1));
     showPart(nodes.peak, true);
     showPart(nodes['peak-label'], true);
@@ -1099,10 +1102,13 @@ function drawLive(data) {
       ? `peak ${Math.round(ceilingPeak)} t/s · ${compact(step.tokens)} tok in ${seconds(step.ms)}${step.sub ? ' · subagent' : ''}`
       : `peak ${Math.round(ceilingPeak)} t/s`;
   } else {
+    const hoverAge = endedAt === null
+      ? `${Math.max(0, Math.round((now - hovered?.at) / 1_000))} s ago`
+      : dateClock(hovered?.at);
     ui.peak.textContent = hovered
-      ? `${Math.round(hovered.value)} t/s · ${Math.max(0, Math.round((now - hovered.at) / 1_000))} s ago`
+      ? `${Math.round(hovered.value)} t/s · ${hoverAge}`
       : peakValue > 0
-        ? `live peak ${compact(peakValue)} t/s`
+        ? `${endedAt === null ? 'live peak' : 'window peak'} ${compact(peakValue)} t/s`
         : '';
   }
 }
@@ -1161,7 +1167,9 @@ function drawSteps(data) {
     (data.subagents?.loading ?? 0) > 0 || (data.subagents?.partial ?? 0) > 0 || data.historyPartial
       ? 'history is partial; the count is a lower bound'
       : limit
-        ? `zoomed in: the last ${limit} of ${all.length} steps are drawn`
+        ? stepPan > 0
+          ? `zoomed in: ${limit} of ${all.length} steps drawn, ending ${Math.round(stepPan)} back`
+          : `zoomed in: the last ${limit} of ${all.length} steps are drawn`
         : known > all.length
           ? `the last ${all.length} steps are drawn`
           : 'every step the meter keeps';
@@ -1184,15 +1192,31 @@ function drawSteps(data) {
     lastDrawnW = width;
     lastDrawnH = height;
     lastDrawnHover = null;
-    svg.innerHTML = `<text x="${(width / 2).toFixed(1)}" y="${(height / 2).toFixed(1)}" text-anchor="middle" fill="var(--oc-muted)" font-size="11">no finished steps yet</text>`;
+    const emptyText = stepFilter
+      ? 'no rated steps for this subagent yet'
+      : all.length > 0 || known > 0
+        ? 'no rated steps yet'
+        : 'no finished steps yet';
+    svg.innerHTML = `<text x="${(width / 2).toFixed(1)}" y="${(height / 2).toFixed(1)}" text-anchor="middle" fill="var(--oc-muted)" font-size="11">${emptyText}</text>`;
     return;
   }
   ui.stepsAxis.hidden = false;
   const firstDrawn = steps[0]?.at ?? data.stepsFrom;
   ui.stepsStart.textContent = firstDrawn ? `start ${dateClock(firstDrawn)}` : '';
   ui.stepsStart.title = 'the first step on the chart';
-  ui.stepsNow.textContent = `now ${dateClock(Date.now())}`;
-  ui.stepsNow.title = 'the current time';
+  const savedEnd = savedEndOf(data);
+  const lastDrawnAt = steps.at(-1)?.at ?? null;
+  const atRightEdge = stepPan === 0;
+  ui.stepsNow.textContent = savedEnd !== null
+    ? `ended ${dateClock(savedEnd)}`
+    : atRightEdge
+      ? `now ${dateClock(Date.now())}`
+      : `last ${dateClock(lastDrawnAt)}`;
+  ui.stepsNow.title = savedEnd !== null
+    ? 'the end of the recorded graph'
+    : atRightEdge
+      ? 'the current time'
+      : 'the newest step on the chart';
   // Tokens over stream time across the bars on screen: the green line and the
   // label describe the same steps the chart draws.
   const totalTokens = steps.reduce((sum, step) => sum + step.tokens, 0);
@@ -1357,7 +1381,7 @@ function paintModels(cost) {
   ui.modelsList.replaceChildren(...nodes);
 }
 
-function paintSubsDetail(members) {
+function paintSubsDetail(members, total = 0) {
   const list = Array.isArray(members) ? members : [];
   if (!subsDetailOpen || list.length === 0) {
     if (!subsDetailOpen && ui.subsDetail.hidden) {
@@ -1368,7 +1392,7 @@ function paintSubsDetail(members) {
     return;
   }
   ui.subsDetail.hidden = false;
-  ui.subsDetailMeta.textContent = `${Math.max(list.length, list.count ?? 0)} in this tree`;
+  ui.subsDetailMeta.textContent = `${Math.max(list.length, total)} in this tree`;
   const key = list.map((item) => `${item.id}:${item.steps}:${item.lastAt}:${item.cost}:${item.status}:${item.consumed}`).join('|');
   if (key === subsDetailKey) return;
   subsDetailKey = key;
@@ -1411,7 +1435,10 @@ function paintSubsDetail(members) {
     const when = el('span', 'sub-detail-when', !item.lastAt ? 'never' : age ? `${age} ago` : 'just now');
     head.append(dot, title, when);
     const stats = el('div', 'sub-detail-stats');
-    stats.textContent = `${compact(item.consumed ?? 0)} tok · ${item.cost > 0 ? money4(item.cost) : '$0'} · avg ${Math.round(item.avgTps ?? 0)} t/s · peak ${Math.round(item.peakTps ?? 0)} t/s · ${item.steps ?? 0} step${item.steps === 1 ? '' : 's'}`;
+    // A record-seeded member has tokens but no step list yet; "0 steps" would
+    // claim it did nothing.
+    const stepsText = item.steps > 0 ? ` · ${item.steps} step${item.steps === 1 ? '' : 's'}` : '';
+    stats.textContent = `${compact(item.consumed ?? 0)} tok · ${item.cost > 0 ? money4(item.cost) : '$0'} · avg ${Math.round(item.avgTps ?? 0)} t/s · peak ${Math.round(item.peakTps ?? 0)} t/s${stepsText}`;
     row.append(head, stats);
     nodes.push(row);
   }
@@ -1587,7 +1614,11 @@ function render(data) {
   const roster = Math.max(members.length, subagents.count ?? 0);
   ui.subsToggle.hidden = roster === 0;
   ui.subsToggle.textContent = `${roster} subagent${roster === 1 ? '' : 's'}`;
-  paintSubsDetail(members);
+  ui.subsToggle.dataset.filtered = stepFilter ? 'true' : 'false';
+  ui.subsToggle.title = stepFilter
+    ? 'the step chart is filtered to one subagent; open the list to change it'
+    : 'every subagent session in this tree';
+  paintSubsDetail(members, subagents.count ?? 0);
 
   const lastStep = data.live?.lastStep;
   // What the turn has consumed so far, not what the last step generated: the
@@ -1827,6 +1858,11 @@ host.onReady((ctx) => {
       stepHovering = false;
       stepResetAt = performance.now() + zoomResetMs();
     });
+    // A reader who tabs into the roster keeps it open; the timer restarts on
+    // every focus move and only closes it after they leave.
+    ui.subsDetail.addEventListener('focusin', () => {
+      subsDetailUntil = performance.now() + zoomResetMs();
+    });
     ui.subsToggle.addEventListener('click', () => {
       subsDetailOpen = !subsDetailOpen;
       subsDetailKey = '';
@@ -1942,7 +1978,12 @@ host.onReady((ctx) => {
         if (current && (!REDUCED_MOTION || liveZoomChanged) && (liveZoomChanged || savedEndOf(current) === null)) {
           drawLive(current);
         }
-        if (subsDetailOpen && !ui.subsDetail.matches(':hover') && at > subsDetailUntil) {
+        if (
+          subsDetailOpen &&
+          !ui.subsDetail.matches(':hover') &&
+          !ui.subsDetail.contains(document.activeElement) &&
+          at > subsDetailUntil
+        ) {
           subsDetailOpen = false;
           subsDetailKey = '';
           closeSubsDetail();
@@ -2041,6 +2082,9 @@ host.onReady((ctx) => {
   drawSteps({ steps: [], stepsKnown: 0 });
   drawLive({ points: [], rates: { avg: 0, peak: 0 } });
   ui.source.textContent = '';
+  // The footer names the previous session's recording or stream; it must not
+  // sit under the new session's name until the first answer lands.
+  ui.foot.textContent = '';
   if (!sessionId) {
     ui.app.style.display = 'none';
     stopPolling();

@@ -202,12 +202,17 @@ function clearNotice() {
 
 function render(data) {
   if (data.ok === false) {
-    if (banner) return;
-    banner = mountBanner(notice, {
-      tone: 'warning',
-      title: 'Token meter is not reading OpenCode',
-      body: data.error || 'Allow the extension in Settings → Extensions.',
-    });
+    if (!banner) {
+      banner = mountBanner(notice, {
+        tone: 'warning',
+        title: 'Token meter is not reading OpenCode',
+        body: data.error || 'Allow the extension in Settings → Extensions.',
+      });
+    }
+    // The banner is part of the section; without this the host keeps the old
+    // height and clips the last row. Measure again after layout settles.
+    fitHeight();
+    requestAnimationFrame(fitHeight);
     return;
   }
   clearNotice();
@@ -282,6 +287,8 @@ async function poll() {
             ? `The local service stopped: ${error instanceof Error ? error.message : String(error)}`
             : 'Open Settings → Extensions → Token Meter and allow the local service.',
       });
+      fitHeight();
+      requestAnimationFrame(fitHeight);
     }
   } finally {
     inflight = false;

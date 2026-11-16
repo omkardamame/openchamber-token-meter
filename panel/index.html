@@ -668,8 +668,10 @@
         display: none;
       }
       .block.steps {
-        flex: 1 1 auto;
-        min-height: 140px;
+        /* Grow into spare height, never shrink below the head, chart, axis
+           and legend: a squeezed block let them overflow onto the footer. */
+        flex: 1 0 auto;
+        min-height: 210px;
       }
       .block.steps .chart-wrap {
         flex: 1 1 auto;
@@ -723,6 +725,10 @@
       .chip:disabled {
         opacity: 0.6;
         cursor: default;
+      }
+      .chip[data-filtered='true'] {
+        color: var(--oc-fg);
+        border-color: var(--oc-primary);
       }
     </style>
   </head>

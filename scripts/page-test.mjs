@@ -102,6 +102,21 @@ const harness = `<!doctype html><meta charset="utf-8"><title>page test</title>
   window.__errors = [];
   window.addEventListener('error', (event) => window.__errors.push(String(event.message)));
   const frame = document.getElementById('f');
+  // Errors thrown inside an iframe do not reach this window's error event.
+  const watchFrame = () => {
+    try {
+      const w = frame.contentWindow;
+      if (!w || w.__meterWatched) return false;
+      w.__meterWatched = true;
+      w.addEventListener('error', (event) => window.__errors.push(String(event.message)));
+      w.addEventListener('unhandledrejection', (event) => window.__errors.push(String(event.reason)));
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  const watchTimer = setInterval(() => { if (watchFrame()) clearInterval(watchTimer); }, 20);
+  frame.addEventListener('load', watchFrame);
   const posts = [];
   window.__posts = posts;
   const ready = (session) => ({
@@ -132,7 +147,12 @@ const harness = `<!doctype html><meta charset="utf-8"><title>page test</title>
       else reply(answer);
       return;
     }
-    if (message.type === 'set-height') return;
+    // The SDK posts frame heights as resize; older hosts used set-height.
+    if (message.type === 'resize' || message.type === 'set-height') {
+      window.__heights.push(message.payload.height);
+      if (message.type === 'resize') reply({});
+      return;
+    }
     // The extension's server storage, kept in this page, and every toast the
     // frame asked for, so a test can count them.
     if (message.type === 'storage') {
@@ -152,6 +172,7 @@ const harness = `<!doctype html><meta charset="utf-8"><title>page test</title>
   });
   window.__storage = {};
   window.__toasts = [];
+  window.__heights = [];
   // Type into a field the way a reader does: the value, then an input event.
   window.__type = (selector, text) => {
     const frame = document.getElementById('f');
@@ -537,6 +558,10 @@ const harness = `<!doctype html><meta charset="utf-8"><title>page test</title>
       })),
       stepFills: [...doc.querySelectorAll('[data-chart="steps"] rect:not([data-role])')].map((node) => node.getAttribute('fill')),
       stepsCountTitle: (doc.querySelector('.steps-count') || {}).title ?? null,
+      stepsNowText: (doc.querySelector('.steps-now') || {}).textContent ?? null,
+      legendBottom: doc.querySelector('.legend') ? doc.querySelector('.legend').getBoundingClientRect().bottom : null,
+      footTop: doc.querySelector('.foot') ? doc.querySelector('.foot').getBoundingClientRect().top : null,
+      neededHeight: Math.ceil((doc.querySelector('.mini')?.scrollHeight ?? 0) + (doc.querySelector('.notice')?.scrollHeight ?? 0)) + 6,
       subsDetailText: (() => {
         const section = doc.querySelector('.subs-detail');
         if (!section) return null;
@@ -617,6 +642,9 @@ const server = createServer((req, res) => {
 
 // A second suite (or a parallel verify) must not fight for the same port.
 const port = Number(process.env.PAGE_TEST_PORT ?? 41_873);
+// Nor for the shared default agent-browser session: another agent's `open`
+// would navigate this suite's tab, and this suite's `close` would shut theirs.
+process.env.AGENT_BROWSER_SESSION ||= `token-meter-page-${process.pid}`;
 await new Promise((resolve) => server.listen(port, '127.0.0.1', resolve));
 
 if (spawnSync('agent-browser', ['--version'], { stdio: 'ignore' }).status !== 0) {
@@ -664,6 +692,7 @@ const run = async (page) => {
     click: async (selector) => Boolean(JSON.parse(await browser(['eval', `window.__click(${JSON.stringify(selector)})`]))),
     type: async (selector, text) => Boolean(JSON.parse(await browser(['eval', `window.__type(${JSON.stringify(selector)}, ${JSON.stringify(text)})`]))),
     budget: async () => JSON.parse(JSON.parse(await browser(['eval', 'JSON.stringify(window.__budget())']))),
+    heights: async () => JSON.parse(JSON.parse(await browser(['eval', 'JSON.stringify(window.__heights)']))),
     wheelFrames: async (selector, deltaY, frames) =>
       JSON.parse(await browser(['eval', `window.__wheelFrames(${JSON.stringify(selector)}, ${deltaY}, ${frames})`])),
     key: async (selector, key) => Boolean(JSON.parse(await browser(['eval', `window.__key(${JSON.stringify(selector)}, ${JSON.stringify(key)})`]))),
@@ -896,6 +925,16 @@ try {
   await panel.set({ ...oneBase, series: { t0: Date.now() - 2000, step: 250, v: [0, 0, 0, 0] } });
   const flat = await panel.read();
   check('panel leaves the scale unlabelled while nothing was measured', flat.gridLabels.length === 0, flat.gridLabels.join(' | '));
+  await panel.set(state({ stepsSeq: 905, stepsKnown: 2, steps: [
+    { tokens: 1, ms: 80, tps: null, aborted: false, at: Date.now() - 2000 },
+    { tokens: 1, ms: 120, tps: null, aborted: false, at: Date.now() - 1000 },
+  ] }));
+  const unrated = await panel.read();
+  check(
+    'panel says no rated steps, not no finished steps, when steps exist',
+    /no rated steps yet/.test(unrated.stepSvg) && !/no finished steps yet/.test(unrated.stepSvg),
+    unrated.stepSvg.slice(0, 120),
+  );
 
   const boundaryBase = state();
   await panel.set({ ...boundaryBase, live: { ...boundaryBase.live, lastStep: { ...boundaryBase.live.lastStep, tps: 19.6 } } });
@@ -1148,8 +1187,8 @@ try {
   await panel.set({ ...priced(), stepsKnown: 1_500, stepsSeq: 77 });
   const keptUi = await panel.read();
   check(
-    'UI-25 the effective rate says when the record holds more steps than were priced',
-    / · the record holds 1\.5k steps, 2 priced$/.test(keptUi.costRateTitle ?? ''),
+    'UI-25 the effective rate says when the record holds more steps than were kept',
+    / · the record holds 1\.5k steps, 2 kept$/.test(keptUi.costRateTitle ?? ''),
     String(keptUi.costRateTitle).slice(-80),
   );
   await panel.set(priced());
@@ -1213,7 +1252,8 @@ try {
     String(claudeUi.costRatesTitle),
   );
 
-  await panel.set({ ...priced({ lastTurn: null, perMillion: null, priceNote: 'noPrice', rates: null, total: null }), stepsKnown: 0 });
+  const emptyTotals = { ...state().totals, cacheRead: 0, cacheWrite: 0, consumed: 0, generated: 0, input: 0, output: 0, prompt: 0, reasoning: 0, steps: 0 };
+  await panel.set({ ...priced({ lastTurn: null, perMillion: null, priceNote: 'noPrice', rates: null, total: null }), stepsKnown: 0, totals: emptyTotals });
   const emptyUi = await panel.read();
   check(
     'UI-16 an empty session waits for its first step',
@@ -1234,12 +1274,22 @@ try {
   const fitUi = await panel.read();
   check('UI-18 the rates row does not overflow the rail', fitUi.costOverflow === 0, `${fitUi.costOverflow}px`);
 
-  await panel.set({ ...priced({ lastTurn: null, perMillion: null, priceNote: 'noPrice', total: null }), stepsKnown: 0 });
+  await panel.set({ ...priced({ lastTurn: null, perMillion: null, priceNote: 'noPrice', total: null }), stepsKnown: 0, totals: emptyTotals });
   const waitingCard = await panel.read();
   check(
     'UI-21 a known card with no steps still waits',
     waitingCard.costTotal === '—' && waitingCard.costSource === 'waiting for the first step' && waitingCard.costRows.length === 0,
     `${waitingCard.costTotal} ${waitingCard.costSource} ${waitingCard.costRows.length} rows`,
+  );
+
+  // A record-seeded answer has usage before any step list arrives; saying
+  // "waiting for the first step" over real tokens is wrong.
+  await panel.set({ ...priced({ total: 3 }), stepsKnown: 0 });
+  const seededUi = await panel.read();
+  check(
+    'UI-21b a record-seeded answer draws its card instead of waiting',
+    seededUi.costTotal === '$3.0000' && seededUi.costSource !== 'waiting for the first step',
+    `${seededUi.costTotal} ${seededUi.costSource}`,
   );
 
   await panel.set(priced({ rates: { ...CLAUDE_CARD, match: 'override', source: 'manual override' } }));
@@ -1416,6 +1466,7 @@ try {
   await panel.switchSession(state({ status: 'idle', live: { ...state().live, tps: 0 }, totals: { ...state().totals, input: 7_000, consumed: 9_000 } }), 'ses_slow');
   const cleanSwitch = await panel.read();
   check('panel clears the totals the moment the session switches', !/999k/.test(cleanSwitch.text), cleanSwitch.text.slice(0, 60));
+  check('panel clears the footer the moment the session switches', cleanSwitch.footText === '', JSON.stringify(cleanSwitch.footText));
   await panel.delay(0);
   await new Promise((resolve) => setTimeout(resolve, 1800));
   const trail = (await panel.trail()).slice(1);
@@ -1590,6 +1641,13 @@ try {
     'saved: the footer names the recorded graph and its end',
     savedUi.footText === `recorded graph · ${dateClockOf(recordedEnd)}`,
     String(savedUi.footText),
+  );
+  check(
+    'saved: the readouts use the recorded clock, not the wall clock',
+    !/\bago\b/.test(savedUi.peakLabelText ?? '') &&
+      /^window peak /.test(savedUi.peakText ?? '') &&
+      /^ended \d{1,2} [A-Z][a-z]{2} \d\d:\d\d:\d\d/.test(savedUi.stepsNowText ?? ''),
+    `${savedUi.peakLabelText} · ${savedUi.peakText} · ${savedUi.stepsNowText}`,
   );
   await panel.wait(700);
   const savedFrozen = await panel.read();
@@ -2033,6 +2091,11 @@ try {
   await panel.click('.subs-toggle');
   const subsOpen = await panel.read();
   check(
+    'UI-41 the roster header counts the tree, not just the rows shown',
+    /2 in this tree/.test(subsOpen.subsDetailText ?? ''),
+    String(subsOpen.subsDetailText).slice(0, 80),
+  );
+  check(
     'UI-41 clicking it lists every subagent session with its own numbers',
     subsOpen.subsDetailShown === true && subsOpen.subsDetailDisplay === 'flex' &&
       /reading the spec/.test(subsOpen.subsDetailText ?? '') &&
@@ -2311,6 +2374,26 @@ try {
   check('panel respects reduced motion instead of continuously scrolling history', calmCadence.frames >= 10 && calmCadence.changed <= 2, JSON.stringify(calmCadence));
   await browser(['set', 'media', 'dark']);
 
+  // A short frame plus a busy roster used to squeeze the Steps block below its
+  // content, so the axis and legend overflowed under the footer.
+  const crowded = state({
+    status: 'streaming',
+    subagents: { active: [1, 2, 3, 4].map((i) => ({ id: `ses_over_${i}`, title: `child ${i}`, status: 'streaming', tps: 40 })), count: 4, loading: 4, partial: 0, running: 4, streaming: 4, tool: 0, members: [] },
+    stepsSeq: 906,
+    stepsKnown: 60,
+    steps: Array.from({ length: 60 }, (_, i) => ({ aborted: false, at: Date.now() - (60 - i) * 2000, cost: 0.001, ms: 1500, tokens: 200, tps: 120 })),
+  });
+  await panel.set(crowded);
+  await browser(['eval', `document.getElementById('f').style.height = '420px'`]);
+  await panel.wait(500);
+  const shortFrame = await panel.read();
+  check(
+    'the steps block never overflows onto the footer in a short frame',
+    shortFrame.legendBottom !== null && shortFrame.footTop !== null && shortFrame.legendBottom <= shortFrame.footTop + 0.5,
+    `legend ${shortFrame.legendBottom} vs foot ${shortFrame.footTop}`,
+  );
+  await browser(['eval', `document.getElementById('f').style.height = '900px'`]);
+
   // --- the Work Status section --------------------------------------------
   const status = await run('status');
   const sIdle = await status.read();
@@ -2486,6 +2569,17 @@ try {
   check('Work Status curve follows display frames without pointer input', statusCadence.frames >= 10 && statusCadence.changed >= statusCadence.frames * 0.8, JSON.stringify(statusCadence));
   const statusHighRefresh = await status.fastFrames();
   check('Work Status curve draws on every 120 Hz callback', statusHighRefresh === 40, `${statusHighRefresh} draws / 40 frames`);
+
+  await status.set({ ...state(), ok: false, error: 'OpenCode access is not available.' });
+  await status.wait(400);
+  const bannerUi = await status.read();
+  const heights = await status.heights();
+  check(
+    'status grows its frame for an error banner instead of clipping the grid',
+    heights.length > 0 && heights.at(-1) >= bannerUi.neededHeight - 1,
+    `heights ${heights.join(',')} needed ${bannerUi.neededHeight}`,
+  );
+  await status.set(state());
 
   // A section with no chat open says why it is empty instead of drawing a box.
   await status.switchSession(state(), null);
