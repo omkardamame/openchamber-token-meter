@@ -173,6 +173,21 @@ const harness = `<!doctype html><meta charset="utf-8"><title>page test</title>
   window.__storage = {};
   window.__toasts = [];
   window.__heights = [];
+  // Dot height on each animation frame after an answer, to catch easing that
+  // should have been a single remap.
+  window.__dotFrames = (next, count) => new Promise((resolve) => {
+    const view = frame.contentWindow;
+    const doc = frame.contentDocument;
+    window.__setState(next);
+    const out = [];
+    let left = count;
+    const step = () => {
+      const dot = doc.querySelector('[data-n="dot"]');
+      out.push(dot ? Number(Number(dot.getAttribute('cy')).toFixed(2)) : null);
+      if (left-- <= 0) resolve(out); else view.requestAnimationFrame(step);
+    };
+    view.requestAnimationFrame(step);
+  });
   // Type into a field the way a reader does: the value, then an input event.
   window.__type = (selector, text) => {
     const frame = document.getElementById('f');
@@ -693,6 +708,7 @@ const run = async (page) => {
     type: async (selector, text) => Boolean(JSON.parse(await browser(['eval', `window.__type(${JSON.stringify(selector)}, ${JSON.stringify(text)})`]))),
     budget: async () => JSON.parse(JSON.parse(await browser(['eval', 'JSON.stringify(window.__budget())']))),
     heights: async () => JSON.parse(JSON.parse(await browser(['eval', 'JSON.stringify(window.__heights)']))),
+    dotFrames: async (next, count) => JSON.parse(JSON.parse(await browser(['eval', `(async () => JSON.stringify(await window.__dotFrames(${JSON.stringify(next)}, ${count})))()`]))),
     wheelFrames: async (selector, deltaY, frames) =>
       JSON.parse(await browser(['eval', `window.__wheelFrames(${JSON.stringify(selector)}, ${deltaY}, ${frames})`])),
     key: async (selector, key) => Boolean(JSON.parse(await browser(['eval', `window.__key(${JSON.stringify(selector)}, ${JSON.stringify(key)})`]))),
@@ -933,6 +949,20 @@ try {
     held.liveRight === held.liveWidth && held.livePathD.includes(` L ${held.liveWidth.toFixed(1)},`),
     `${oldEndX} last sample, ${held.liveRight} curve end of ${held.liveWidth}`,
   );
+
+  // A finished step can raise the session peak and so the ceiling. The remap
+  // must be one frame, not a visible slide of the whole curve.
+  const jumpNow = Date.now();
+  const preJump = state({ status: 'streaming', generatedAt: jumpNow, rates: { avg: 80, peak: 150, peakAt: jumpNow - 5000 }, series: { t0: jumpNow - 4000, step: 250, v: [60, 90, 120, 140] } });
+  await panel.set(preJump);
+  const jumpState = { ...preJump, status: 'idle', generatedAt: Date.now(), rates: { avg: 80, peak: 900, peakAt: Date.now() }, series: { t0: jumpNow - 4000, step: 250, v: [60, 90, 120, 140, 0] } };
+  const jumpFrames = await panel.dotFrames(jumpState, 30);
+  check(
+    'a changed ceiling remaps the curve in one frame, not a slide',
+    new Set(jumpFrames.filter((y) => y !== null)).size <= 2,
+    jumpFrames.join(','),
+  );
+  await panel.set(state());
 
   // A finished graph holds its zero to the edge: a flat line at `now`, never a
   // gap before it.

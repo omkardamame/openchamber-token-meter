@@ -86,6 +86,7 @@ let lastDrawnKey = '';
 let lastDrawnW = 0;
 let lastDrawnH = 0;
 let lastDrawnHover = null;
+let plottedCeiling = 0;
 let drawnSteps = [];
 let drawnSlot = 0;
 const animateCurve = createCurveMotion();
@@ -958,10 +959,15 @@ function drawLive(data) {
   const max = rateCeiling(Math.max(ceilingPeak, rates.avg));
   const share = (value) => symlogShare(value, max);
   const lineY = (value) => height - pad - share(value) * (height - pad * 2);
+  // A changed ceiling remaps every point at once. Easing that remap made the
+  // whole curve slide when a finished step raised the peak (the "compensating
+  // for scale" slope at a turn's end); only sample values may travel.
+  const scaleJump = max !== plottedCeiling;
+  plottedCeiling = max;
   const plotted = animateCurve(
     visible.map((point, index) => ({ t: point.t, v: share(smooth[index]) })),
     performance.now(),
-    REDUCED_MOTION,
+    REDUCED_MOTION || scaleJump,
   );
   const plottedY = (index) => height - pad - plotted[index].v * (height - pad * 2);
   const xOf = (point) => ((point.t - from) / liveWindowMs) * width;
