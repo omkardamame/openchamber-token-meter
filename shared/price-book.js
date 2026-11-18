@@ -26,7 +26,7 @@ export const PRICE_BOOK = {
       }
     }
   },
-  "checkedAt": "2026-11-14",
+  "checkedAt": "2026-11-18",
   "currency": "USD",
   "providers": {
     "anthropic": {
@@ -280,6 +280,50 @@ export const PRICE_BOOK = {
           "tiers": [],
           "release": "2026-06-01"
         },
+        "Qwen/Qwen3.6-Plus": {
+          "cost": {
+            "cacheRead": 0.1,
+            "cacheWrite": 0,
+            "input": 0.5,
+            "output": 3
+          },
+          "name": "Qwen3.6 Plus",
+          "tiers": [],
+          "release": "2026-04-02"
+        },
+        "Qwen/Qwen3.7-Flash": {
+          "cost": {
+            "cacheRead": 0.006,
+            "cacheWrite": 0,
+            "input": 0.03,
+            "output": 0.13
+          },
+          "name": "Qwen3.7 Flash",
+          "tiers": [],
+          "release": "2026-07-15"
+        },
+        "Qwen/Qwen3.7-Max": {
+          "cost": {
+            "cacheRead": 0.5,
+            "cacheWrite": 0,
+            "input": 2.5,
+            "output": 7.5
+          },
+          "name": "Qwen3.7 Max",
+          "tiers": [],
+          "release": "2026-05-21"
+        },
+        "Qwen/Qwen3.7-Plus": {
+          "cost": {
+            "cacheRead": 0.08,
+            "cacheWrite": 0,
+            "input": 0.4,
+            "output": 1.6
+          },
+          "name": "Qwen3.7 Plus",
+          "tiers": [],
+          "release": "2026-06-02"
+        },
         "Qwen/Qwen3.8-27B": {
           "cost": {
             "cacheRead": 0.04,
@@ -323,6 +367,17 @@ export const PRICE_BOOK = {
           "name": "Qwen3.8 Max 0902",
           "tiers": [],
           "release": "2026-09-02"
+        },
+        "Qwen/Qwen3.8-Max-Prime": {
+          "cost": {
+            "cacheRead": 0.5,
+            "cacheWrite": 0,
+            "input": 4,
+            "output": 12
+          },
+          "name": "Qwen 3.8 Max Prime",
+          "tiers": [],
+          "release": "2026-09-23"
         },
         "Qwen/Qwen3.8-Omni-Flash": {
           "cost": {
@@ -821,6 +876,17 @@ export const PRICE_BOOK = {
           ],
           "release": "2026-10-26"
         },
+        "inclusionai/ling-3.1-flash": {
+          "cost": {
+            "cacheRead": 0.06,
+            "cacheWrite": 0,
+            "input": 0.3,
+            "output": 0.9
+          },
+          "name": "Ling 3.1 Flash",
+          "tiers": [],
+          "release": "2026-09-29"
+        },
         "inclusionai/ling-3.1-flash:free": {
           "cost": {
             "cacheRead": 0,
@@ -831,6 +897,17 @@ export const PRICE_BOOK = {
           "name": "Ling 3.1 Flash",
           "tiers": [],
           "release": "2026-09-29"
+        },
+        "meituan/LongCat-2.0": {
+          "cost": {
+            "cacheRead": 0.006,
+            "cacheWrite": 0,
+            "input": 0.3,
+            "output": 1.2
+          },
+          "name": "LongCat-2.0",
+          "tiers": [],
+          "release": "2026-06-30"
         },
         "meta/muse-spark-1.1": {
           "cost": {
@@ -887,6 +964,17 @@ export const PRICE_BOOK = {
           "tiers": [],
           "release": "2026-09-02"
         },
+        "meta/muse-spark-open": {
+          "cost": {
+            "cacheRead": 0.15,
+            "cacheWrite": 0,
+            "input": 1.25,
+            "output": 4.25
+          },
+          "name": "Muse Spark Open",
+          "tiers": [],
+          "release": "2026-10-15"
+        },
         "meta/muse-wonder-1.0": {
           "cost": {
             "cacheRead": 0.2,
@@ -898,6 +986,17 @@ export const PRICE_BOOK = {
           "tiers": [],
           "release": "2026-10-12"
         },
+        "minimax/minimax-m3.1-flash": {
+          "cost": {
+            "cacheRead": 0.015,
+            "cacheWrite": 0,
+            "input": 0.15,
+            "output": 0.6
+          },
+          "name": "MiniMax-M3.1-Flash",
+          "tiers": [],
+          "release": "2026-10-19"
+        },
         "mistral/mistral-large-4": {
           "cost": {
             "cacheRead": 0.14,
@@ -908,6 +1007,28 @@ export const PRICE_BOOK = {
           "name": "Mistral Large 4",
           "tiers": [],
           "release": "2026-10-06"
+        },
+        "moonshotai/Kimi-K2.5": {
+          "cost": {
+            "cacheRead": 0.1,
+            "cacheWrite": 0,
+            "input": 0.6,
+            "output": 3
+          },
+          "name": "Kimi K2.5",
+          "tiers": [],
+          "release": "2026-01-27"
+        },
+        "moonshotai/Kimi-K2.6": {
+          "cost": {
+            "cacheRead": 0.16,
+            "cacheWrite": 0,
+            "input": 0.95,
+            "output": 4
+          },
+          "name": "Kimi K2.6",
+          "tiers": [],
+          "release": "2026-04-20"
         },
         "moonshotai/Kimi-K2.7-Code": {
           "cost": {
@@ -942,6 +1063,17 @@ export const PRICE_BOOK = {
           "tiers": [],
           "release": "2026-07-16"
         },
+        "moonshotai/Kimi-K3.1-Pro": {
+          "cost": {
+            "cacheRead": 0.2,
+            "cacheWrite": 0,
+            "input": 2,
+            "output": 10
+          },
+          "name": "Kimi K3.1 Pro",
+          "tiers": [],
+          "release": "2026-10-23"
+        },
         "nvidia/nemotron-3-ultra-550b-a55b": {
           "cost": {
             "cacheRead": 0.12,
@@ -953,6 +1085,50 @@ export const PRICE_BOOK = {
           "tiers": [],
           "release": "2026-06-04"
         },
+        "nvidia/nemotron-3.5-super-vl": {
+          "cost": {
+            "cacheRead": 0.04,
+            "cacheWrite": 0,
+            "input": 0.2,
+            "output": 0.5
+          },
+          "name": "Nemotron 3.5 Super VL 120B A12B",
+          "tiers": [],
+          "release": "2026-10-15"
+        },
+        "ornith/ornith-1.5-122b": {
+          "cost": {
+            "cacheRead": 0.02,
+            "cacheWrite": 0,
+            "input": 0.16,
+            "output": 0.64
+          },
+          "name": "Ornith 1.5 122B",
+          "tiers": [],
+          "release": "2026-10-20"
+        },
+        "poolside/laguna-s-2.1-free": {
+          "cost": {
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "input": 0,
+            "output": 0
+          },
+          "name": "Laguna S 2.1",
+          "tiers": [],
+          "release": "2026-07-21"
+        },
+        "reflection/beam:free": {
+          "cost": {
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "input": 0,
+            "output": 0
+          },
+          "name": "Beam 1.0",
+          "tiers": [],
+          "release": "2026-10-05"
+        },
         "sakana/fugu-ultra": {
           "cost": {
             "cacheRead": 0.5,
@@ -963,6 +1139,17 @@ export const PRICE_BOOK = {
           "name": "Fugu Ultra",
           "tiers": [],
           "release": "2026-06-15"
+        },
+        "stealth/glyph-cluster:free": {
+          "cost": {
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "input": 0,
+            "output": 0
+          },
+          "name": "Glyph Cluster",
+          "tiers": [],
+          "release": "2026-10-07"
         },
         "stepfun/Step-3.5-Flash": {
           "cost": {
@@ -1094,6 +1281,39 @@ export const PRICE_BOOK = {
           ],
           "release": "2026-09-21"
         },
+        "xiaomi/mimo-v2.6-flash": {
+          "cost": {
+            "cacheRead": 0.0028,
+            "cacheWrite": 0,
+            "input": 0.14,
+            "output": 0.28
+          },
+          "name": "MiMo-V2.6-Flash",
+          "tiers": [],
+          "release": "2026-09-22"
+        },
+        "xiaomi/mimo-v2.6-pro": {
+          "cost": {
+            "cacheRead": 0.0036,
+            "cacheWrite": 0,
+            "input": 0.435,
+            "output": 0.87
+          },
+          "name": "MiMo-V2.6-Pro",
+          "tiers": [],
+          "release": "2026-09-22"
+        },
+        "xiaomi/mimo-v2.6-pro-ultraspeed": {
+          "cost": {
+            "cacheRead": 0.036,
+            "cacheWrite": 0,
+            "input": 4.35,
+            "output": 8.7
+          },
+          "name": "MiMo-V2.6-Pro-UltraSpeed",
+          "tiers": [],
+          "release": "2026-09-21"
+        },
         "z-ai/glm-5.3-flash": {
           "cost": {
             "cacheRead": 0.03,
@@ -1115,6 +1335,17 @@ export const PRICE_BOOK = {
           "name": "GLM-5.3-FlashX",
           "tiers": [],
           "release": "2026-08-26"
+        },
+        "zai-org/GLM-5": {
+          "cost": {
+            "cacheRead": 0.2,
+            "cacheWrite": 0,
+            "input": 1,
+            "output": 3.2
+          },
+          "name": "GLM-5",
+          "tiers": [],
+          "release": "2026-02-12"
         },
         "zai-org/GLM-5.2": {
           "cost": {
@@ -1731,6 +1962,48 @@ export const PRICE_BOOK = {
           ],
           "release": "2026-10-26"
         },
+        "gpt-6.2-astra": {
+          "cost": {
+            "cacheRead": 0.4,
+            "cacheWrite": 10,
+            "input": 8,
+            "output": 40
+          },
+          "name": "GPT-6.2 Astra",
+          "tiers": [
+            {
+              "cost": {
+                "cacheRead": 0.8,
+                "cacheWrite": 20,
+                "input": 16,
+                "output": 60
+              },
+              "minContext": 272000
+            }
+          ],
+          "release": "2026-11-17"
+        },
+        "gpt-6.2-sol": {
+          "cost": {
+            "cacheRead": 0.1,
+            "cacheWrite": 2.5,
+            "input": 2,
+            "output": 10
+          },
+          "name": "GPT-6.2 Sol",
+          "tiers": [
+            {
+              "cost": {
+                "cacheRead": 0.2,
+                "cacheWrite": 5,
+                "input": 4,
+                "output": 15
+              },
+              "minContext": 272000
+            }
+          ],
+          "release": "2026-11-17"
+        },
         "gpt-daybreak-blue-latest": {
           "cost": {
             "cacheRead": 0.4,
@@ -1773,17 +2046,6 @@ export const PRICE_BOOK = {
           "name": "gpt-image-1.5",
           "tiers": [],
           "release": "2025-11-25"
-        },
-        "gpt-image-2": {
-          "cost": {
-            "cacheRead": 1.25,
-            "cacheWrite": 0,
-            "input": 5,
-            "output": 30
-          },
-          "name": "gpt-image-2",
-          "tiers": [],
-          "release": "2026-04-21"
         },
         "gpt-realtime-2.1": {
           "cost": {
@@ -2877,6 +3139,48 @@ export const PRICE_BOOK = {
           ],
           "release": "2026-09-29"
         },
+        "gpt-6.2-astra": {
+          "cost": {
+            "cacheRead": 0.4,
+            "cacheWrite": 10,
+            "input": 8,
+            "output": 40
+          },
+          "name": "GPT-6.2 Astra",
+          "tiers": [
+            {
+              "cost": {
+                "cacheRead": 0.8,
+                "cacheWrite": 20,
+                "input": 16,
+                "output": 60
+              },
+              "minContext": 272000
+            }
+          ],
+          "release": "2026-11-17"
+        },
+        "gpt-6.2-sol": {
+          "cost": {
+            "cacheRead": 0.1,
+            "cacheWrite": 2.5,
+            "input": 2,
+            "output": 10
+          },
+          "name": "GPT-6.2 Sol",
+          "tiers": [
+            {
+              "cost": {
+                "cacheRead": 0.2,
+                "cacheWrite": 5,
+                "input": 4,
+                "output": 15
+              },
+              "minContext": 272000
+            }
+          ],
+          "release": "2026-11-17"
+        },
         "grok-4.5": {
           "cost": {
             "cacheRead": 0.3,
@@ -2983,6 +3287,17 @@ export const PRICE_BOOK = {
           "name": "Hy3 preview Free",
           "tiers": [],
           "release": "2026-04-20"
+        },
+        "hy4-flash-free": {
+          "cost": {
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "input": 0,
+            "output": 0
+          },
+          "name": "Hy4 flash Free",
+          "tiers": [],
+          "release": "2026-11-16"
         },
         "iceman-free": {
           "cost": {
@@ -3832,6 +4147,17 @@ export const PRICE_BOOK = {
           "tiers": [],
           "release": "2026-11-04"
         },
+        "hy4-flash-free": {
+          "cost": {
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "input": 0,
+            "output": 0
+          },
+          "name": "Hy4 flash Free",
+          "tiers": [],
+          "release": "2026-11-16"
+        },
         "hy4-preview": {
           "cost": {
             "cacheRead": 0.042,
@@ -4082,6 +4408,17 @@ export const PRICE_BOOK = {
           "name": "Qwen3.8 Max",
           "tiers": [],
           "release": "2026-08-03"
+        },
+        "qwen4-max": {
+          "cost": {
+            "cacheRead": 0.075,
+            "cacheWrite": 1.875,
+            "input": 1.5,
+            "output": 4.5
+          },
+          "name": "Qwen4 Max",
+          "tiers": [],
+          "release": "2026-11-16"
         },
         "space-bunny": {
           "cost": {
