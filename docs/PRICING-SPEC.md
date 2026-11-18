@@ -506,6 +506,10 @@ Anthropic list · 2026-11-14
 - Do not scrape provider pages at runtime. A price change is a release.
 - If OpenCode later allowlists `/api/model`, prefer it over the book for
   metered providers and keep the book for subscriptions (their `cost` is empty).
+- Measured 2026-11-18: `/api/model` exists and returns the base cost plus the
+  context tier for metered models (`opencode`, e.g. `gpt-6.2-sol` at 2/10/0.1/2.5),
+  but `cost: []` for the `openai` models on the ChatGPT plan. Subscription
+  sessions therefore still need the book, whatever the list does.
 
 ### 9.2 Reconciliation
 
