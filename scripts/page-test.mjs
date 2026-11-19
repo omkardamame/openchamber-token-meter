@@ -13,7 +13,7 @@ import { execFile, spawnSync } from 'node:child_process';
 import { promisify } from 'node:util';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { createCurveMotion, nextScale, rateCeiling, rateTicks, seriesPoints, smoothPath, symlogShare } from '../shared/chart.js';
+import { createCurveMotion, drawDue, nextScale, rateCeiling, rateTicks, seriesPoints, smoothPath, symlogShare } from '../shared/chart.js';
 import { duration } from '../shared/summary.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -266,11 +266,11 @@ const harness = `<!doctype html><meta charset="utf-8"><title>page test</title>
     );
     return true;
   };
-  // How often the live curve is actually redrawn: count mutations of the path's
-  // own d attribute for a while. A 12.5 fps chart answers about 7 in 600 ms.
-  window.__drawRate = (ms) => new Promise((resolve) => {
+  // How often a chart path is actually redrawn: count mutations of its own d
+  // attribute for a while. A 12.5 fps chart answers about 7 in 600 ms.
+  window.__drawRate = (ms, selector = '[data-chart="live"] path[data-role="live-line"]') => new Promise((resolve) => {
     const frame = document.getElementById('f');
-    const line = frame.contentDocument.querySelector('[data-chart="live"] path[data-role="live-line"]');
+    const line = frame.contentDocument.querySelector(selector);
     if (!line) { resolve(-1); return; }
     let count = 0;
     const observer = new MutationObserver(() => { count += 1; });
@@ -748,7 +748,9 @@ const run = async (page) => {
       await browser(['eval', `window.__switchSession(${JSON.stringify(next)}, ${JSON.stringify(id)})`]);
       await new Promise((resolve) => setTimeout(resolve, 500));
     },
-    drawRate: async (ms = 600) => Number(JSON.parse(await browser(['eval', `window.__drawRate(${ms})`]))),
+    drawRate: async (ms = 600, selector) =>
+      Number(JSON.parse(await browser(['eval', `window.__drawRate(${ms}${selector ? `, ${JSON.stringify(selector)}` : ''})`]))),
+    screenshot: async (file) => browser(['screenshot', file]),
     chartCadence: async (ms = 600) => JSON.parse(JSON.parse(await browser(['eval', `(async () => JSON.stringify(await window.__chartCadence(${ms})))()`]))),
     fastFrames: async () => Number(JSON.parse(await browser(['eval', 'window.__fastFrames()']))),
     hiddenDraws: async (ms = 600) => Number(JSON.parse(await browser(['eval', `window.__hiddenDraws(${ms})`]))),
@@ -852,6 +854,21 @@ try {
   curveMotion([], 200);
   check('an empty curve resets motion so the next session inherits no heights', curveMotion([{ t: 1, v: 0.1 }], 201)[0].v === 0.1);
   check('reduced motion reads the target height immediately', curveMotion([{ t: 1, v: 0.8 }], 202, true)[0].v === 0.8);
+  // The idle paint clock both surfaces share: five draws a second at rest,
+  // every callback while something animates.
+  check('the paint clock lets the first idle frame through', drawDue(false, -Infinity, 5_000, 200));
+  check('the paint clock holds an idle frame inside 200 ms', !drawDue(false, 5_000, 5_199, 200));
+  check('the paint clock releases the idle frame at 200 ms', drawDue(false, 5_000, 5_200, 200));
+  check('the paint clock draws every callback while something animates', drawDue(true, 5_000, 5_001, 200));
+  let idleClock = -Infinity;
+  let idleDrawsInSecond = 0;
+  for (let at = 0; at < 1_000; at += 1_000 / 60) {
+    if (drawDue(false, idleClock, at, 200)) {
+      idleClock = at;
+      idleDrawsInSecond += 1;
+    }
+  }
+  check('a second of idle callbacks is five draws, not sixty', idleDrawsInSecond === 5, `${idleDrawsInSecond} draws`);
   const scaleAfter = (hz) => {
     let scale = 1000;
     for (let i = 0; i < hz; i += 1) scale = nextScale(scale, [100], 1000 / hz);
@@ -1947,9 +1964,25 @@ try {
   check('UI-31 a 120 Hz display is not capped by a 16 ms redraw gate', highRefreshDraws === 40, `${highRefreshDraws} draws / 40 frames`);
   const panelRise = await measureCurveRise(panel);
   check('rail curve rises through intermediate heights alongside the eased number', panelRise.frames >= 6 && panelRise.heights >= 6, JSON.stringify(panelRise));
+  // An idle session still slides its history left, but the loop redraws it at
+  // 5 fps instead of at the display rate: rebuilding the same curve on every
+  // frame cost ~25% of a core and half the window server (issue #1). An answer
+  // from the service still draws on arrival, so the newest point is never late.
   await panel.set(state({ status: 'idle' }));
+  await panel.wait(300);
+  const idleDraws = await panel.drawRate(1_000);
+  check(
+    'UI-31 an idle graph redraws about 5 times a second, not on every display frame',
+    idleDraws >= 4 && idleDraws <= 10,
+    `${idleDraws} path writes in 1 s`,
+  );
   const idleCadence = await panel.chartCadence();
-  check('UI-31 idle history keeps scrolling at display cadence without the cursor', idleCadence.frames >= 10 && idleCadence.changed >= idleCadence.frames * 0.8, JSON.stringify(idleCadence));
+  check(
+    'UI-31 idle history keeps advancing, in 200 ms steps',
+    idleCadence.frames >= 10 && idleCadence.changed >= 2 && idleCadence.changed <= idleCadence.frames * 0.4,
+    JSON.stringify(idleCadence),
+  );
+  await panel.screenshot(path.join(process.env.TMPDIR ?? '/tmp', 'token-meter-panel-idle.png'));
   const hiddenDraws = await panel.hiddenDraws();
   check('UI-31 hidden frames do not redraw the live chart', hiddenDraws === 0, `${hiddenDraws} draws while hidden`);
   await panel.set(state({ totals: { ...state().totals, source: 'history' } }));
@@ -2571,6 +2604,15 @@ try {
   check('Work Status curve follows display frames without pointer input', statusCadence.frames >= 10 && statusCadence.changed >= statusCadence.frames * 0.8, JSON.stringify(statusCadence));
   const statusHighRefresh = await status.fastFrames();
   check('Work Status curve draws on every 120 Hz callback', statusHighRefresh === 40, `${statusHighRefresh} draws / 40 frames`);
+  // The spark is the same free-running loop: idle still scrolls it, at 5 fps.
+  await status.set(state({ status: 'idle' }));
+  await new Promise((resolve) => setTimeout(resolve, 400));
+  const idleSparkDraws = await status.drawRate(1_000, '[data-chart="spark"] path[data-role="spark-line"]');
+  check(
+    'Work Status spark redraws about 5 times a second at idle, not on every frame',
+    idleSparkDraws >= 4 && idleSparkDraws <= 10,
+    `${idleSparkDraws} path writes in 1 s`,
+  );
 
   await status.set({ ...state(), ok: false, error: 'OpenCode access is not available.' });
   await status.wait(400);

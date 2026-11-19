@@ -230,3 +230,13 @@ export function smoothPath(points) {
   }
   return d;
 }
+
+/**
+ * Whether a free-running paint loop should draw on this callback. Anything that
+ * animates (a streaming turn, an eased zoom, a hover readout) draws on every
+ * frame; a picture that only slides sideways waits for the idle clock, so an
+ * idle frame stops rebuilding a path nobody can see change.
+ */
+export function drawDue(fullRate, lastDrawAt, now, idleMs) {
+  return fullRate || now - lastDrawAt >= idleMs;
+}

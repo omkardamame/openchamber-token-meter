@@ -1,7 +1,7 @@
 import { HostRequestError, connectHost } from '@openchamber/sdk';
 import { applyHostReady, mountBanner, mountButton, mountEmpty, mountTextField } from '@openchamber/sdk/ui';
 import { compact, duration, percent, seconds } from '../../shared/summary.js';
-import { createCurveMotion, easeToward, rateCeiling, rateTicks, seriesPoints, smoothPath, symlogShare } from '../../shared/chart.js';
+import { createCurveMotion, drawDue, easeToward, rateCeiling, rateTicks, seriesPoints, smoothPath, symlogShare } from '../../shared/chart.js';
 import { dotState, mountCells, paintCells } from '../../shared/cells.js';
 import { el } from '../../shared/dom.js';
 import { speedTier } from '../../shared/speed-color.js';
@@ -39,6 +39,10 @@ const ZOOM_MAX_MS = 3_600_000;
 // instead of three jumps.
 const ZOOM_STEP = 1.18;
 const ZOOM_EASE_MS = 170;
+// An idle chart only slides sideways: one pixel per step at the default zoom.
+// Redrawing it at the display rate rebuilt the same path 60 times a second and
+// cost ~25% of a core (issue #1). A poll answer still draws on arrival.
+const IDLE_DRAW_MS = 200;
 // Long enough to read the wider view, short enough that it is a passing look.
 // Hovering the chart holds it; leaving starts the clock again.
 // One minute in use. A page test sets window.__zoomResetMs to watch the reset
@@ -96,6 +100,7 @@ let drawnHoverCol = null;
 // The last idle flat-zero drawing, so the live loop can skip a picture that
 // cannot change (see drawLive).
 let lastIdleKey = null;
+let lastIdleDrawAt = -Infinity;
 const animateCurve = createCurveMotion();
 
 // A reader who asked the system for less motion gets the measured number
@@ -2016,9 +2021,20 @@ host.onReady((ctx) => {
           liveWindowMs += (liveTargetMs - liveWindowMs) * k;
           if (Math.abs(liveTargetMs - liveWindowMs) < 40) liveWindowMs = liveTargetMs;
         }
-        // One live draw per animation callback, including during zoom. Less
-        // motion keeps poll-based updates and an immediate zoom instead.
-        if (current && (!REDUCED_MOTION || liveZoomChanged)) drawLive(current);
+        // Streaming, zoom and a hover readout follow the display clock; an idle
+        // graph only slides sideways, so it redraws on the idle clock instead
+        // of rebuilding the same path on every frame (issue #1). `dt` above is
+        // still the real elapsed time, so every ease keeps its time constant,
+        // and a poll answer draws on arrival through render().
+        const liveFullRate = streamingNow || liveZoomChanged || liveHoverX !== null;
+        if (
+          current &&
+          (!REDUCED_MOTION || liveZoomChanged) &&
+          drawDue(liveFullRate, lastIdleDrawAt, at, IDLE_DRAW_MS)
+        ) {
+          lastIdleDrawAt = at;
+          drawLive(current);
+        }
         if (
           subsDetailOpen &&
           !ui.subsDetail.matches(':hover') &&

@@ -1,7 +1,7 @@
 import { HostRequestError, connectHost } from '@openchamber/sdk';
 import { applyHostReady, mountBanner } from '@openchamber/sdk/ui';
 import { seconds } from '../../shared/summary.js';
-import { compress, createCurveMotion, easeToward, nextScale, seriesPoints, smoothPath } from '../../shared/chart.js';
+import { compress, createCurveMotion, drawDue, easeToward, nextScale, seriesPoints, smoothPath } from '../../shared/chart.js';
 import { dotState, mountCells, paintCells } from '../../shared/cells.js';
 import { el } from '../../shared/dom.js';
 import { speedTier } from '../../shared/speed-color.js';
@@ -11,6 +11,9 @@ const root = document.querySelector('#root');
 if (!root) throw new Error('Missing #root');
 
 const POLL_MS = 500;
+// An idle spark only slides sideways: at this width 200 ms is sub-pixel, so it
+// redraws at 5 fps instead of at the display rate (issue #1).
+const IDLE_DRAW_MS = 200;
 
 let sessionId = null;
 let timer = null;
@@ -26,6 +29,7 @@ let pollGeneration = 0;
 let lastHeight = 0;
 let receivedAt = 0;
 let sparkScale = 1;
+let lastIdleDrawAt = -Infinity;
 let sparkDrawAt = null;
 let sparkNodes = null;
 const animateCurve = createCurveMotion();
@@ -325,7 +329,14 @@ host.onReady((ctx) => {
       lastFrame = stamp;
       if (!document.hidden) {
         animateSpeed(dt);
-        if (current && !REDUCED_MOTION) drawSpark(current);
+        // A working session follows the display clock; an idle spark only
+        // scrolls sideways, so it draws on the idle clock (issue #1). A poll
+        // answer still draws on arrival through render().
+        const at = performance.now();
+        if (current && !REDUCED_MOTION && drawDue(streamingNow, lastIdleDrawAt, at, IDLE_DRAW_MS)) {
+          lastIdleDrawAt = at;
+          drawSpark(current);
+        }
       }
     };
     requestAnimationFrame(paint);
