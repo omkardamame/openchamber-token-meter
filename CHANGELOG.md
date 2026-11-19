@@ -2,11 +2,11 @@
 
 Every release of Token Meter, newest first; one line per change, grouped by area — what shipped in that tag.
 
-## [Unreleased]
+## [2.0.1] - 2026-11-20
 
 ### ⚡ Performance
 
-- **Idle cost:** the rail graph and the Work Status spark now redraw an idle picture at 5 fps instead of on every display frame. A session that had just finished a turn rebuilt its whole curve ~60 times a second, which cost about 25% of a core, 23% of the GPU process and 51% of the window server while nothing changed ([#1](https://github.com/omkardamame/openchamber-token-meter/issues/1)). A turn that is producing output, a zoom and a hover readout still draw every frame, and an answer from the service still draws on arrival.
+- **Idle cost:** the rail graph and the Work Status spark now redraw an idle picture at 5 fps instead of on every display frame. A session that had just finished a turn rebuilt its whole curve ~60 times a second, which cost about 25% of a core, 23% of the GPU process and 51% of the window server while nothing changed. A turn that is producing output, a zoom and a hover readout still draw every frame, and an answer from the service still draws on arrival. Reported by [@oxoxoxox](https://github.com/oxoxoxox) in [#1](https://github.com/omkardamame/openchamber-token-meter/issues/1).
 
 ## [2.0.0] - 2026-11-17
 
