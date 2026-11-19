@@ -101,6 +101,11 @@ let drawnHoverCol = null;
 // cannot change (see drawLive).
 let lastIdleKey = null;
 let lastIdleDrawAt = -Infinity;
+// The idle slide: the curve is rebuilt on the idle clock and moved with a
+// transform in between, so history scrolls at the display rate without
+// rebuilding the path on every frame.
+let liveDrawnAt = 0;
+let liveDrawnWidth = 0;
 const animateCurve = createCurveMotion();
 
 // A reader who asked the system for less motion gets the measured number
@@ -825,8 +830,10 @@ function ensureLive(svg, width, height, pad) {
     `<g data-n="scale"></g>` +
     timeLines +
     `<line data-n="baseline" x1="0" x2="${width}" stroke="var(--oc-primary)" stroke-width="1.6" opacity="0.45" />` +
+    `<g data-n="scroll">` +
     `<path data-n="fill" fill="url(#tm-live-fill)" data-role="live-fill" />` +
     `<path data-n="line" fill="none" stroke="var(--oc-primary)" stroke-width="1.6" stroke-linejoin="round" stroke-linecap="round" data-role="live-line" />` +
+    `</g>` +
     `<circle data-n="dot" r="2.6" fill="var(--oc-primary)" />` +
     `<line data-n="avg" x1="0" x2="${width}" stroke="var(--oc-success)" stroke-width="1" stroke-dasharray="3 3" opacity="0.7" data-role="live-avg" />` +
     `<text data-n="avg-label" x="${width - 2}" text-anchor="end" fill="var(--oc-success)" font-size="9.5" opacity="0.85"></text>` +
@@ -930,6 +937,8 @@ function drawLive(data) {
       : data.points;
   const series = Array.isArray(source) ? source : [];
   const now = projectedNow(data);
+  liveDrawnAt = now;
+  liveDrawnWidth = width;
   const from = now - liveWindowMs;
   const windowSeconds = Math.round(liveWindowMs / 1_000);
   // Seconds up close, minutes once the number would be noise.
@@ -1096,11 +1105,14 @@ function drawLive(data) {
     const first = points[0];
     const last = points[points.length - 1];
     const endX = last.x < width ? width : last.x;
-    const heldLine = endX > last.x ? `${line} L ${endX.toFixed(1)},${last.y.toFixed(1)}` : line;
+    // The idle slide translates this drawing, so a held tail reaches one pixel
+    // past the edge: after a sub-pixel slide it still covers the edge.
+    const tailX = last.x < width ? width + 1 : last.x;
+    const heldLine = tailX > last.x ? `${line} L ${tailX.toFixed(1)},${last.y.toFixed(1)}` : line;
     nodes.line.setAttribute('d', heldLine);
     nodes.fill.setAttribute(
       'd',
-      `${heldLine} L ${endX.toFixed(1)},${baseline.toFixed(1)} L ${first.x.toFixed(1)},${baseline.toFixed(1)} Z`,
+      `${heldLine} L ${tailX.toFixed(1)},${baseline.toFixed(1)} L ${first.x.toFixed(1)},${baseline.toFixed(1)} Z`,
     );
     nodes.dot.setAttribute('cx', endX.toFixed(1));
     nodes.dot.setAttribute('cy', last.y.toFixed(1));
@@ -1138,6 +1150,8 @@ function drawLive(data) {
         ? `live peak ${compact(peakValue)} t/s`
         : '';
   }
+  // This path is drawn for the current `from`: undo the idle slide.
+  if (nodes.scroll) nodes.scroll.setAttribute('transform', 'translate(0 0)');
 }
 
 /**
@@ -2037,6 +2051,15 @@ host.onReady((ctx) => {
         ) {
           lastIdleDrawAt = at;
           drawLive(current);
+        }
+        // Idle motion is a pure slide: the path is rebuilt on the idle clock,
+        // and between rebuilds the drawn curve moves by a transform, so history
+        // scrolls on every display frame without another path rebuild.
+        if (!REDUCED_MOTION && current && liveSkeleton?.scroll) {
+          const since = projectedNow(current) - liveDrawnAt;
+          const px = liveDrawnWidth > 0 ? (since / liveWindowMs) * liveDrawnWidth : 0;
+          const shift = Math.max(0, Math.min(2, px));
+          liveSkeleton.scroll.setAttribute('transform', `translate(${(-shift).toFixed(2)} 0)`);
         }
         if (
           subsDetailOpen &&

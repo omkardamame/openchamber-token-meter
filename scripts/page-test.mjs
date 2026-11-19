@@ -305,10 +305,30 @@ const harness = `<!doctype html><meta charset="utf-8"><title>page test</title>
     };
     view.requestAnimationFrame(sample);
   });
+  // How the idle slide moves the drawn curve: transform changes per animation
+  // frame, with no path rebuild.
+  window.__slideRate = (ms) => new Promise((resolve) => {
+    const view = frame.contentWindow;
+    const group = frame.contentDocument.querySelector('[data-chart="live"] [data-n="scroll"]');
+    if (!group) { resolve({ frames: 0, moves: 0 }); return; }
+    let previous = group.getAttribute('transform');
+    let frames = 0;
+    let moves = 0;
+    let started = null;
+    const sample = (stamp) => {
+      if (started === null) started = stamp;
+      const next = group.getAttribute('transform');
+      if (next !== previous) moves += 1;
+      previous = next;
+      frames += 1;
+      if (stamp - started >= ms) resolve({ frames, moves });
+      else view.requestAnimationFrame(sample);
+    };
+    view.requestAnimationFrame(sample);
+  });
   // Drive the existing frame loop with 120 Hz timestamps to catch a fixed
   // 16 ms gate even on a test machine whose display only runs at 60 Hz.
-  window.__fastFrames = async () => {
-    const view = frame.contentWindow;
+  window.__fastFrames = async () => {    const view = frame.contentWindow;
     const original = view.requestAnimationFrame;
     const queue = [];
     view.requestAnimationFrame = (callback) => { queue.push(callback); return queue.length; };
@@ -760,6 +780,7 @@ const run = async (page) => {
     screenshot: async (file) => browser(['screenshot', file]),
     chartCadence: async (ms = 600) => JSON.parse(JSON.parse(await browser(['eval', `(async () => JSON.stringify(await window.__chartCadence(${ms})))()`]))),
     fastFrames: async () => Number(JSON.parse(await browser(['eval', 'window.__fastFrames()']))),
+    slideRate: async (ms = 500) => JSON.parse(JSON.parse(await browser(['eval', `(async () => JSON.stringify(await window.__slideRate(${ms})))()`]))),
     hiddenDraws: async (ms = 600) => Number(JSON.parse(await browser(['eval', `window.__hiddenDraws(${ms})`]))),
     curveRise: async (next) => JSON.parse(JSON.parse(await browser(['eval', `(async () => JSON.stringify(await window.__curveRise(${JSON.stringify(next)})))()`]))),
     fastZoomReset: async (ms) => {
@@ -960,7 +981,7 @@ try {
   const anchored = await panel.read();
   check(
     'a current live sample keeps the dot on the now edge',
-    anchored.chartGeometry[0].dotX === anchored.liveWidth && anchored.liveRight === anchored.liveWidth,
+    anchored.chartGeometry[0].dotX === anchored.liveWidth && anchored.liveRight >= anchored.liveWidth,
     `${anchored.chartGeometry[0].dotX}/${anchored.liveRight} of ${anchored.liveWidth}`,
   );
   await panel.set(state());
@@ -1032,7 +1053,9 @@ try {
   const oldEndX = coordinates.at(-2);
   check(
     'the curve always reaches the now edge',
-    held.liveRight === held.liveWidth && held.livePathD.includes(` L ${held.liveWidth.toFixed(1)},`),
+    // The held tail runs one pixel past the edge so the idle slide still
+    // covers it; the SVG clips the extra pixel.
+    held.liveRight >= held.liveWidth && held.liveRight <= held.liveWidth + 1,
     `${oldEndX} last sample, ${held.liveRight} curve end of ${held.liveWidth}`,
   );
 
@@ -1058,7 +1081,7 @@ try {
   const idleBox = idleCurve.chartGeometry[0];
   check(
     'a finished graph holds its flat zero to the now edge',
-    idleBox.dotX === idleCurve.liveWidth && idleCurve.liveRight === idleCurve.liveWidth && idleBox.dotY >= idleBox.height - 9,
+    idleBox.dotX === idleCurve.liveWidth && idleCurve.liveRight >= idleCurve.liveWidth && idleCurve.liveRight <= idleCurve.liveWidth + 1 && idleBox.dotY >= idleBox.height - 9,
     `dot ${idleBox.dotX} of ${idleCurve.liveWidth}, y ${idleBox.dotY} of ${idleBox.height}`,
   );
   // A flat zero line cannot change between seconds, so the live loop must not
@@ -1990,6 +2013,14 @@ try {
     idleCadence.frames >= 10 && idleCadence.changed >= 2 && idleCadence.changed <= idleCadence.frames * 0.4,
     JSON.stringify(idleCadence),
   );
+  // The path is rebuilt five times a second; the slide moves the same drawing
+  // on every frame, so the history still scrolls smoothly at idle.
+  const idleSlide = await panel.slideRate(500);
+  check(
+    'UI-31 an idle curve slides on every frame without a path rebuild',
+    idleSlide.frames >= 10 && idleSlide.moves >= idleSlide.frames * 0.8,
+    JSON.stringify(idleSlide),
+  );
   await panel.screenshot(path.join(process.env.TMPDIR ?? '/tmp', 'token-meter-panel-idle.png'));
   // A zoom and a pointer readout are real motion: they keep every display
   // frame, or the ease turns back into 200 ms steps.
@@ -2426,6 +2457,8 @@ try {
   );
   const calmCadence = await calm.chartCadence();
   check('panel respects reduced motion instead of continuously scrolling history', calmCadence.frames >= 10 && calmCadence.changed <= 2, JSON.stringify(calmCadence));
+  const calmSlide = await calm.slideRate(500);
+  check('panel does not slide the curve for a reader who asked for less motion', calmSlide.moves === 0, JSON.stringify(calmSlide));
   await browser(['set', 'media', 'dark']);
 
   // A short frame plus a busy roster used to squeeze the Steps block below its

@@ -6,7 +6,7 @@ Every release of Token Meter, newest first; one line per change, grouped by area
 
 ### ⚡ Performance
 
-**Idle cost.** The rail graph and the Work Status spark now redraw an idle picture at 5 fps instead of on every display frame. A turn that is producing output, a zoom and a hover readout still draw every frame, and an answer from the service still draws on arrival.
+**Idle cost.** The rail graph and the Work Status spark now rebuild an idle picture at 5 fps instead of on every display frame; the rail curve moves on a transform between rebuilds, so its history still scrolls smoothly. A turn that is producing output, a zoom and a hover readout still draw every frame, and an answer from the service still draws on arrival.
 
 Measured on the real app over three 25 s idle windows (means):
 
