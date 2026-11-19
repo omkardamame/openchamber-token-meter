@@ -6,7 +6,7 @@ Every release of Token Meter, newest first; one line per change, grouped by area
 
 ### ⚡ Performance
 
-- **Idle cost:** the rail graph and the Work Status spark now redraw an idle picture at 5 fps instead of on every display frame. Measured on the real app over three 25 s idle windows (means): WindowServer 28.7% → 5.1%, GPU 25.2% → 6.0%, UI renderer 19.0% → 6.2%. A turn that is producing output, a zoom and a hover readout still draw every frame, and an answer from the service still draws on arrival. Reported by [@oxoxoxox](https://github.com/oxoxoxox) in [#1](https://github.com/omkardamame/openchamber-token-meter/issues/1).
+- **Idle cost:** the rail graph and the Work Status spark now redraw an idle picture at 5 fps instead of on every display frame. Measured on the real app over three 25 s idle windows (means): WindowServer 34.8% → 5.5%, GPU 33.3% → 6.2%, UI renderer 25.5% → 5.8%. A turn that is producing output, a zoom and a hover readout still draw every frame, and an answer from the service still draws on arrival. Reported by [@oxoxoxox](https://github.com/oxoxoxox) in [#1](https://github.com/omkardamame/openchamber-token-meter/issues/1).
 
 ## [2.0.0] - 2026-11-17
 
