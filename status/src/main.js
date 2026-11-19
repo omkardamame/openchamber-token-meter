@@ -327,6 +327,8 @@ host.onReady((ctx) => {
       requestAnimationFrame(paint);
       const dt = lastFrame ? Math.min(200, stamp - lastFrame) : 16;
       lastFrame = stamp;
+      // Same limit as the panel: Electron may not report an app-hidden window,
+      // so an idle spark there is bounded by the idle clock, not stopped.
       if (!document.hidden) {
         animateSpeed(dt);
         // A working session follows the display clock; an idle spark only

@@ -266,6 +266,13 @@ const harness = `<!doctype html><meta charset="utf-8"><title>page test</title>
     );
     return true;
   };
+  window.__leave = (selector) => {
+    const frame = document.getElementById('f');
+    const node = frame.contentDocument.querySelector(selector);
+    if (!node) return false;
+    node.dispatchEvent(new frame.contentWindow.PointerEvent('pointerleave', { bubbles: true }));
+    return true;
+  };
   // How often a chart path is actually redrawn: count mutations of its own d
   // attribute for a while. A 12.5 fps chart answers about 7 in 600 ms.
   window.__drawRate = (ms, selector = '[data-chart="live"] path[data-role="live-line"]') => new Promise((resolve) => {
@@ -782,6 +789,7 @@ const run = async (page) => {
       await new Promise((resolve) => setTimeout(resolve, 120));
       return done;
     },
+    leave: async (selector) => Boolean(JSON.parse(await browser(['eval', `window.__leave(${JSON.stringify(selector)})`]))),
     wait: async (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
     delay: async (ms) => {
       await browser(['eval', `window.__delayMs = ${ms}`]);
@@ -1983,6 +1991,17 @@ try {
     JSON.stringify(idleCadence),
   );
   await panel.screenshot(path.join(process.env.TMPDIR ?? '/tmp', 'token-meter-panel-idle.png'));
+  // A zoom and a pointer readout are real motion: they keep every display
+  // frame, or the ease turns back into 200 ms steps.
+  await panel.wheel('[data-chart="live"]', 120);
+  const zoomDraws = await panel.fastFrames();
+  check('UI-31 a zoom ease still draws on every display frame', zoomDraws >= 20, `${zoomDraws} draws / 40 frames`);
+  await panel.wheel('[data-chart="live"]', -120);
+  await panel.wait(500);
+  await panel.hoverAt('[data-chart="live"]', 120, 60);
+  const hoverDraws = await panel.fastFrames();
+  check('UI-31 a pointer readout still draws on every display frame', hoverDraws === 40, `${hoverDraws} draws / 40 frames`);
+  await panel.leave('[data-chart="live"]');
   const hiddenDraws = await panel.hiddenDraws();
   check('UI-31 hidden frames do not redraw the live chart', hiddenDraws === 0, `${hiddenDraws} draws while hidden`);
   await panel.set(state({ totals: { ...state().totals, source: 'history' } }));

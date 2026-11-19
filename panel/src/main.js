@@ -2008,6 +2008,9 @@ host.onReady((ctx) => {
       requestAnimationFrame(paint);
       const dt = lastFrame ? Math.min(200, stamp - lastFrame) : 16;
       lastFrame = stamp;
+      // Electron can leave document.hidden false when the whole app is hidden.
+      // No occlusion signal crosses the SDK, so an idle frame in that state is
+      // bounded by the idle clock instead of stopped.
       if (ui && !document.hidden) {
         animateSpeed(dt);
         // Both charts ease towards their target every frame, so a gesture and
