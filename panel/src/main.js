@@ -43,6 +43,11 @@ const ZOOM_EASE_MS = 170;
 // Redrawing it at the display rate rebuilt the same path 60 times a second and
 // cost ~25% of a core (issue #1). A poll answer still draws on arrival.
 const IDLE_DRAW_MS = 200;
+// The curve slides at most this far between rebuilds; the held tail reaches as
+// far past the edge, so a slide at the clamp cannot open a gap. Set per draw
+// from the chart width, since a wider chart slides further in 200 ms.
+let liveScrollMax = 2;
+let lastSlideShift = 0;
 // Long enough to read the wider view, short enough that it is a passing look.
 // Hovering the chart holds it; leaving starts the clock again.
 // One minute in use. A page test sets window.__zoomResetMs to watch the reset
@@ -826,11 +831,13 @@ function ensureLive(svg, width, height, pad) {
     `<stop offset="0%" stop-color="var(--oc-primary)" stop-opacity="0.38" />` +
     `<stop offset="55%" stop-color="var(--oc-primary)" stop-opacity="0.12" />` +
     `<stop offset="100%" stop-color="var(--oc-primary)" stop-opacity="0" />` +
-    `</linearGradient></defs>` +
+    `</linearGradient>` +
+    `<clipPath id="tm-live-clip"><rect x="0" y="0" width="${width}" height="${height}" /></clipPath>` +
+    `</defs>` +
     `<g data-n="scale"></g>` +
     timeLines +
     `<line data-n="baseline" x1="0" x2="${width}" stroke="var(--oc-primary)" stroke-width="1.6" opacity="0.45" />` +
-    `<g data-n="scroll">` +
+    `<g data-n="scroll" clip-path="url(#tm-live-clip)">` +
     `<path data-n="fill" fill="url(#tm-live-fill)" data-role="live-fill" />` +
     `<path data-n="line" fill="none" stroke="var(--oc-primary)" stroke-width="1.6" stroke-linejoin="round" stroke-linecap="round" data-role="live-line" />` +
     `</g>` +
@@ -937,8 +944,6 @@ function drawLive(data) {
       : data.points;
   const series = Array.isArray(source) ? source : [];
   const now = projectedNow(data);
-  liveDrawnAt = now;
-  liveDrawnWidth = width;
   const from = now - liveWindowMs;
   const windowSeconds = Math.round(liveWindowMs / 1_000);
   // Seconds up close, minutes once the number would be noise.
@@ -977,6 +982,11 @@ function drawLive(data) {
   } else {
     lastIdleKey = null;
   }
+  // This draw defines the picture the slide moves. A skipped flat draw leaves
+  // the previous basis alone, so the slide never assumes a path not drawn.
+  liveDrawnAt = now;
+  liveDrawnWidth = width;
+  liveScrollMax = Math.max(1, Math.ceil((IDLE_DRAW_MS / liveWindowMs) * width));
 
   // Smooth in rate units, then map to the axis: geometry never feeds back into
   // a measured value, a reference line's rate or the hover readout.
@@ -1105,9 +1115,9 @@ function drawLive(data) {
     const first = points[0];
     const last = points[points.length - 1];
     const endX = last.x < width ? width : last.x;
-    // The idle slide translates this drawing, so a held tail reaches one pixel
-    // past the edge: after a sub-pixel slide it still covers the edge.
-    const tailX = last.x < width ? width + 1 : last.x;
+    // The idle slide translates this drawing, so a held tail reaches past the
+    // edge by the maximum slide: after a sub-pixel shift it still covers it.
+    const tailX = Math.max(last.x, width + liveScrollMax);
     const heldLine = tailX > last.x ? `${line} L ${tailX.toFixed(1)},${last.y.toFixed(1)}` : line;
     nodes.line.setAttribute('d', heldLine);
     nodes.fill.setAttribute(
@@ -1151,7 +1161,10 @@ function drawLive(data) {
         : '';
   }
   // This path is drawn for the current `from`: undo the idle slide.
-  if (nodes.scroll) nodes.scroll.setAttribute('transform', 'translate(0 0)');
+  if (nodes.scroll) {
+    nodes.scroll.setAttribute('transform', 'translate(0 0)');
+    lastSlideShift = 0;
+  }
 }
 
 /**
@@ -2058,8 +2071,11 @@ host.onReady((ctx) => {
         if (!REDUCED_MOTION && current && liveSkeleton?.scroll) {
           const since = projectedNow(current) - liveDrawnAt;
           const px = liveDrawnWidth > 0 ? (since / liveWindowMs) * liveDrawnWidth : 0;
-          const shift = Math.max(0, Math.min(2, px));
-          liveSkeleton.scroll.setAttribute('transform', `translate(${(-shift).toFixed(2)} 0)`);
+          const shift = Math.round(Math.max(0, Math.min(liveScrollMax, px)) * 100) / 100;
+          if (shift !== lastSlideShift) {
+            lastSlideShift = shift;
+            liveSkeleton.scroll.setAttribute('transform', `translate(${(-shift).toFixed(2)} 0)`);
+          }
         }
         if (
           subsDetailOpen &&

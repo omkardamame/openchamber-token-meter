@@ -326,9 +326,33 @@ const harness = `<!doctype html><meta charset="utf-8"><title>page test</title>
     };
     view.requestAnimationFrame(sample);
   });
+  // The sliding curve must still cover the right edge at its largest offset.
+  // getBBox is local to the path, so subtract the group's translate by hand.
+  window.__edgeCover = (ms) => new Promise((resolve) => {
+    const view = frame.contentWindow;
+    const doc = frame.contentDocument;
+    const svg = doc.querySelector('[data-chart="live"]');
+    const line = svg && svg.querySelector('path[data-role="live-line"]');
+    const group = svg && svg.querySelector('[data-n="scroll"]');
+    if (!line || !group) { resolve({ width: 0, min: 0 }); return; }
+    const width = svg.clientWidth;
+    let worst = Infinity;
+    let started = null;
+    const sample = (stamp) => {
+      if (started === null) started = stamp;
+      const match = /translate\\((-?[\\d.]+)/.exec(group.getAttribute('transform') || '');
+      const shift = Math.abs(match ? Number(match[1]) : 0);
+      const box = line.getBBox();
+      worst = Math.min(worst, box.x + box.width - shift);
+      if (stamp - started >= ms) resolve({ width, min: Math.round(worst * 100) / 100 });
+      else view.requestAnimationFrame(sample);
+    };
+    view.requestAnimationFrame(sample);
+  });
   // Drive the existing frame loop with 120 Hz timestamps to catch a fixed
   // 16 ms gate even on a test machine whose display only runs at 60 Hz.
-  window.__fastFrames = async () => {    const view = frame.contentWindow;
+  window.__fastFrames = async () => {
+    const view = frame.contentWindow;
     const original = view.requestAnimationFrame;
     const queue = [];
     view.requestAnimationFrame = (callback) => { queue.push(callback); return queue.length; };
@@ -674,6 +698,12 @@ const harness = `<!doctype html><meta charset="utf-8"><title>page test</title>
         const line = doc.querySelector('[data-chart="live"] path[data-role="live-line"]');
         return line ? line.getAttribute('d') : null;
       })(),
+      liveClip: (() => {
+        const group = doc.querySelector('[data-chart="live"] [data-n="scroll"]');
+        const rect = doc.querySelector('#tm-live-clip rect');
+        if (!group || !rect) return null;
+        return { attr: group.getAttribute('clip-path'), width: Number(rect.getAttribute('width')) };
+      })(),
       sparkD: (() => {
         const line = doc.querySelector('[data-chart="spark"] path[data-role="spark-line"]');
         return line ? line.getAttribute('d') : null;
@@ -763,7 +793,19 @@ const browser = async (args) => (await run_('agent-browser', args, { timeout: 30
 const run = async (page) => {
   await browser(['open', `http://127.0.0.1:${port}/${page}`]);
   await browser(['set', 'viewport', '460', '960']);
-  await new Promise((resolve) => setTimeout(resolve, 1500));
+  // The harness defines __read after the host handshake. A fixed wait failed
+  // when another suite shared the machine; wait for the function instead.
+  let ready = false;
+  for (let attempt = 0; attempt < 40 && !ready; attempt += 1) {
+    try {
+      ready = (await browser(['eval', 'typeof window.__read === "function"'])).trim() === 'true';
+    } catch {
+      ready = false;
+    }
+    if (!ready) await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+  if (!ready) throw new Error(`page harness did not become ready: ${page}`);
+  await new Promise((resolve) => setTimeout(resolve, 1200));
   return {
     read: async () => JSON.parse(JSON.parse(await browser(['eval', 'JSON.stringify(window.__read())']))),
     errors: async () => JSON.parse(JSON.parse(await browser(['eval', 'JSON.stringify(window.__errors)']))),
@@ -781,6 +823,7 @@ const run = async (page) => {
     chartCadence: async (ms = 600) => JSON.parse(JSON.parse(await browser(['eval', `(async () => JSON.stringify(await window.__chartCadence(${ms})))()`]))),
     fastFrames: async () => Number(JSON.parse(await browser(['eval', 'window.__fastFrames()']))),
     slideRate: async (ms = 500) => JSON.parse(JSON.parse(await browser(['eval', `(async () => JSON.stringify(await window.__slideRate(${ms})))()`]))),
+    edgeCover: async (ms = 400) => JSON.parse(JSON.parse(await browser(['eval', `(async () => JSON.stringify(await window.__edgeCover(${ms})))()`]))),
     hiddenDraws: async (ms = 600) => Number(JSON.parse(await browser(['eval', `window.__hiddenDraws(${ms})`]))),
     curveRise: async (next) => JSON.parse(JSON.parse(await browser(['eval', `(async () => JSON.stringify(await window.__curveRise(${JSON.stringify(next)})))()`]))),
     fastZoomReset: async (ms) => {
@@ -986,6 +1029,11 @@ try {
   );
   await panel.set(state());
   check('panel draws all eight cells', idle.cells.join(',') === 'In,Out,Think,Total out,Cache,Cache hit,TTFT,Consumed', idle.cells.join(','));
+  check(
+    'the sliding curve is clipped to the plot, not the panel padding',
+    idle.liveClip?.attr === 'url(#tm-live-clip)' && idle.liveClip.width === idle.liveWidth,
+    JSON.stringify(idle.liveClip),
+  );
   // `.block` sets display: flex, which outranks the browser's own [hidden]
   // rule: a single-model session drew an empty "Models" heading.
   check('panel draws no Models block for one model', idle.modelsDisplay === 'none', `${idle.modelsDisplay} "${idle.modelsText}"`);
@@ -1053,9 +1101,9 @@ try {
   const oldEndX = coordinates.at(-2);
   check(
     'the curve always reaches the now edge',
-    // The held tail runs one pixel past the edge so the idle slide still
-    // covers it; the SVG clips the extra pixel.
-    held.liveRight >= held.liveWidth && held.liveRight <= held.liveWidth + 1,
+    // The held tail runs past the edge by the maximum slide, so the idle
+    // transform still covers it; the group's clip path trims the extra pixels.
+    held.liveRight >= held.liveWidth,
     `${oldEndX} last sample, ${held.liveRight} curve end of ${held.liveWidth}`,
   );
 
@@ -1081,7 +1129,7 @@ try {
   const idleBox = idleCurve.chartGeometry[0];
   check(
     'a finished graph holds its flat zero to the now edge',
-    idleBox.dotX === idleCurve.liveWidth && idleCurve.liveRight >= idleCurve.liveWidth && idleCurve.liveRight <= idleCurve.liveWidth + 1 && idleBox.dotY >= idleBox.height - 9,
+    idleBox.dotX === idleCurve.liveWidth && idleCurve.liveRight >= idleCurve.liveWidth && idleBox.dotY >= idleBox.height - 9,
     `dot ${idleBox.dotX} of ${idleCurve.liveWidth}, y ${idleBox.dotY} of ${idleBox.height}`,
   );
   // A flat zero line cannot change between seconds, so the live loop must not
@@ -1833,7 +1881,7 @@ try {
   const drifted = await panel.read();
   check(
     'the curve ends at now even when the samples drift',
-    drifted.liveRight !== null && drifted.liveWidth !== null && drifted.liveWidth - drifted.liveRight <= 2,
+    drifted.liveRight !== null && drifted.liveWidth !== null && drifted.liveRight >= drifted.liveWidth,
     `right ${drifted.liveRight} of ${drifted.liveWidth}`,
   );
 
@@ -2020,6 +2068,12 @@ try {
     'UI-31 an idle curve slides on every frame without a path rebuild',
     idleSlide.frames >= 10 && idleSlide.moves >= idleSlide.frames * 0.8,
     JSON.stringify(idleSlide),
+  );
+  const edgeCover = await panel.edgeCover(400);
+  check(
+    'UI-31 the sliding curve still covers the right edge',
+    edgeCover.width > 0 && edgeCover.min >= edgeCover.width - 0.01,
+    JSON.stringify(edgeCover),
   );
   await panel.screenshot(path.join(process.env.TMPDIR ?? '/tmp', 'token-meter-panel-idle.png'));
   // A zoom and a pointer readout are real motion: they keep every display
