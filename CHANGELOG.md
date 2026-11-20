@@ -16,6 +16,11 @@ Measured on the real app over three 25 s idle windows (means):
 | GPU helper | 33.3% | 6.2% | 5.4× |
 | UI renderer | 25.5% | 5.8% | 4.4× |
 
+### Fixed
+
+- The idle curve's slide is clipped to the plot: the held tail can no longer paint into the panel padding.
+- The curve reaches the right edge at any chart width, and the slide no longer rewrites a transform that did not change.
+
 Thanks to [@oxoxoxox](https://github.com/oxoxoxox) for the report and the local patch in [#1](https://github.com/omkardamame/openchamber-token-meter/issues/1).
 
 ## [2.0.0] - 2026-11-17
