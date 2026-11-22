@@ -1199,12 +1199,16 @@ function snapshot(collector, now = Date.now(), tree = [collector], priceBook = n
     }
     steps2.sort((a, b) => a.at - b.at);
     const shownSteps2 = steps2.slice(-MAX_STEPS);
+    const mainSteps = steps2.filter((step) => !subOwner2.has(step));
+    const rates2 = ratesOf(steps2);
+    const mainRates2 = mainSteps.length < steps2.length ? ratesOf(mainSteps) : null;
     derived = {
       key: stepsKey,
       steps: steps2,
       subOwner: subOwner2,
       shownSteps: shownSteps2,
-      rates: ratesOf(steps2),
+      rates: rates2,
+      mainRates: mainRates2,
       wire: shownSteps2.map((step) => ({
         tokens: step.tokens,
         in: Math.max(0, (step.total ?? step.tokens) - step.tokens),
@@ -1219,7 +1223,7 @@ function snapshot(collector, now = Date.now(), tree = [collector], priceBook = n
     };
     collector.derived = derived;
   }
-  const { steps, subOwner, shownSteps, rates, wire } = derived;
+  const { steps, subOwner, shownSteps, rates, mainRates, wire } = derived;
   const prompt = totals.input + totals.cacheRead + totals.cacheWrite;
   const generated = totals.output + totals.reasoning;
   const consumed = prompt + generated;
@@ -1536,7 +1540,14 @@ function snapshot(collector, now = Date.now(), tree = [collector], priceBook = n
     rates: {
       avg: Math.round(rates.avg * 10) / 10,
       peak: Math.round(rates.peak * 10) / 10,
-      ...rates.peakAt ? { peakAt: rates.peakAt } : {}
+      ...rates.peakAt ? { peakAt: rates.peakAt } : {},
+      ...mainRates && mainRates.peak > 0 && (Math.abs(mainRates.avg - rates.avg) > 0.05 || mainRates.peak !== rates.peak) ? {
+        main: {
+          avg: Math.round(mainRates.avg * 10) / 10,
+          peak: Math.round(mainRates.peak * 10) / 10,
+          ...mainRates.peakAt ? { peakAt: mainRates.peakAt } : {}
+        }
+      } : {}
     },
     generatedAt: now
   };

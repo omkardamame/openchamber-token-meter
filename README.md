@@ -31,11 +31,15 @@ https://github.com/omkardamame/openchamber-token-meter.git
   underneath in the same tier colours.
 - **Graph** — the last 60 seconds, zoomable with the wheel out to an hour (the
   service keeps 250 ms samples, then one-second and ten-second buckets). The
-  panel charts use a dynamic linear/log scale: 0–100 t/s takes the bottom 35%,
-  with bursts compressed logarithmically above it and a 300 t/s minimum ceiling.
-  Clean ticks adapt to the range and chart height; the red `peak` and green `avg`
-  lines use the same mapping. A peak below 300 stays below the top, not inflated
-  to the ceiling. Rates and hover readouts stay in t/s.
+  panel charts use a dynamic linear/log scale: under 100 t/s the plot is linear
+  over its full height; above that the first 100 takes the bottom 35% and bursts
+  compress logarithmically. Clean ticks adapt to the range and chart height, and
+  the axis is pinned to the session's actual peak, so a peak below 300 stays at
+  the top edge instead of being inflated to a fixed floor. The red `peak` and
+  green `avg` lines use the same mapping. When subagent steps move either
+  number, a second, finer pair labelled `main avg` and `main peak` shows the
+  session's own rates beside the whole tree's. Rates and hover readouts stay in
+  t/s.
 - **Automatic recording** — graphs start without opening a panel, while the
   OpenChamber host is running. The latest hour of samples for up to 200 sessions
   is saved locally across restarts; newer recordings evict older ones. Opening

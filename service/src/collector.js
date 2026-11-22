@@ -847,12 +847,19 @@ export function snapshot(collector, now = Date.now(), tree = [collector], priceB
     }
     steps.sort((a, b) => a.at - b.at);
     const shownSteps = steps.slice(-MAX_STEPS);
+    // The main session's own steps, without any subagent's. A tree's average
+    // and peak can be moved by a child, so the panel can draw the main pair
+    // beside them; `main` travels only when the two actually differ.
+    const mainSteps = steps.filter((step) => !subOwner.has(step));
+    const rates = ratesOf(steps);
+    const mainRates = mainSteps.length < steps.length ? ratesOf(mainSteps) : null;
     derived = {
       key: stepsKey,
       steps,
       subOwner,
       shownSteps,
-      rates: ratesOf(steps),
+      rates,
+      mainRates,
       // The chart draws every step the meter keeps (1000 at most), and only when
       // its sequence is stale. It reads seven fields: tokens, in, ms, tps,
       // aborted, at and cost, plus `sub` on a subagent's step. Nothing else
@@ -878,7 +885,7 @@ export function snapshot(collector, now = Date.now(), tree = [collector], priceB
     };
     collector.derived = derived;
   }
-  const { steps, subOwner, shownSteps, rates, wire } = derived;
+  const { steps, subOwner, shownSteps, rates, mainRates, wire } = derived;
   const prompt = totals.input + totals.cacheRead + totals.cacheWrite;
   const generated = totals.output + totals.reasoning;
   const consumed = prompt + generated;
@@ -1330,6 +1337,18 @@ export function snapshot(collector, now = Date.now(), tree = [collector], priceB
       // When the best step ran. The chart pins its scale to that number, so the
       // frame can say how old it is.
       ...(rates.peakAt ? { peakAt: rates.peakAt } : {}),
+      // The main session alone. An identical pair, or one where a subagent's
+      // step was never rated, would draw the same reference line twice; the
+      // panel only receives a pair that says something the tree pair does not.
+      ...(mainRates && mainRates.peak > 0 && (Math.abs(mainRates.avg - rates.avg) > 0.05 || mainRates.peak !== rates.peak)
+        ? {
+            main: {
+              avg: Math.round(mainRates.avg * 10) / 10,
+              peak: Math.round(mainRates.peak * 10) / 10,
+              ...(mainRates.peakAt ? { peakAt: mainRates.peakAt } : {}),
+            },
+          }
+        : {}),
     },
     generatedAt: now,
   };

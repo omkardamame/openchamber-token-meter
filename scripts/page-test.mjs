@@ -714,6 +714,21 @@ const harness = `<!doctype html><meta charset="utf-8"><title>page test</title>
         const line = doc.querySelector('[data-chart="live"] line[data-role="live-avg"]');
         return line ? Number(line.getAttribute('y1')) : null;
       })(),
+      mainAvgY: (() => {
+        const line = doc.querySelector('[data-chart="live"] line[data-role="live-main-avg"]');
+        return line && line.getAttribute('visibility') !== 'hidden' ? Number(line.getAttribute('y1')) : null;
+      })(),
+      mainPeakY: (() => {
+        const line = doc.querySelector('[data-chart="live"] line[data-role="live-main-peak"]');
+        return line && line.getAttribute('visibility') !== 'hidden' ? Number(line.getAttribute('y1')) : null;
+      })(),
+      refLabelYs: (() => {
+        const nodes = doc.querySelectorAll('[data-chart="live"] text[data-n$="-label"]');
+        return [...nodes]
+          .filter((node) => node.getAttribute('visibility') !== 'hidden')
+          .map((node) => Number(node.getAttribute('y')))
+          .sort((a, b) => a - b);
+      })(),
       timeGrid: doc.querySelectorAll('[data-chart="live"] line[data-role="time-grid"]').length,
       peakText: (doc.querySelector('.axis-peak') || {}).textContent,
       stepsPeakTop: (() => {
@@ -1040,6 +1055,59 @@ try {
   check('panel draws the consumed total', idle.values.some((v) => v.startsWith('49.2M')), idle.values.join(' | '));
   check('panel draws the measured ttft', idle.values.some((v) => v.includes('6.5 s')), idle.values.join(' | '));
   check('panel labels the average and the peak', idle.labels.some((l) => l.startsWith('avg 79')) && idle.labels.some((l) => l.startsWith('peak 334')), idle.labels.join(' | '));
+  // A subagent's steps can move the tree's average and peak. The main pair is
+  // the session's own; it is drawn only when the service says the two differ.
+  check(
+    'panel hides the main-session references when there are no subagent steps',
+    idle.mainAvgY === null && idle.mainPeakY === null && !idle.labels.some((label) => label.startsWith('main ')),
+    `${idle.mainAvgY}, ${idle.mainPeakY} · ${idle.labels.join(' | ')}`,
+  );
+  const pairAt = Date.now();
+  const mainRatesState = state({
+    subagents: { count: 1, running: 0, loading: 0, partial: 0, streaming: 0, tool: 0, active: [] },
+    rates: { avg: 79, peak: 334, peakAt: pairAt - 480_000, main: { avg: 62, peak: 120, peakAt: pairAt - 300_000 } },
+    generatedAt: pairAt,
+  });
+  await panel.set(mainRatesState);
+  const bothPairs = await panel.read();
+  check(
+    'panel draws the main-session average and peak beside the tree’s',
+    bothPairs.mainAvgY !== null &&
+      bothPairs.mainPeakY !== null &&
+      bothPairs.mainAvgY > bothPairs.mainPeakY &&
+      bothPairs.mainAvgY > 8 &&
+      bothPairs.mainAvgY < bothPairs.chartGeometry[0].height - 8,
+    `main avg y ${bothPairs.mainAvgY}, main peak y ${bothPairs.mainPeakY}, tree ${bothPairs.chartGeometry[0].avgY}/${bothPairs.chartGeometry[0].peakY}`,
+  );
+  check(
+    'panel labels the main pair as the main session’s',
+    bothPairs.labels.some((label) => /^main avg 62 t\/s$/.test(label)) &&
+      bothPairs.labels.some((label) => /^main peak 120 t\/s( · \d+m \d+s ago)?$/.test(label)),
+    bothPairs.labels.join(' | '),
+  );
+  await panel.screenshot(path.join(process.env.TMPDIR ?? '/tmp', 'token-meter-panel-main-pair.png'));
+  // Four labels on a 200px plot: two near the top edge can collide, and the
+  // frame has to move one down rather than print them on top of each other.
+  await panel.set({
+    ...mainRatesState,
+    generatedAt: Date.now(),
+    rates: { avg: 79, peak: 334, main: { avg: 330, peak: 334 } },
+  });
+  const crowdedPairs = await panel.read();
+  check(
+    'four reference labels stay apart when their lines are close',
+    crowdedPairs.refLabelYs.length === 4 &&
+      crowdedPairs.refLabelYs.every((y, index, all) => index === 0 || y - all[index - 1] >= 11) &&
+      crowdedPairs.refLabelYs.at(-1) <= crowdedPairs.chartGeometry[0].height - 2,
+    crowdedPairs.refLabelYs.join(', '),
+  );
+  await panel.set(state());
+  const noMainPair = await panel.read();
+  check(
+    'panel hides the main pair again when the service sends none',
+    noMainPair.mainAvgY === null && noMainPair.mainPeakY === null,
+    `${noMainPair.mainAvgY}, ${noMainPair.mainPeakY}`,
+  );
   check(
     'panel draws the curve under the peak line, not over it',
     idle.livePolyline && idle.liveTopY > idle.peakLineY && idle.liveTopY > 8,

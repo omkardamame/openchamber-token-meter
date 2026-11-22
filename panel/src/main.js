@@ -805,6 +805,10 @@ const LIVE_PARTS = [
   'cross-dot',
   'dot',
   'fill',
+  'main-avg',
+  'main-avg-label',
+  'main-peak',
+  'main-peak-label',
   'scale',
   'line',
   'peak',
@@ -842,6 +846,12 @@ function ensureLive(svg, width, height, pad) {
     `<path data-n="line" fill="none" stroke="var(--oc-primary)" stroke-width="1.6" stroke-linejoin="round" stroke-linecap="round" data-role="live-line" />` +
     `</g>` +
     `<circle data-n="dot" r="2.6" fill="var(--oc-primary)" />` +
+    // The main session's own pair sits under the tree's pair: same colours,
+    // a finer dash and a lighter weight, so a tree line stays the primary one.
+    `<line data-n="main-avg" x1="0" x2="${width}" stroke="var(--oc-success)" stroke-width="1" stroke-dasharray="1 4" opacity="0.5" data-role="live-main-avg" />` +
+    `<text data-n="main-avg-label" x="${width - 2}" text-anchor="end" fill="var(--oc-success)" font-size="9" opacity="0.8"></text>` +
+    `<line data-n="main-peak" x1="0" x2="${width}" stroke="var(--oc-error)" stroke-width="1" stroke-dasharray="1 4" opacity="0.45" data-role="live-main-peak" />` +
+    `<text data-n="main-peak-label" x="${width - 2}" text-anchor="end" fill="var(--oc-error)" font-size="9" opacity="0.8"></text>` +
     `<line data-n="avg" x1="0" x2="${width}" stroke="var(--oc-success)" stroke-width="1" stroke-dasharray="3 3" opacity="0.7" data-role="live-avg" />` +
     `<text data-n="avg-label" x="${width - 2}" text-anchor="end" fill="var(--oc-success)" font-size="9.5" opacity="0.85"></text>` +
     `<line data-n="peak" x1="0" x2="${width}" stroke="var(--oc-error)" stroke-width="1" stroke-dasharray="2 3" opacity="0.65" data-role="live-peak" />` +
@@ -866,6 +876,43 @@ const placeY = (node, y, width) => {
   node.setAttribute('y2', y.toFixed(1));
   node.setAttribute('x2', width);
 };
+
+/**
+ * Draw the reference lines and their labels. A label sits above its line, or
+ * below it at the very top; when two references are close, the one lower down
+ * slides further down so no two labels touch. `y: null` hides a line and its
+ * label. The four labels fit the live chart's height without moving the curve.
+ */
+function placeRefs(items, width, height, pad) {
+  const shown = [];
+  for (const item of items) {
+    if (item.y === null) {
+      showPart(item.line, false);
+      showPart(item.label, false);
+      continue;
+    }
+    placeY(item.line, item.y, width);
+    item.label.textContent = item.text;
+    shown.push(item);
+  }
+  shown.sort((a, b) => a.y - b.y);
+  let previous = -Infinity;
+  for (const item of shown) {
+    let y = item.y < pad + 10 ? item.y + 11 : item.y - 4;
+    if (y < previous + 11) y = previous + 11;
+    item.labelY = y;
+    previous = y;
+  }
+  // A crowded set can push its lowest label under the baseline: lift the whole
+  // group, keeping the gaps it just earned.
+  const overflow = previous - (height - 2);
+  if (overflow > 0) for (const item of shown) item.labelY -= overflow;
+  for (const item of shown) {
+    item.label.setAttribute('y', item.labelY.toFixed(1));
+    showPart(item.label, true);
+    showPart(item.line, true);
+  }
+}
 
 /** Shared axis geometry for both panel charts. Labels sit inside the existing
  * plot, with no new gutter or change to pointer coordinates. */
@@ -962,6 +1009,11 @@ function drawLive(data) {
   const rates = data.rates ?? {};
   rates.avg = Number(rates.avg) || 0;
   rates.peak = Number(rates.peak) || 0;
+  // The main session's own pair, when the service sends it: a subagent can
+  // raise both of the tree's references, and the labels say which line is which.
+  const main = data.rates?.main ?? null;
+  const mainAvg = Number(main?.avg) || 0;
+  const mainPeak = Number(main?.peak) || 0;
 
   // A finished turn leaves a flat zero line. Redrawing it on every animation
   // frame wrote the same path 61 times a second; one draw per second is enough
@@ -976,7 +1028,7 @@ function drawLive(data) {
     // thing that changes the drawing. The session is in the key because the
     // peak label is rebuilt from its own peak age on a switch.
     const sessionKey = data.session ?? sessionId ?? '';
-    const idleKey = `${sessionKey}|${width}|${height}|${liveWindowMs}|${ceilingMode}|${idleTurnPeak}|${rates.avg}|${rates.peak}|${idleCeiling}|${Math.floor(now / 1_000)}`;
+    const idleKey = `${sessionKey}|${width}|${height}|${liveWindowMs}|${ceilingMode}|${idleTurnPeak}|${rates.avg}|${rates.peak}|${mainAvg}|${mainPeak}|${main?.peakAt ?? ''}|${idleCeiling}|${Math.floor(now / 1_000)}`;
     if (idleKey === lastIdleKey) return;
     lastIdleKey = idleKey;
   } else {
@@ -1007,7 +1059,7 @@ function drawLive(data) {
   // Retain the existing peak selection (finished step or visible live burst).
   // The ceiling is the peak itself; a smaller one is drawn at its actual value.
   const ceilingPeak = Math.max(turnMode ? turnPeak : rates.peak, liveTop);
-  const max = rateCeiling(Math.max(ceilingPeak, rates.avg));
+  const max = rateCeiling(Math.max(ceilingPeak, rates.avg, mainAvg));
   const share = (value) => symlogShare(value, max);
   const lineY = (value) => height - pad - share(value) * (height - pad * 2);
   // A changed ceiling remaps every point at once. Easing that remap made the
@@ -1032,19 +1084,32 @@ function drawLive(data) {
     nodes.scale.innerHTML = gridKey ? scaleGrid(max, width, height, pad) : '';
   }
 
-  let avgLabelY = null;
-  if (rates.avg > 0 && rates.avg <= max) {
-    const y = lineY(rates.avg);
-    avgLabelY = y < pad + 10 ? y + 11 : y - 4;
-    placeY(nodes.avg, y, width);
-    nodes['avg-label'].textContent = `avg ${Math.round(rates.avg)} t/s`;
-    nodes['avg-label'].setAttribute('y', avgLabelY.toFixed(1));
-    showPart(nodes.avg, true);
-    showPart(nodes['avg-label'], true);
-  } else {
-    showPart(nodes.avg, false);
-    showPart(nodes['avg-label'], false);
-  }
+  // Every reference on the chart. The main pair is dimmer and finer; its
+  // labels name the main session, which is the pair a subagent's steps cannot
+  // move.
+  const mainAge = typeof main?.peakAt === 'number' ? duration(now - main.peakAt) : '';
+  const refs = [
+    {
+      line: nodes['main-avg'],
+      label: nodes['main-avg-label'],
+      y: mainAvg > 0 ? lineY(mainAvg) : null,
+      text: `main avg ${Math.round(mainAvg)} t/s`,
+    },
+    {
+      line: nodes['main-peak'],
+      label: nodes['main-peak-label'],
+      // A turn-scale chart can sit below the session's best main step; drawing
+      // the line above the plot would put a number at a height it never reached.
+      y: mainPeak > 0 && mainPeak <= max ? lineY(mainPeak) : null,
+      text: `main peak ${Math.round(mainPeak)} t/s${mainAge ? ` · ${mainAge} ago` : ''}`,
+    },
+    {
+      line: nodes.avg,
+      label: nodes['avg-label'],
+      y: rates.avg > 0 && rates.avg <= max ? lineY(rates.avg) : null,
+      text: `avg ${Math.round(rates.avg)} t/s`,
+    },
+  ];
 
   if (ceilingPeak > 0) {
     const y = lineY(ceilingPeak);
@@ -1061,25 +1126,17 @@ function drawLive(data) {
       peakSince = now;
     }
     const age = peakSince ? duration(now - peakSince) : '';
-    // Keep the labels apart when the lines are close. Above the average label
-    // when there is room, so the peak label stays beside its own (higher) line;
-    // on the top edge, stack it below instead of clipping it.
-    let labelY = y < pad + 10 ? y + 11 : y - 4;
-    if (avgLabelY !== null && Math.abs(labelY - avgLabelY) < 12) {
-      const above = avgLabelY - 13;
-      labelY = above > pad ? above : avgLabelY + 13;
-    }
-    if (labelY > height - 2) labelY = (avgLabelY ?? labelY) - 13;
-    placeY(nodes.peak, y, width);
-    nodes['peak-label'].textContent = `${turnMode ? 'turn peak' : 'peak'} ${Math.round(ceilingPeak)} t/s${age ? ` · ${age} ago` : ''}`;
-    nodes['peak-label'].setAttribute('y', labelY.toFixed(1));
-    showPart(nodes.peak, true);
-    showPart(nodes['peak-label'], true);
+    refs.push({
+      line: nodes.peak,
+      label: nodes['peak-label'],
+      y,
+      text: `${turnMode ? 'turn peak' : 'peak'} ${Math.round(ceilingPeak)} t/s${age ? ` · ${age} ago` : ''}`,
+    });
   } else {
     peakLineY = null;
-    showPart(nodes.peak, false);
-    showPart(nodes['peak-label'], false);
+    refs.push({ line: nodes.peak, label: nodes['peak-label'], y: null, text: '' });
   }
+  placeRefs(refs, width, height, pad);
 
   // The sample nearest the pointer. Geometry follows the smoothed curve, but
   // the readout keeps the sample's raw rate, never a logarithmic coordinate.

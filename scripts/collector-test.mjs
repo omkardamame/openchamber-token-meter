@@ -1035,6 +1035,43 @@ check(
   JSON.stringify(peakAgeSnap.rates),
 );
 
+// A tree's average and peak include the subagents' steps. The panel draws the
+// main session's own pair beside them, so the wire has to carry it separately —
+// and only when it says something the tree pair does not.
+const mainRatesRun = createCollector('ses_main_rates');
+const mainRatesChild = createCollector('ses_main_rates_child');
+mainRatesChild.parentId = mainRatesRun.id;
+mainRatesRun.steps = [
+  { aborted: false, at: 1_000, ms: 1_000, tokens: 20, tps: 20 },
+  { aborted: false, at: 2_000, ms: 1_000, tokens: 40, tps: 40 },
+];
+mainRatesRun.stepsSeq = 1;
+mainRatesChild.steps = [{ aborted: false, at: 1_500, ms: 1_000, tokens: 200, tps: 200 }];
+mainRatesChild.stepsSeq = 1;
+const mainRatesSnap = snapshot(mainRatesRun, 10_000, [mainRatesRun, mainRatesChild]);
+check(
+  'SN-21 the wire says what the main session alone averaged and peaked',
+  mainRatesSnap.rates.avg === 86.7 &&
+    mainRatesSnap.rates.peak === 200 &&
+    mainRatesSnap.rates.main?.avg === 30 &&
+    mainRatesSnap.rates.main?.peak === 40 &&
+    mainRatesSnap.rates.main?.peakAt === 2_000,
+  JSON.stringify(mainRatesSnap.rates),
+);
+check(
+  'SN-22 a session with no subagent steps sends no separate main pair',
+  snapshot(mainRatesRun, 10_000, [mainRatesRun]).rates.main === undefined,
+  JSON.stringify(snapshot(mainRatesRun, 10_000, [mainRatesRun]).rates),
+);
+const quietMainChild = createCollector('ses_main_rates_quiet');
+quietMainChild.steps = [{ aborted: true, at: 3_000, ms: 1_000, tokens: 90, tps: 90 }];
+quietMainChild.stepsSeq = 1;
+check(
+  'SN-23 a subagent step that cannot be rated adds no duplicate main pair',
+  snapshot(mainRatesRun, 10_000, [mainRatesRun, quietMainChild]).rates.main === undefined,
+  JSON.stringify(snapshot(mainRatesRun, 10_000, [mainRatesRun, quietMainChild]).rates),
+);
+
 // The live series stops at 60 s. The coarse ring behind it keeps five minutes as
 // one average per second, so the panel can zoom out without 1200 samples on the
 // wire; the frame places values on index × step, so no offsets travel.
