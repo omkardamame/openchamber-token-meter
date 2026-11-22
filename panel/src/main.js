@@ -849,9 +849,9 @@ function ensureLive(svg, width, height, pad) {
     // The main session's own pair sits under the tree's pair: same colours,
     // a finer dash and a lighter weight, so a tree line stays the primary one.
     `<line data-n="main-avg" x1="0" x2="${width}" stroke="var(--oc-success)" stroke-width="1" stroke-dasharray="1 4" opacity="0.5" data-role="live-main-avg" />` +
-    `<text data-n="main-avg-label" x="${width - 2}" text-anchor="end" fill="var(--oc-success)" font-size="9" opacity="0.8"></text>` +
+    `<text data-n="main-avg-label" x="${width - 2}" text-anchor="end" fill="var(--oc-success)" font-size="9.5" opacity="0.8"></text>` +
     `<line data-n="main-peak" x1="0" x2="${width}" stroke="var(--oc-error)" stroke-width="1" stroke-dasharray="1 4" opacity="0.45" data-role="live-main-peak" />` +
-    `<text data-n="main-peak-label" x="${width - 2}" text-anchor="end" fill="var(--oc-error)" font-size="9" opacity="0.8"></text>` +
+    `<text data-n="main-peak-label" x="${width - 2}" text-anchor="end" fill="var(--oc-error)" font-size="9.5" opacity="0.8"></text>` +
     `<line data-n="avg" x1="0" x2="${width}" stroke="var(--oc-success)" stroke-width="1" stroke-dasharray="3 3" opacity="0.7" data-role="live-avg" />` +
     `<text data-n="avg-label" x="${width - 2}" text-anchor="end" fill="var(--oc-success)" font-size="9.5" opacity="0.85"></text>` +
     `<line data-n="peak" x1="0" x2="${width}" stroke="var(--oc-error)" stroke-width="1" stroke-dasharray="2 3" opacity="0.65" data-role="live-peak" />` +

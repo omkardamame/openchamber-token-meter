@@ -729,6 +729,12 @@ const harness = `<!doctype html><meta charset="utf-8"><title>page test</title>
           .map((node) => Number(node.getAttribute('y')))
           .sort((a, b) => a - b);
       })(),
+      refLabelFonts: (() => {
+        const nodes = doc.querySelectorAll('[data-chart="live"] text[data-n$="-label"]');
+        return [...nodes]
+          .filter((node) => node.getAttribute('visibility') !== 'hidden')
+          .map((node) => getComputedStyle(node).fontSize);
+      })(),
       timeGrid: doc.querySelectorAll('[data-chart="live"] line[data-role="time-grid"]').length,
       peakText: (doc.querySelector('.axis-peak') || {}).textContent,
       stepsPeakTop: (() => {
@@ -1084,6 +1090,11 @@ try {
     bothPairs.labels.some((label) => /^main avg 62 t\/s$/.test(label)) &&
       bothPairs.labels.some((label) => /^main peak 120 t\/s( · \d+m \d+s ago)?$/.test(label)),
     bothPairs.labels.join(' | '),
+  );
+  check(
+    'the four reference labels share one font size',
+    bothPairs.refLabelFonts.length === 4 && new Set(bothPairs.refLabelFonts).size === 1,
+    bothPairs.refLabelFonts.join(', '),
   );
   await panel.screenshot(path.join(process.env.TMPDIR ?? '/tmp', 'token-meter-panel-main-pair.png'));
   // Four labels on a 200px plot: two near the top edge can collide, and the
