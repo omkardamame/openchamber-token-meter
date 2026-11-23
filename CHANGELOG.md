@@ -2,7 +2,7 @@
 
 Every release of Token Meter, newest first; one line per change, grouped by area — what shipped in that tag.
 
-## [Unreleased]
+## [2.0.2] - 2026-11-23
 
 ### Added
 
