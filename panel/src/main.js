@@ -904,6 +904,8 @@ function scaleGrid(maximum, width, height, pad) {
 
 /** The best rated step of this turn, including its own timestamp. */
 function turnPeakOf(data) {
+  if (data.turn?.peakStep !== undefined) return data.turn.peakStep;
+  // Older services only send chart rows, which may not include the peak.
   const from = data.turn?.startedAt;
   if (!from) return null;
   let best = null;

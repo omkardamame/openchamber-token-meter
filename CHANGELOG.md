@@ -2,6 +2,18 @@
 
 Every release of Token Meter, newest first; one line per change, grouped by area — what shipped in that tag.
 
+## [Unreleased]
+
+### Added
+
+- The rail graph separates main-session average and peak rates from tree-wide totals, with matching label sizes and no duplicate lines for equal displayed values.
+- Hover over the main peak to see its age and step details when available. Narrow rails keep the scope labels and move the age to the hover readout.
+
+### Fixed
+
+- Turn peak uses the timestamp of its own step and includes retained steps outside the latest 1,000 chart rows.
+- Recreating a subagent refreshes cached tree rates and chart rows.
+
 ## [2.0.1] - 2026-11-20
 
 ### ⚡ Performance

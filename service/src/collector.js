@@ -924,6 +924,7 @@ export function snapshot(collector, now = Date.now(), tree = [collector], priceB
   let lastTurnCost = 0;
   let turnTokens = 0;
   let turnSteps = 0;
+  let turnPeak = null;
   // The turn's whole bill, the way `totals.consumed` reads the session's:
   // prompt, generated, and both cache directions.
   let turnConsumed = 0;
@@ -934,6 +935,7 @@ export function snapshot(collector, now = Date.now(), tree = [collector], priceB
         turnTokens += step.tokens ?? 0;
         turnConsumed += (step.total ?? 0) + (step.cacheRead ?? 0) + (step.cacheWrite ?? 0);
         turnSteps += 1;
+        if (!step.aborted && step.tps > (turnPeak?.tps ?? 0)) turnPeak = step;
       }
     }
   }
@@ -1283,6 +1285,14 @@ export function snapshot(collector, now = Date.now(), tree = [collector], priceB
       tokens: turnTokens,
       consumed: turnConsumed,
       steps: turnSteps,
+      // Unlike chart rows, the turn peak uses every retained member step.
+      peakStep: turnPeak ? {
+        at: turnPeak.at,
+        tps: turnPeak.tps,
+        tokens: turnPeak.tokens,
+        ms: turnPeak.ms,
+        ...(subOwner.has(turnPeak) ? { sub: subOwner.get(turnPeak) } : {}),
+      } : null,
     },
     live: {
       tps: live,

@@ -1247,6 +1247,7 @@ function snapshot(collector, now = Date.now(), tree = [collector], priceBook = n
   let lastTurnCost = 0;
   let turnTokens = 0;
   let turnSteps = 0;
+  let turnPeak = null;
   let turnConsumed = 0;
   if (collector.turnStartedAt) {
     for (const step of steps) {
@@ -1255,6 +1256,8 @@ function snapshot(collector, now = Date.now(), tree = [collector], priceBook = n
         turnTokens += step.tokens ?? 0;
         turnConsumed += (step.total ?? 0) + (step.cacheRead ?? 0) + (step.cacheWrite ?? 0);
         turnSteps += 1;
+        if (!step.aborted && step.tps > (turnPeak?.tps ?? 0))
+          turnPeak = step;
       }
     }
   }
@@ -1514,7 +1517,14 @@ function snapshot(collector, now = Date.now(), tree = [collector], priceBook = n
       startedAt: collector.turnStartedAt || null,
       tokens: turnTokens,
       consumed: turnConsumed,
-      steps: turnSteps
+      steps: turnSteps,
+      peakStep: turnPeak ? {
+        at: turnPeak.at,
+        tps: turnPeak.tps,
+        tokens: turnPeak.tokens,
+        ms: turnPeak.ms,
+        ...subOwner.has(turnPeak) ? { sub: subOwner.get(turnPeak) } : {}
+      } : null
     },
     live: {
       tps: live,

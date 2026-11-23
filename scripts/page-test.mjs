@@ -1160,9 +1160,9 @@ try {
   await panel.set({
     ...mainRatesState,
     generatedAt: turnAt,
-    turn: { startedAt: turnAt - 60_000 },
+    turn: { startedAt: turnAt - 60_000, peakStep: { tokens: 900, ms: 5_000, tps: 180, at: turnAt - 30_000 } },
     steps: [
-      { tokens: 900, ms: 5_000, tps: 180, at: turnAt - 30_000 },
+      { tokens: 150, ms: 5_000, tps: 30, at: turnAt - 25_000 },
       { tokens: 2000, ms: 5_000, tps: 400, at: turnAt - 20_000, aborted: true },
     ],
     rates: { avg: 79, peak: 334, peakAt: pairAt - 480_000, main: { avg: 62, peak: 250, peakAt: pairAt - 300_000 } },

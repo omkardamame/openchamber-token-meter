@@ -41,6 +41,8 @@ https://github.com/omkardamame/openchamber-token-meter.git
   the session's own steps; a line that would print the same number as the
   tree's is left out. Hover over either peak line to see its age and step
   details when available. The `tree peak` / `turn peak` button changes the scale.
+  Rate references cover retained, rated steps, not necessarily the full session
+  when history is partial or older steps have been dropped.
 - **Automatic recording** — graphs start without opening a panel, while the
   OpenChamber host is running. The latest hour of samples for up to 200 sessions
   is saved locally across restarts; newer recordings evict older ones. Opening

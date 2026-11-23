@@ -1049,6 +1049,21 @@ mainRatesRun.stepsSeq = 1;
 mainRatesChild.steps = [{ aborted: false, at: 1_500, ms: 1_000, tokens: 200, tps: 200 }];
 mainRatesChild.stepsSeq = 1;
 const mainRatesSnap = snapshot(mainRatesRun, 10_000, [mainRatesRun, mainRatesChild]);
+{
+  const root = createCollector('ses_long_turn_peak');
+  const child = createCollector('ses_long_turn_peak_child');
+  root.turnStartedAt = 1_000;
+  root.steps = [
+    { at: 1_001, tps: 900, tokens: 900, ms: 1_000 },
+    ...Array.from({ length: 999 }, (_, index) => ({ at: 1_002 + index, tps: 10, tokens: 10, ms: 1_000 })),
+  ];
+  child.steps = [{ at: 3_000, tps: 20, tokens: 20, ms: 1_000 }];
+  const longTurn = snapshot(root, 4_000, [root, child]);
+  check('turn peak survives the merged chart row cap',
+    longTurn.steps.length === 1_000 && !longTurn.steps.some((step) => step.tps === 900) &&
+    longTurn.turn.peakStep?.tps === 900 && longTurn.turn.peakStep?.at === 1_001,
+    JSON.stringify(longTurn.turn));
+}
 check(
   'SN-21 the wire says what the main session alone averaged and peaked',
   mainRatesSnap.rates.avg === 86.7 &&
