@@ -1185,7 +1185,7 @@ function snapshot(collector, now = Date.now(), tree = [collector], priceBook = n
     totals.cost += member.totals.cost;
     totals.steps += member.totals.steps;
   }
-  const stepsKey = members.map((member) => `${member.id}:${member.stepsSeq}:${member.steps.length}`).join("|");
+  const stepsKey = members.map((member) => `${member.id}:${member.seqEpoch ?? 0}:${member.stepsSeq}:${member.steps.length}`).join("|");
   let derived = collector.derived;
   if (derived?.key !== stepsKey) {
     const steps2 = [];

@@ -832,7 +832,7 @@ export function snapshot(collector, now = Date.now(), tree = [collector], priceB
   // when a member's step list does, and this runs up to six times a second:
   // build them once per key and keep them on the collector. The model can change
   // while the steps do not, so its recovered rates are cached per model.
-  const stepsKey = members.map((member) => `${member.id}:${member.stepsSeq}:${member.steps.length}`).join('|');
+  const stepsKey = members.map((member) => `${member.id}:${member.seqEpoch ?? 0}:${member.stepsSeq}:${member.steps.length}`).join('|');
   let derived = collector.derived;
   if (derived?.key !== stepsKey) {
     const steps = [];

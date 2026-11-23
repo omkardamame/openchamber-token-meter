@@ -1058,6 +1058,18 @@ check(
     mainRatesSnap.rates.main?.peakAt === 2_000,
   JSON.stringify(mainRatesSnap.rates),
 );
+const recreatedMainChild = createCollector(mainRatesChild.id);
+recreatedMainChild.seqEpoch = 1_000_000;
+recreatedMainChild.stepsSeq = mainRatesChild.stepsSeq;
+recreatedMainChild.steps = [{ aborted: false, at: 1_500, ms: 1_000, tokens: 900, tps: 900 }];
+const recreatedMainSnap = snapshot(mainRatesRun, 10_000, [mainRatesRun, recreatedMainChild]);
+check(
+  'recreating a child invalidates cached tree rates and step rows',
+  recreatedMainSnap.rates.peak === 900 &&
+    recreatedMainSnap.rates.main?.peak === 40 &&
+    recreatedMainSnap.steps.some((step) => step.sub === mainRatesChild.id && step.tps === 900),
+  JSON.stringify(recreatedMainSnap.rates),
+);
 check(
   'SN-22 a session with no subagent steps sends no separate main pair',
   snapshot(mainRatesRun, 10_000, [mainRatesRun]).rates.main === undefined,
