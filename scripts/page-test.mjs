@@ -1078,7 +1078,7 @@ try {
   check('panel draws no Models block for one model', idle.modelsDisplay === 'none', `${idle.modelsDisplay} "${idle.modelsText}"`);
   check('panel draws the consumed total', idle.values.some((v) => v.startsWith('49.2M')), idle.values.join(' | '));
   check('panel draws the measured ttft', idle.values.some((v) => v.includes('6.5 s')), idle.values.join(' | '));
-  check('panel labels the average and the peak', idle.labels.some((l) => l.startsWith('avg 79')) && idle.labels.some((l) => l.startsWith('peak 334')), idle.labels.join(' | '));
+  check('panel labels the total average and peak', idle.labels.includes('total avg 79 t/s') && idle.labels.some((l) => l.startsWith('total peak 334')), idle.labels.join(' | '));
   // A subagent's steps can move the tree's average and peak. The main pair is
   // the session's own; it is drawn only when the service says the two differ.
   check(
@@ -1090,6 +1090,10 @@ try {
   const mainRatesState = state({
     subagents: { count: 1, running: 0, loading: 0, partial: 0, streaming: 0, tool: 0, active: [] },
     rates: { avg: 79, peak: 334, peakAt: pairAt - 480_000, main: { avg: 62, peak: 120, peakAt: pairAt - 300_000 } },
+    steps: [
+      { tokens: 600, ms: 5_000, tps: 120, at: pairAt - 301_000, sub: 'ses_child' },
+      { tokens: 240, ms: 2_000, tps: 120, at: pairAt - 300_000 },
+    ],
     generatedAt: pairAt,
   });
   await panel.set(mainRatesState);
@@ -1115,11 +1119,52 @@ try {
     bothPairs.refLabelFonts.join(', '),
   );
   await panel.screenshot(path.join(process.env.TMPDIR ?? '/tmp', 'token-meter-panel-main-pair.png'));
+  const mainPeakPointer = JSON.parse(JSON.parse(await browser(['eval', `(() => {
+    const doc = document.querySelector('#f').contentDocument;
+    const svg = doc.querySelector('[data-chart="live"]');
+    const point = new DOMPoint(100, ${bothPairs.mainPeakY}).matrixTransform(svg.getScreenCTM());
+    return JSON.stringify({ x: point.x, y: point.y });
+  })()`])));
+  await panel.hoverAt('[data-chart="live"]', mainPeakPointer.x, mainPeakPointer.y);
+  const hoveredMain = await panel.read();
+  check('hovering main peak reads its own step, not a matching subagent',
+    /^main peak 120 t\/s · 240 tok in 2\.0 s/.test(hoveredMain.peakText), hoveredMain.peakText);
+  await panel.leave('[data-chart="live"]');
+  const narrow = JSON.parse(JSON.parse(await browser(['eval', `(async () => {
+    const frame = document.querySelector('#f');
+    const oldWidth = frame.style.width;
+    frame.style.width = '170px';
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      const svg = frame.contentDocument.querySelector('[data-chart="live"]');
+      const right = svg.viewBox.baseVal.width;
+      const refs = [...svg.querySelectorAll('text[data-n$="-label"]')].filter((node) => node.getAttribute('visibility') === 'visible');
+      const gridRight = Math.max(0, ...[...svg.querySelectorAll('[data-role="grid-label"]')].map((node) => {
+        const box = node.getBBox();
+        return box.x + box.width;
+      }));
+      return JSON.stringify({ right, fits: refs.every((node) => {
+        const box = node.getBBox();
+        return box.x >= gridRight + 4 && box.x + box.width <= right;
+      }), labels: refs.map((node) => node.textContent) });
+    } finally {
+      frame.style.width = oldWidth;
+    }
+  })()`])));
+  check('narrow rail keeps all four labels clear of the grid without losing their names',
+    narrow.right <= 170 && narrow.fits && narrow.labels.length === 4 &&
+      narrow.labels.includes('main peak 120 t/s') && narrow.labels.includes('total peak 334 t/s'), JSON.stringify(narrow));
   // Turn mode scales to this turn's best step. A session main peak above that
   // plot must not be drawn at a height the plot does not have.
+  const turnAt = Date.now();
   await panel.set({
     ...mainRatesState,
-    generatedAt: Date.now(),
+    generatedAt: turnAt,
+    turn: { startedAt: turnAt - 60_000 },
+    steps: [
+      { tokens: 900, ms: 5_000, tps: 180, at: turnAt - 30_000 },
+      { tokens: 2000, ms: 5_000, tps: 400, at: turnAt - 20_000, aborted: true },
+    ],
     rates: { avg: 79, peak: 334, peakAt: pairAt - 480_000, main: { avg: 62, peak: 250, peakAt: pairAt - 300_000 } },
   });
   const sessionMain = await panel.read();
@@ -1128,7 +1173,7 @@ try {
   const turnMain = await panel.read();
   check(
     'turn mode hides a main peak above its plot but keeps the main average',
-    sessionMain.ceilingChip === 'session peak' &&
+    sessionMain.ceilingChip === 'tree peak' &&
       sessionMain.mainPeakY !== null &&
       turnMain.ceilingChip === 'turn peak' &&
       turnMain.mainPeakY === null &&
@@ -1136,6 +1181,9 @@ try {
       turnMain.labels.some((label) => /^turn peak 180 t\/s/.test(label)),
     `${sessionMain.ceilingChip}/${turnMain.ceilingChip} · ${turnMain.labels.join(' | ')}`,
   );
+  check('turn peak age comes from the turn step rather than the tree peak',
+    turnMain.labels.some((label) => /^turn peak 180 t\/s · 3\ds ago$/.test(label)),
+    turnMain.labels.join(' | '));
   await panel.click('.foot-ceiling');
   await panel.wait(150);
   // The service sends one main line at a time when only one number moved; the
@@ -1328,10 +1376,10 @@ try {
   await panel.wait(300);
   await panel.set({ ...flatPeak, generatedAt: Date.now(), rates: { avg: 0, peak: 150, peakAt: Date.now() - 1_000 } });
   const relabeled = await panel.read();
-  const peakLabels = relabeled.labels.filter((text) => /^peak \d/.test(text));
+  const peakLabels = relabeled.labels.filter((text) => /^total peak \d/.test(text));
   check(
     'a flat graph still redraws when its peak label changes',
-    peakLabels.some((text) => /^peak 150 t\/s/.test(text)) && !peakLabels.some((text) => /^peak 900 t\/s/.test(text)),
+    peakLabels.some((text) => /^total peak 150 t\/s/.test(text)) && !peakLabels.some((text) => /^total peak 900 t\/s/.test(text)),
     peakLabels.join(' · ') || 'no peak label',
   );
   await panel.set(state());
@@ -1361,7 +1409,7 @@ try {
   );
   check('panel sits on a dim dot when idle', idle.dotState === 'idle', String(idle.dotState));
   check('panel hides the subagent list and legend when there are none', idle.subsHidden === true && idle.legendHidden === true, `${idle.subsHidden}/${idle.legendHidden}`);
-  check('panel shows the per-step average and peak together', /avg 156 t\/s.*peak 180 t\/s/.test(idle.text), idle.text.slice(0, 120));
+  check('panel shows the per-step average and peak together', /steps avg 156 t\/s.*steps peak 180 t\/s/.test(idle.text), idle.text.slice(0, 120));
   check('panel dots the step header', String(idle.stepsAvgSep).includes('·') && String(idle.stepsPeakSep).includes('·'), `${idle.stepsAvgSep} ${idle.stepsPeakSep}`);
   check('panel counts every step it keeps', /2 steps/.test(idle.text), idle.text.slice(0, 120));
   check('panel colours the per-step average green', idle.stepsAvgColor === 'rgb(74, 222, 128)', String(idle.stepsAvgColor));

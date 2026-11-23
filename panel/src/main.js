@@ -71,14 +71,7 @@ let stepPan = 0;
 // a time when a roster row is selected.
 let stepFilter = null;
 let stepDrag = null;
-let peakLineY = null;
-// When the ceiling last rose. A live burst moves it as surely as a finished
-// step does, so the age describes the peak on screen, not the last step.
-let peakSince = 0;
-let peakSinceValue = 0;
-let peakSeeded = false;
 let liveHoverY = null;
-let peakHover = false;
 // The chart's ceiling is the session's best step by default; the other mode
 // scales to this turn, which is what a long session needs to stay readable.
 let ceilingMode = 'session';
@@ -228,7 +221,7 @@ function build() {
       <span class="foot-text">reading OpenCode usage</span>
       <span class="foot-actions">
         <button type="button" class="chip foot-copy" title="this session's numbers as a markdown table">copy stats</button>
-        <button type="button" class="chip foot-ceiling" title="the chart's ceiling: the whole session, or this turn">session peak</button>
+        <button type="button" class="chip foot-ceiling" title="the chart's ceiling: the whole tree, or this turn">tree peak</button>
       </span>
       <span class="foot-clock"></span>
     </div>
@@ -909,15 +902,21 @@ function scaleGrid(maximum, width, height, pad) {
   }).join('');
 }
 
-/** The best step of this turn, 0 when there is no turn to measure. */
+/** The best rated step of this turn, including its own timestamp. */
 function turnPeakOf(data) {
   const from = data.turn?.startedAt;
-  if (!from) return 0;
-  let best = 0;
+  if (!from) return null;
+  let best = null;
   for (const step of Array.isArray(data.steps) ? data.steps : []) {
-    if ((step.at ?? 0) >= from && step.tps > best) best = step.tps;
+    if (!step.aborted && step.at >= from && step.tps > (best?.tps ?? 0)) best = step;
   }
   return best;
+}
+
+function peakReadout(label, rate, at, now, step) {
+  const age = Number.isFinite(at) ? duration(now - at) : '';
+  const detail = step ? ` · ${compact(step.tokens)} tok in ${seconds(step.ms)}${step.sub ? ' · subagent' : ''}` : '';
+  return `${label} ${Math.round(rate)} t/s${detail}${age ? ` · ${age} ago` : ''}`;
 }
 
 /** A button that says what it did for a moment, then goes back to its name. */
@@ -999,6 +998,9 @@ function drawLive(data) {
   const main = data.rates?.main ?? null;
   const mainAvg = Number(main?.avg) || 0;
   const mainPeak = Number(main?.peak) || 0;
+  const turnStep = ceilingMode === 'turn' ? turnPeakOf(data) : null;
+  const measuredPeak = turnStep?.tps ?? rates.peak;
+  const measuredAt = turnStep?.at ?? rates.peakAt;
 
   // A finished turn leaves a flat zero line. Redrawing it on every animation
   // frame wrote the same path 61 times a second; one draw per second is enough
@@ -1006,14 +1008,12 @@ function drawLive(data) {
   // its own. Only a visible window with no rate at all takes this short path.
   const flatZero = visible.length > 0 && visible.every((point) => point.v === 0);
   if (flatZero && liveHoverX === null && liveHoverY === null) {
-    const idleTurnPeak = ceilingMode === 'turn' ? turnPeakOf(data) : 0;
-    const idleCeiling = rateCeiling(Math.max(idleTurnPeak > 0 ? idleTurnPeak : rates.peak, rates.avg));
     // The left edge of a flat line is not a picture: a first sample a pixel
     // younger or older looks the same, so the whole-second clock is the only
     // thing that changes the drawing. The session is in the key because the
     // peak label is rebuilt from its own peak age on a switch.
     const sessionKey = data.session ?? sessionId ?? '';
-    const idleKey = `${sessionKey}|${width}|${height}|${liveWindowMs}|${ceilingMode}|${idleTurnPeak}|${rates.avg}|${rates.peak}|${mainAvg}|${mainPeak}|${main?.peakAt ?? ''}|${idleCeiling}|${Math.floor(now / 1_000)}`;
+    const idleKey = `${sessionKey}|${width}|${height}|${liveWindowMs}|${ceilingMode}|${Boolean(turnStep)}|${measuredPeak}|${measuredAt ?? ''}|${rates.avg}|${mainAvg}|${mainPeak}|${main?.peakAt ?? ''}|${Math.floor(now / 1_000)}`;
     if (idleKey === lastIdleKey) return;
     lastIdleKey = idleKey;
   } else {
@@ -1038,12 +1038,19 @@ function drawLive(data) {
   // point is the measured value, so it is drawn as measured.
   const newestSample = visible[visible.length - 1];
   if (newestSample && newestSample.v === 0 && smooth.length) smooth[smooth.length - 1] = 0;
-  const liveTop = smooth.reduce((best, value) => Math.max(best, value), 0);
-  const turnPeak = ceilingMode === 'turn' ? turnPeakOf(data) : 0;
-  const turnMode = ceilingMode === 'turn' && turnPeak > 0;
+  let liveTop = 0;
+  let liveTopAt = null;
+  for (let index = 0; index < smooth.length; index += 1) {
+    if (smooth[index] <= liveTop) continue;
+    liveTop = smooth[index];
+    liveTopAt = visible[index].t;
+  }
   // Retain the existing peak selection (finished step or visible live burst).
   // The ceiling is the peak itself; a smaller one is drawn at its actual value.
-  const ceilingPeak = Math.max(turnMode ? turnPeak : rates.peak, liveTop);
+  const ceilingPeak = Math.max(measuredPeak, liveTop);
+  const liveSetsPeak = liveTop > measuredPeak;
+  const peakAt = liveSetsPeak ? liveTopAt : measuredAt;
+  const peakLabel = liveSetsPeak ? 'live peak' : turnStep ? 'turn peak' : 'total peak';
   const max = rateCeiling(Math.max(ceilingPeak, rates.avg, mainAvg));
   const share = (value) => symlogShare(value, max);
   const lineY = (value) => height - pad - share(value) * (height - pad * 2);
@@ -1072,7 +1079,10 @@ function drawLive(data) {
   // Every reference on the chart. The main pair is dimmer and finer; its
   // labels name the main session, which is the pair a subagent's steps cannot
   // move.
-  const mainAge = typeof main?.peakAt === 'number' ? duration(now - main.peakAt) : '';
+  // Keep scope names on narrow rails; age is still available in the hover readout.
+  const showPeakAge = width >= 220;
+  const mainPeakY = mainPeak > 0 && mainPeak <= max ? lineY(mainPeak) : null;
+  const peakLineY = ceilingPeak > 0 ? lineY(ceilingPeak) : null;
   const refs = [
     {
       line: nodes['main-avg'],
@@ -1085,42 +1095,22 @@ function drawLive(data) {
       label: nodes['main-peak-label'],
       // A turn-scale chart can sit below the session's best main step; drawing
       // the line above the plot would put a number at a height it never reached.
-      y: mainPeak > 0 && mainPeak <= max ? lineY(mainPeak) : null,
-      text: `main peak ${Math.round(mainPeak)} t/s${mainAge ? ` · ${mainAge} ago` : ''}`,
+      y: mainPeakY,
+      text: peakReadout('main peak', mainPeak, showPeakAge ? main?.peakAt : null, now),
     },
     {
       line: nodes.avg,
       label: nodes['avg-label'],
       y: rates.avg > 0 && rates.avg <= max ? lineY(rates.avg) : null,
-      text: `avg ${Math.round(rates.avg)} t/s`,
+      text: `total avg ${Math.round(rates.avg)} t/s`,
     },
-  ];
-
-  if (ceilingPeak > 0) {
-    const y = lineY(ceilingPeak);
-    peakLineY = y;
-    // How old the best step is: the scale is pinned to it, so "peak 337" beside
-    // a 20 t/s stream needs the date to make sense.
-    if (!peakSeeded) {
-      peakSeeded = true;
-      peakSinceValue = ceilingPeak;
-      peakSince = rates.peakAt ?? now;
-    }
-    if (ceilingPeak > peakSinceValue + 0.05) {
-      peakSinceValue = ceilingPeak;
-      peakSince = now;
-    }
-    const age = peakSince ? duration(now - peakSince) : '';
-    refs.push({
+    {
       line: nodes.peak,
       label: nodes['peak-label'],
-      y,
-      text: `${turnMode ? 'turn peak' : 'peak'} ${Math.round(ceilingPeak)} t/s${age ? ` · ${age} ago` : ''}`,
-    });
-  } else {
-    peakLineY = null;
-    refs.push({ line: nodes.peak, label: nodes['peak-label'], y: null, text: '' });
-  }
+      y: peakLineY,
+      text: peakReadout(peakLabel, ceilingPeak, showPeakAge ? peakAt : null, now),
+    },
+  ];
   placeRefs(refs, width, height, pad);
 
   // The sample nearest the pointer. Geometry follows the smoothed curve, but
@@ -1187,14 +1177,17 @@ function drawLive(data) {
     showPart(nodes.baseline, true);
   }
 
-  if (liveHoverY !== null && peakLineY !== null) peakHover = Math.abs(liveHoverY - peakLineY) < 6;
-  if (peakHover && ceilingPeak > 0) {
-    // The line's own step: the label above it already carries the age, this
-    // adds the shape of the step that set the ceiling.
-    const step = (data.steps ?? []).find((item) => Math.abs(item.tps - ceilingPeak) < 0.05);
-    ui.peak.textContent = step
-      ? `peak ${Math.round(ceilingPeak)} t/s · ${compact(step.tokens)} tok in ${seconds(step.ms)}${step.sub ? ' · subagent' : ''}`
-      : `peak ${Math.round(ceilingPeak)} t/s`;
+  const distance = (y) => liveHoverY === null || y === null ? Infinity : Math.abs(liveHoverY - y);
+  const mainDistance = distance(mainPeakY);
+  const peakDistance = distance(peakLineY);
+  if (Math.min(mainDistance, peakDistance) < 6) {
+    const isMain = mainDistance < peakDistance;
+    const rate = isMain ? mainPeak : ceilingPeak;
+    const at = isMain ? main?.peakAt : peakAt;
+    const step = !isMain && liveSetsPeak ? null : !isMain && turnStep ? turnStep : (data.steps ?? []).find((item) =>
+      !item.aborted && (!isMain || !item.sub) && Math.abs(item.tps - rate) < 0.05 && (at == null || item.at === at),
+    );
+    ui.peak.textContent = peakReadout(isMain ? 'main peak' : peakLabel, rate, at, now, step);
   } else {
     ui.peak.textContent = hovered
       ? `${Math.round(hovered.value)} t/s · ${Math.max(0, Math.round((now - hovered.at) / 1_000))} s ago`
@@ -1317,8 +1310,8 @@ function drawSteps(data) {
   // With every step on the chart a long session gets one-pixel bars; a gap
   // under half a pixel would just erase them.
   const barWidth = Math.max(1, Math.min(14, slot - 1));
-  ui.stepsAvg.textContent = average > 0 ? `avg ${Math.round(average)} t/s` : '';
-  ui.stepsPeak.textContent = peak > 0 ? `peak ${Math.round(peak)} t/s` : '';
+  ui.stepsAvg.textContent = average > 0 ? `steps avg ${Math.round(average)} t/s` : '';
+  ui.stepsPeak.textContent = peak > 0 ? `steps peak ${Math.round(peak)} t/s` : '';
   // The readout takes the axis row while a bar is under the pointer: the two
   // time labels have nothing to say about one step.
   if (hover === null) {
@@ -1920,18 +1913,16 @@ host.onReady((ctx) => {
     // takes a second to open, cannot be styled and cannot hold the whole
     // readout. Both handlers stay attached for the life of the frame.
     ui.live.addEventListener('pointermove', (event) => {
-      const rect = ui.live.getBoundingClientRect();
-      liveHoverX = event.clientX - rect.left;
-      // A few pixels around the ceiling line read out the step behind it: the
-      // label gives the age, this gives the step that set it.
-      liveHoverY = event.clientY - rect.top;
-      peakHover = peakLineY !== null && Math.abs(liveHoverY - peakLineY) < 6;
+      const matrix = ui.live.getScreenCTM();
+      if (!matrix) return;
+      const point = new DOMPoint(event.clientX, event.clientY).matrixTransform(matrix.inverse());
+      liveHoverX = point.x;
+      liveHoverY = point.y;
       if (current) drawLive(current);
     });
     ui.live.addEventListener('pointerleave', () => {
       liveHoverX = null;
       liveHoverY = null;
-      peakHover = false;
       if (current) drawLive(current);
     });
     // The wheel moves a target; the frame loop eases the drawn window towards
@@ -2028,7 +2019,7 @@ host.onReady((ctx) => {
     });
     ui.footCeiling.addEventListener('click', () => {
       ceilingMode = ceilingMode === 'session' ? 'turn' : 'session';
-      ui.footCeiling.textContent = ceilingMode === 'turn' ? 'turn peak' : 'session peak';
+      ui.footCeiling.textContent = ceilingMode === 'turn' ? 'turn peak' : 'tree peak';
       if (current) drawLive(current);
     });
     ui.stepsChart.addEventListener('pointermove', (event) => {
@@ -2200,10 +2191,6 @@ host.onReady((ctx) => {
   stepHover = null;
   liveHoverX = null;
   liveHoverY = null;
-  peakHover = false;
-  peakSeeded = false;
-  peakSince = 0;
-  peakSinceValue = 0;
   sessionId = nextSession;
   current = null;
   clearNotice();
