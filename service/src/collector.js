@@ -886,6 +886,28 @@ export function snapshot(collector, now = Date.now(), tree = [collector], priceB
     collector.derived = derived;
   }
   const { steps, subOwner, shownSteps, rates, mainRates, wire } = derived;
+  // The main pair travels one line at a time. A field is left out when the
+  // panel's whole-t/s label would print the same number as the tree's: a
+  // subagent that only moved the peak must not put a second `avg 148` line on
+  // the chart. The comparison is at display precision, which is what a reader
+  // sees; the wire keeps its tenths.
+  let mainWire = null;
+  if (mainRates && mainRates.peak > 0) {
+    // Compare what the panel will print: the wire rounds to tenths and the
+    // label rounds those to whole t/s, so compare the same two-step result.
+    const round10 = (value) => Math.round(value * 10) / 10;
+    const mainAvgWire = round10(mainRates.avg);
+    const mainPeakWire = round10(mainRates.peak);
+    const avgDiffers = Math.round(mainAvgWire) !== Math.round(round10(rates.avg));
+    const peakDiffers = Math.round(mainPeakWire) !== Math.round(round10(rates.peak));
+    if (avgDiffers || peakDiffers) {
+      mainWire = {
+        ...(avgDiffers ? { avg: mainAvgWire } : {}),
+        ...(peakDiffers ? { peak: mainPeakWire } : {}),
+        ...(peakDiffers && mainRates.peakAt ? { peakAt: mainRates.peakAt } : {}),
+      };
+    }
+  }
   const prompt = totals.input + totals.cacheRead + totals.cacheWrite;
   const generated = totals.output + totals.reasoning;
   const consumed = prompt + generated;
@@ -1337,18 +1359,9 @@ export function snapshot(collector, now = Date.now(), tree = [collector], priceB
       // When the best step ran. The chart pins its scale to that number, so the
       // frame can say how old it is.
       ...(rates.peakAt ? { peakAt: rates.peakAt } : {}),
-      // The main session alone. An identical pair, or one where a subagent's
-      // step was never rated, would draw the same reference line twice; the
-      // panel only receives a pair that says something the tree pair does not.
-      ...(mainRates && mainRates.peak > 0 && (Math.abs(mainRates.avg - rates.avg) > 0.05 || mainRates.peak !== rates.peak)
-        ? {
-            main: {
-              avg: Math.round(mainRates.avg * 10) / 10,
-              peak: Math.round(mainRates.peak * 10) / 10,
-              ...(mainRates.peakAt ? { peakAt: mainRates.peakAt } : {}),
-            },
-          }
-        : {}),
+      // The main session alone, one line at a time: see `mainWire`. Absent when
+      // no main number differs at the precision the panel prints.
+      ...(mainWire ? { main: mainWire } : {}),
     },
     generatedAt: now,
   };

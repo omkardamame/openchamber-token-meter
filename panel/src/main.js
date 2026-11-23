@@ -797,26 +797,6 @@ function closeBudgetForm() {
 // change. Rebuilding the tree every frame meant parsing a new SVG 12.5 times a
 // second, which is why the curve stepped instead of moving, and why raising the
 // rate any further was too expensive to consider.
-const LIVE_PARTS = [
-  'avg',
-  'avg-label',
-  'baseline',
-  'cross',
-  'cross-dot',
-  'dot',
-  'fill',
-  'main-avg',
-  'main-avg-label',
-  'main-peak',
-  'main-peak-label',
-  'scale',
-  'line',
-  'peak',
-  'peak-label',
-  'time-0.25',
-  'time-0.5',
-  'time-0.75',
-];
 let liveSkeleton = null;
 let liveSkeletonKey = '';
 
@@ -889,10 +869,15 @@ function placeRefs(items, width, height, pad) {
     if (item.y === null) {
       showPart(item.line, false);
       showPart(item.label, false);
+      // A hidden label keeps no text: an empty box is a truth a test or an
+      // accessibility reader can see.
+      if (item.label.textContent !== '') item.label.textContent = '';
       continue;
     }
     placeY(item.line, item.y, width);
-    item.label.textContent = item.text;
+    // Only write when the string changed: a streaming frame redraws at display
+    // rate, and replacing the same text node 60 times a second re-shapes it.
+    if (item.label.textContent !== item.text) item.label.textContent = item.text;
     shown.push(item);
   }
   shown.sort((a, b) => a.y - b.y);

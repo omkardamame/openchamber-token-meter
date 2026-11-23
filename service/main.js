@@ -1224,6 +1224,21 @@ function snapshot(collector, now = Date.now(), tree = [collector], priceBook = n
     collector.derived = derived;
   }
   const { steps, subOwner, shownSteps, rates, mainRates, wire } = derived;
+  let mainWire = null;
+  if (mainRates && mainRates.peak > 0) {
+    const round10 = (value) => Math.round(value * 10) / 10;
+    const mainAvgWire = round10(mainRates.avg);
+    const mainPeakWire = round10(mainRates.peak);
+    const avgDiffers = Math.round(mainAvgWire) !== Math.round(round10(rates.avg));
+    const peakDiffers = Math.round(mainPeakWire) !== Math.round(round10(rates.peak));
+    if (avgDiffers || peakDiffers) {
+      mainWire = {
+        ...avgDiffers ? { avg: mainAvgWire } : {},
+        ...peakDiffers ? { peak: mainPeakWire } : {},
+        ...peakDiffers && mainRates.peakAt ? { peakAt: mainRates.peakAt } : {}
+      };
+    }
+  }
   const prompt = totals.input + totals.cacheRead + totals.cacheWrite;
   const generated = totals.output + totals.reasoning;
   const consumed = prompt + generated;
@@ -1541,13 +1556,7 @@ function snapshot(collector, now = Date.now(), tree = [collector], priceBook = n
       avg: Math.round(rates.avg * 10) / 10,
       peak: Math.round(rates.peak * 10) / 10,
       ...rates.peakAt ? { peakAt: rates.peakAt } : {},
-      ...mainRates && mainRates.peak > 0 && (Math.abs(mainRates.avg - rates.avg) > 0.05 || mainRates.peak !== rates.peak) ? {
-        main: {
-          avg: Math.round(mainRates.avg * 10) / 10,
-          peak: Math.round(mainRates.peak * 10) / 10,
-          ...mainRates.peakAt ? { peakAt: mainRates.peakAt } : {}
-        }
-      } : {}
+      ...mainWire ? { main: mainWire } : {}
     },
     generatedAt: now
   };

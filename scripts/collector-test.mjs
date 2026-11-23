@@ -1036,8 +1036,8 @@ check(
 );
 
 // A tree's average and peak include the subagents' steps. The panel draws the
-// main session's own pair beside them, so the wire has to carry it separately —
-// and only when it says something the tree pair does not.
+// main session's own numbers beside them, so the wire has to carry them
+// separately — and only the lines that would print a different number.
 const mainRatesRun = createCollector('ses_main_rates');
 const mainRatesChild = createCollector('ses_main_rates_child');
 mainRatesChild.parentId = mainRatesRun.id;
@@ -1070,6 +1070,73 @@ check(
   'SN-23 a subagent step that cannot be rated adds no duplicate main pair',
   snapshot(mainRatesRun, 10_000, [mainRatesRun, quietMainChild]).rates.main === undefined,
   JSON.stringify(snapshot(mainRatesRun, 10_000, [mainRatesRun, quietMainChild]).rates),
+);
+const mainRatesGrandchild = createCollector('ses_main_rates_grandchild');
+mainRatesGrandchild.parentId = mainRatesChild.id;
+mainRatesGrandchild.steps = [{ aborted: false, at: 2_500, ms: 1_000, tokens: 500, tps: 500 }];
+mainRatesGrandchild.stepsSeq = 1;
+const grandMainSnap = snapshot(mainRatesRun, 10_000, [mainRatesRun, mainRatesChild, mainRatesGrandchild]);
+check(
+  'SN-24 a grandchild moves the tree but not the main pair',
+  grandMainSnap.rates.peak === 500 &&
+    grandMainSnap.rates.main?.avg === 30 &&
+    grandMainSnap.rates.main?.peak === 40,
+  JSON.stringify(grandMainSnap.rates),
+);
+const avgOnlyRun = createCollector('ses_main_avg_only');
+const avgOnlyChild = createCollector('ses_main_avg_only_child');
+avgOnlyRun.steps = [{ aborted: false, at: 1_000, ms: 1_000, tokens: 100, tps: 100 }];
+avgOnlyRun.stepsSeq = 1;
+avgOnlyChild.steps = [{ aborted: false, at: 1_500, ms: 1_000, tokens: 10, tps: 10 }];
+avgOnlyChild.stepsSeq = 1;
+const avgOnlySnap = snapshot(avgOnlyRun, 10_000, [avgOnlyRun, avgOnlyChild]);
+check(
+  'SN-25 a moved average travels without a duplicate peak line',
+  avgOnlySnap.rates.main?.avg === 100 && avgOnlySnap.rates.main?.peak === undefined,
+  JSON.stringify(avgOnlySnap.rates),
+);
+const mainPeakOnlyRun = createCollector('ses_main_peak_only');
+const mainPeakOnlyChild = createCollector('ses_main_peak_only_child');
+mainPeakOnlyRun.steps = [
+  { aborted: false, at: 1_000, ms: 1_000, tokens: 50, tps: 50 },
+  { aborted: false, at: 2_000, ms: 1_000, tokens: 50, tps: 50 },
+];
+mainPeakOnlyRun.stepsSeq = 1;
+mainPeakOnlyChild.steps = [
+  { aborted: false, at: 1_500, ms: 1_000, tokens: 150, tps: 150 },
+  { aborted: false, at: 1_800, ms: 2_000, tokens: 1, tps: 0.5 },
+];
+mainPeakOnlyChild.stepsSeq = 1;
+const mainPeakOnlySnap = snapshot(mainPeakOnlyRun, 10_000, [mainPeakOnlyRun, mainPeakOnlyChild]);
+check(
+  'SN-26 a moved peak travels without a duplicate average line',
+  mainPeakOnlySnap.rates.main?.avg === undefined &&
+    mainPeakOnlySnap.rates.main?.peak === 50 &&
+    mainPeakOnlySnap.rates.main?.peakAt === 1_000,
+  JSON.stringify(mainPeakOnlySnap.rates),
+);
+const samePrintRun = createCollector('ses_main_same_print');
+const samePrintChild = createCollector('ses_main_same_print_child');
+samePrintRun.steps = [{ aborted: false, at: 1_000, ms: 10_000, tokens: 794, tps: 79.4 }];
+samePrintRun.stepsSeq = 1;
+samePrintChild.steps = [{ aborted: false, at: 1_500, ms: 10_000, tokens: 786, tps: 78.6 }];
+samePrintChild.stepsSeq = 1;
+const samePrintSnap = snapshot(samePrintRun, 10_000, [samePrintRun, samePrintChild]);
+check(
+  'SN-27 a pair that prints the same whole numbers as the tree is not sent',
+  samePrintSnap.rates.avg === 79 && samePrintSnap.rates.peak === 79.4 && samePrintSnap.rates.main === undefined,
+  JSON.stringify(samePrintSnap.rates),
+);
+const unratedMainRun = createCollector('ses_main_unrated');
+const unratedMainChild = createCollector('ses_main_unrated_child');
+unratedMainRun.steps = [{ aborted: false, at: 1_000, ms: 100, tokens: 0, tps: null }];
+unratedMainRun.stepsSeq = 1;
+unratedMainChild.steps = [{ aborted: false, at: 1_500, ms: 1_000, tokens: 300, tps: 300 }];
+unratedMainChild.stepsSeq = 1;
+check(
+  'SN-28 a main session with no rated step claims no number instead of zero',
+  snapshot(unratedMainRun, 10_000, [unratedMainRun, unratedMainChild]).rates.main === undefined,
+  JSON.stringify(snapshot(unratedMainRun, 10_000, [unratedMainRun, unratedMainChild]).rates),
 );
 
 // The live series stops at 60 s. The coarse ring behind it keeps five minutes as

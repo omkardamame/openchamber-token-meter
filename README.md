@@ -36,10 +36,10 @@ https://github.com/omkardamame/openchamber-token-meter.git
   compress logarithmically. Clean ticks adapt to the range and chart height, and
   the axis is pinned to the session's actual peak, so a peak below 300 stays at
   the top edge instead of being inflated to a fixed floor. The red `peak` and
-  green `avg` lines use the same mapping. When subagent steps move either
-  number, a second, finer pair labelled `main avg` and `main peak` shows the
-  session's own rates beside the whole tree's. Rates and hover readouts stay in
-  t/s.
+  green `avg` lines use the same mapping. When subagent steps move the tree's
+  average or peak, a finer `main avg` or `main peak` line appears beside it for
+  the session's own steps; a line that would print the same number as the
+  tree's is left out. Rates and hover readouts stay in t/s.
 - **Automatic recording** — graphs start without opening a panel, while the
   OpenChamber host is running. The latest hour of samples for up to 200 sessions
   is saved locally across restarts; newer recordings evict older ones. Opening

@@ -504,6 +504,23 @@ const harness = `<!doctype html><meta charset="utf-8"><title>page test</title>
         resolve(JSON.stringify({ writes }));
       }, ms);
     });
+  // How many times the live chart's reference labels rewrite their text over a
+  // window. Their age strings tick once a second; a streaming frame must not
+  // re-shape them on every callback.
+  window.__labelWrites = (ms) =>
+    new Promise((resolve) => {
+      const nodes = [...frame.contentDocument.querySelectorAll('[data-chart="live"] text[data-n$="-label"]')];
+      let writes = 0;
+      const watch = new MutationObserver((records) => {
+        writes += records.length;
+      });
+      for (const node of nodes) watch.observe(node, { childList: true, characterData: true, subtree: true });
+      window.setTimeout(() => {
+        watch.takeRecords();
+        watch.disconnect();
+        resolve(JSON.stringify({ writes }));
+      }, ms);
+    });
   // A second ready is how the host switches sessions; the SDK re-fires onReady.
   window.__switchSession = (next, id) => {
     window.__state = next;
@@ -895,6 +912,7 @@ const run = async (page) => {
     },
     hoverChurn: async (moves) => JSON.parse(JSON.parse(await browser(['eval', `window.__hoverChurn(${moves})`]))),
     liveWrites: async (ms) => JSON.parse(JSON.parse(await browser(['eval', `(async () => await window.__liveWrites(${ms}))()`]))),
+    labelWrites: async (ms) => JSON.parse(JSON.parse(await browser(['eval', `(async () => await window.__labelWrites(${ms}))()`]))),
     trail: async () => JSON.parse(JSON.parse(await browser(['eval', 'JSON.stringify(window.__trail)']))),
   };
 };
@@ -1097,12 +1115,52 @@ try {
     bothPairs.refLabelFonts.join(', '),
   );
   await panel.screenshot(path.join(process.env.TMPDIR ?? '/tmp', 'token-meter-panel-main-pair.png'));
-  // Four labels on a 200px plot: two near the top edge can collide, and the
-  // frame has to move one down rather than print them on top of each other.
+  // Turn mode scales to this turn's best step. A session main peak above that
+  // plot must not be drawn at a height the plot does not have.
   await panel.set({
     ...mainRatesState,
     generatedAt: Date.now(),
-    rates: { avg: 79, peak: 334, main: { avg: 330, peak: 334 } },
+    rates: { avg: 79, peak: 334, peakAt: pairAt - 480_000, main: { avg: 62, peak: 250, peakAt: pairAt - 300_000 } },
+  });
+  const sessionMain = await panel.read();
+  await panel.click('.foot-ceiling');
+  await panel.wait(150);
+  const turnMain = await panel.read();
+  check(
+    'turn mode hides a main peak above its plot but keeps the main average',
+    sessionMain.ceilingChip === 'session peak' &&
+      sessionMain.mainPeakY !== null &&
+      turnMain.ceilingChip === 'turn peak' &&
+      turnMain.mainPeakY === null &&
+      turnMain.mainAvgY !== null &&
+      turnMain.labels.some((label) => /^turn peak 180 t\/s/.test(label)),
+    `${sessionMain.ceilingChip}/${turnMain.ceilingChip} · ${turnMain.labels.join(' | ')}`,
+  );
+  await panel.click('.foot-ceiling');
+  await panel.wait(150);
+  // The service sends one main line at a time when only one number moved; the
+  // panel must not invent the other from a missing field.
+  await panel.set(state({ rates: { avg: 79, peak: 334, main: { avg: 62 } } }));
+  const avgOnly = await panel.read();
+  check(
+    'a main average travels without inventing a main peak',
+    avgOnly.mainAvgY !== null && avgOnly.mainPeakY === null && avgOnly.refLabelYs.length === 3,
+    `${avgOnly.mainAvgY}/${avgOnly.mainPeakY} · ${avgOnly.labels.join(' | ')}`,
+  );
+  await panel.set(state({ rates: { avg: 79, peak: 334, main: { peak: 120, peakAt: Date.now() - 300_000 } } }));
+  const peakOnly = await panel.read();
+  check(
+    'a main peak travels without inventing a main average',
+    peakOnly.mainAvgY === null && peakOnly.mainPeakY !== null && peakOnly.refLabelYs.length === 3,
+    `${peakOnly.mainAvgY}/${peakOnly.mainPeakY} · ${peakOnly.labels.join(' | ')}`,
+  );
+  // Four labels on a 200px plot: the two peaks and the main average can sit
+  // close together, and the frame has to move one down rather than print them
+  // on top of each other. All four numbers differ, as the wire guarantees.
+  await panel.set({
+    ...mainRatesState,
+    generatedAt: Date.now(),
+    rates: { avg: 79, peak: 334, main: { avg: 330, peak: 332 } },
   });
   const crowdedPairs = await panel.read();
   check(
@@ -1115,9 +1173,47 @@ try {
   await panel.set(state());
   const noMainPair = await panel.read();
   check(
-    'panel hides the main pair again when the service sends none',
-    noMainPair.mainAvgY === null && noMainPair.mainPeakY === null,
-    `${noMainPair.mainAvgY}, ${noMainPair.mainPeakY}`,
+    'panel hides the main pair and clears its text when the service sends none',
+    noMainPair.mainAvgY === null &&
+      noMainPair.mainPeakY === null &&
+      !noMainPair.labels.some((label) => label.startsWith('main ')),
+    `${noMainPair.mainAvgY}, ${noMainPair.mainPeakY} · ${noMainPair.labels.join(' | ')}`,
+  );
+  // A flat graph only redraws when its picture changes; the main numbers are
+  // part of that picture, not just the tree's.
+  const flatMainAt = Date.now();
+  const flatMain = state({
+    generatedAt: flatMainAt,
+    rates: {
+      avg: 79,
+      peak: 334,
+      peakAt: flatMainAt - 480_000,
+      main: { avg: 62, peak: 120, peakAt: flatMainAt - 300_000 },
+    },
+    series: { t0: flatMainAt - 4_000, step: 250, v: [0, 0, 0, 0] },
+  });
+  await panel.set(flatMain);
+  await panel.wait(300);
+  await panel.set({
+    ...flatMain,
+    generatedAt: Date.now(),
+    rates: { ...flatMain.rates, main: { avg: 63, peak: 120, peakAt: flatMain.rates.main.peakAt } },
+  });
+  const flatMoved = await panel.read();
+  check(
+    'a flat graph redraws when only the main average changes',
+    flatMoved.labels.some((label) => label === 'main avg 63 t/s'),
+    flatMoved.labels.join(' | '),
+  );
+  // The age labels tick once a second; a streaming frame must not re-shape
+  // every reference label 60 times a second.
+  await panel.set(state({ status: 'streaming', generatedAt: Date.now(), series: { t0: Date.now() - 2_000, step: 250, v: [40, 60] } }));
+  await panel.wait(300);
+  const labelWrites = await panel.labelWrites(1_000);
+  check(
+    'reference labels are not rewritten on every streaming frame',
+    labelWrites.writes >= 0 && labelWrites.writes <= 12,
+    `${labelWrites.writes} label writes in 1 s`,
   );
   check(
     'panel draws the curve under the peak line, not over it',
