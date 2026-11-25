@@ -153,6 +153,24 @@ function bareId(model) {
   const cut = model.indexOf("/");
   return cut === -1 ? model : model.slice(cut + 1);
 }
+var cardIndexCache = new WeakMap;
+var AMBIGUOUS = Symbol("ambiguous");
+function indexCards(cards) {
+  let cached = cardIndexCache.get(cards);
+  if (cached)
+    return cached;
+  const byLower = new Map;
+  const byBare = new Map;
+  for (const id of Object.keys(cards)) {
+    const lower = id.toLowerCase();
+    byLower.set(lower, byLower.has(lower) ? AMBIGUOUS : id);
+    const bare = bareId(id);
+    byBare.set(bare, byBare.has(bare) ? AMBIGUOUS : id);
+  }
+  cached = { byLower, byBare };
+  cardIndexCache.set(cards, cached);
+  return cached;
+}
 function resolvePrice(book, { provider, model, promptTokens = 0, at = Date.now(), overrides = null } = {}) {
   if (!book?.providers || !provider || !model)
     return null;
@@ -162,10 +180,10 @@ function resolvePrice(book, { provider, model, promptTokens = 0, at = Date.now()
   if (cards && cards[model])
     return finish(book, priceProvider, model, cards[model], "exact", promptTokens, at, overrides);
   if (cards) {
-    const lower = model.toLowerCase();
-    const sameModel = Object.keys(cards).filter((id) => id.toLowerCase() === lower);
-    if (sameModel.length === 1) {
-      return finish(book, priceProvider, sameModel[0], cards[sameModel[0]], "exact", promptTokens, at, overrides);
+    const idx = indexCards(cards);
+    const sameId = idx.byLower.get(model.toLowerCase());
+    if (sameId && sameId !== AMBIGUOUS) {
+      return finish(book, priceProvider, sameId, cards[sameId], "exact", promptTokens, at, overrides);
     }
   }
   const aliasId = aliases.models?.[provider]?.[model];
@@ -173,13 +191,14 @@ function resolvePrice(book, { provider, model, promptTokens = 0, at = Date.now()
     return finish(book, priceProvider, aliasId, cards[aliasId], "alias", promptTokens, at, overrides);
   }
   if (cards) {
+    const idx = indexCards(cards);
     const bare = bareId(model);
-    const matches = Object.keys(cards).filter((id) => id === bare || bareId(id) === bare);
-    if (matches.length === 1) {
-      return finish(book, priceProvider, matches[0], cards[matches[0]], "bare", promptTokens, at, overrides);
-    }
-    if (matches.length > 1)
+    const bareMatch = idx.byBare.get(bare);
+    if (bareMatch === AMBIGUOUS)
       return null;
+    if (bareMatch) {
+      return finish(book, priceProvider, bareMatch, cards[bareMatch], "bare", promptTokens, at, overrides);
+    }
     if (FAMILIES.includes(model)) {
       const family = Object.keys(cards).filter((id) => id.startsWith(`claude-${model}-`)).sort((a, b) => (cards[a].release ?? "").localeCompare(cards[b].release ?? "") || a.localeCompare(b));
       const latest = family[family.length - 1];
@@ -1576,10 +1595,12 @@ function snapshot(collector, now = Date.now(), tree = [collector], priceBook = n
 var PRICE_BOOK = {
   aliases: {
     providers: {
+      "antigravity-acp": "google",
       "claude-agent": "anthropic",
       "command-code": "commandcode",
       commandcode: "commandcode",
       deepseek: "deepseek",
+      google: "google",
       openai: "openai",
       opencode: "opencode",
       "opencode-go": "opencode-go"
@@ -1599,7 +1620,7 @@ var PRICE_BOOK = {
       }
     }
   },
-  checkedAt: "2026-11-18",
+  checkedAt: "2026-11-25",
   currency: "USD",
   providers: {
     anthropic: {
@@ -2579,7 +2600,7 @@ var PRICE_BOOK = {
           },
           name: "Mistral Large 4",
           tiers: [],
-          release: "2026-10-06"
+          release: "2026-10-05"
         },
         "moonshotai/Kimi-K2.5": {
           cost: {
@@ -2885,7 +2906,7 @@ var PRICE_BOOK = {
           },
           name: "MiMo-V2.6-Pro-UltraSpeed",
           tiers: [],
-          release: "2026-09-21"
+          release: "2026-09-22"
         },
         "z-ai/glm-5.3-flash": {
           cost: {
@@ -3005,6 +3026,446 @@ var PRICE_BOOK = {
         }
       }
     },
+    google: {
+      name: "Google",
+      source: "Google list",
+      models: {
+        "deep-research-max-preview-04-2026": {
+          cost: {
+            cacheRead: 0.2,
+            cacheWrite: 0,
+            input: 2,
+            output: 12
+          },
+          name: "Deep Research Max Preview (Apr-21-2026)",
+          tiers: [
+            {
+              cost: {
+                cacheRead: 0.4,
+                cacheWrite: 0,
+                input: 4,
+                output: 18
+              },
+              minContext: 200000
+            }
+          ],
+          release: "2026-04-21"
+        },
+        "deep-research-preview-04-2026": {
+          cost: {
+            cacheRead: 0.2,
+            cacheWrite: 0,
+            input: 2,
+            output: 12
+          },
+          name: "Deep Research Preview (Apr-21-2026)",
+          tiers: [
+            {
+              cost: {
+                cacheRead: 0.4,
+                cacheWrite: 0,
+                input: 4,
+                output: 18
+              },
+              minContext: 200000
+            }
+          ],
+          release: "2026-04-21"
+        },
+        "gemini-2.5-flash": {
+          cost: {
+            cacheRead: 0.03,
+            cacheWrite: 0,
+            input: 0.3,
+            output: 2.5
+          },
+          name: "Gemini 2.5 Flash",
+          tiers: [],
+          release: "2025-06-17"
+        },
+        "gemini-2.5-flash-image": {
+          cost: {
+            cacheRead: 0,
+            cacheWrite: 0,
+            input: 0.3,
+            output: 2.5
+          },
+          name: "Nano Banana",
+          tiers: [],
+          release: "2025-10-02"
+        },
+        "gemini-2.5-flash-lite": {
+          cost: {
+            cacheRead: 0.01,
+            cacheWrite: 0,
+            input: 0.1,
+            output: 0.4
+          },
+          name: "Gemini 2.5 Flash-Lite",
+          tiers: [],
+          release: "2025-07-22"
+        },
+        "gemini-2.5-flash-preview-tts": {
+          cost: {
+            cacheRead: 0,
+            cacheWrite: 0,
+            input: 0.5,
+            output: 10
+          },
+          name: "Gemini 2.5 Flash Preview TTS",
+          tiers: [],
+          release: "2025-05-01"
+        },
+        "gemini-2.5-pro": {
+          cost: {
+            cacheRead: 0.125,
+            cacheWrite: 0,
+            input: 1.25,
+            output: 10
+          },
+          name: "Gemini 2.5 Pro",
+          tiers: [
+            {
+              cost: {
+                cacheRead: 0.25,
+                cacheWrite: 0,
+                input: 2.5,
+                output: 15
+              },
+              minContext: 200000
+            }
+          ],
+          release: "2025-06-17"
+        },
+        "gemini-2.5-pro-preview-tts": {
+          cost: {
+            cacheRead: 0,
+            cacheWrite: 0,
+            input: 1,
+            output: 20
+          },
+          name: "Gemini 2.5 Pro Preview TTS",
+          tiers: [],
+          release: "2025-05-01"
+        },
+        "gemini-3-flash-preview": {
+          cost: {
+            cacheRead: 0.05,
+            cacheWrite: 0,
+            input: 0.5,
+            output: 3
+          },
+          name: "Gemini 3 Flash Preview",
+          tiers: [],
+          release: "2025-12-17"
+        },
+        "gemini-3-pro-image": {
+          cost: {
+            cacheRead: 0,
+            cacheWrite: 0,
+            input: 2,
+            output: 12
+          },
+          name: "Nano Banana Pro",
+          tiers: [],
+          release: "2026-05-28"
+        },
+        "gemini-3.1-flash-image": {
+          cost: {
+            cacheRead: 0,
+            cacheWrite: 0,
+            input: 0.5,
+            output: 3
+          },
+          name: "Nano Banana 2",
+          tiers: [],
+          release: "2026-05-28"
+        },
+        "gemini-3.1-flash-lite": {
+          cost: {
+            cacheRead: 0.025,
+            cacheWrite: 0,
+            input: 0.25,
+            output: 1.5
+          },
+          name: "Gemini 3.1 Flash Lite",
+          tiers: [],
+          release: "2026-05-07"
+        },
+        "gemini-3.1-flash-lite-image": {
+          cost: {
+            cacheRead: 0,
+            cacheWrite: 0,
+            input: 0.25,
+            output: 1.5
+          },
+          name: "Nano Banana 2 Lite",
+          tiers: [],
+          release: "2026-06-30"
+        },
+        "gemini-3.1-flash-live-preview": {
+          cost: {
+            cacheRead: 0,
+            cacheWrite: 0,
+            input: 0.75,
+            output: 4.5
+          },
+          name: "Gemini 3.1 Flash Live Preview",
+          tiers: [],
+          release: "2026-03-26"
+        },
+        "gemini-3.1-flash-tts-preview": {
+          cost: {
+            cacheRead: 0,
+            cacheWrite: 0,
+            input: 1,
+            output: 20
+          },
+          name: "Gemini 3.1 Flash TTS Preview",
+          tiers: [],
+          release: "2026-04-15"
+        },
+        "gemini-3.1-pro-preview": {
+          cost: {
+            cacheRead: 0.2,
+            cacheWrite: 0,
+            input: 2,
+            output: 12
+          },
+          name: "Gemini 3.1 Pro Preview",
+          tiers: [
+            {
+              cost: {
+                cacheRead: 0.4,
+                cacheWrite: 0,
+                input: 4,
+                output: 18
+              },
+              minContext: 200000
+            }
+          ],
+          release: "2026-02-19"
+        },
+        "gemini-3.1-pro-preview-customtools": {
+          cost: {
+            cacheRead: 0.2,
+            cacheWrite: 0,
+            input: 2,
+            output: 12
+          },
+          name: "Gemini 3.1 Pro Preview Custom Tools",
+          tiers: [
+            {
+              cost: {
+                cacheRead: 0.4,
+                cacheWrite: 0,
+                input: 4,
+                output: 18
+              },
+              minContext: 200000
+            }
+          ],
+          release: "2026-02-19"
+        },
+        "gemini-3.5-flash": {
+          cost: {
+            cacheRead: 0.15,
+            cacheWrite: 0,
+            input: 1.5,
+            output: 9
+          },
+          name: "Gemini 3.5 Flash",
+          tiers: [],
+          release: "2026-05-19"
+        },
+        "gemini-3.5-flash-lite": {
+          cost: {
+            cacheRead: 0.03,
+            cacheWrite: 0,
+            input: 0.3,
+            output: 2.5
+          },
+          name: "Gemini 3.5 Flash Lite",
+          tiers: [],
+          release: "2026-07-21"
+        },
+        "gemini-3.5-live-translate-preview": {
+          cost: {
+            cacheRead: 0,
+            cacheWrite: 0,
+            input: 3.5,
+            output: 21
+          },
+          name: "Gemini 3.5 Live Translate Preview",
+          tiers: [],
+          release: "2026-06-09"
+        },
+        "gemini-3.6-flash": {
+          cost: {
+            cacheRead: 0.075,
+            cacheWrite: 0,
+            input: 0.75,
+            output: 3.75
+          },
+          name: "Gemini 3.6 Flash",
+          tiers: [],
+          release: "2026-07-21"
+        },
+        "gemini-3.7-flash": {
+          cost: {
+            cacheRead: 0.075,
+            cacheWrite: 0,
+            input: 0.75,
+            output: 3.75
+          },
+          name: "Gemini 3.7 Flash",
+          tiers: [],
+          release: "2026-08-13"
+        },
+        "gemini-3.8-flash": {
+          cost: {
+            cacheRead: 0.075,
+            cacheWrite: 0,
+            input: 0.75,
+            output: 3.75
+          },
+          name: "Gemini 3.8 Flash",
+          tiers: [],
+          release: "2026-09-02"
+        },
+        "gemini-4-argon": {
+          cost: {
+            cacheRead: 0.1,
+            cacheWrite: 0,
+            input: 2,
+            output: 10
+          },
+          name: "Gemini 4 Argon",
+          tiers: [],
+          release: "2026-10-13"
+        },
+        "gemini-4-carbon": {
+          cost: {
+            cacheRead: 0.1,
+            cacheWrite: 0,
+            input: 2,
+            output: 10
+          },
+          name: "Gemini 4 Carbon",
+          tiers: [],
+          release: "2026-11-10"
+        },
+        "gemini-4-hydrogen": {
+          cost: {
+            cacheRead: 0.075,
+            cacheWrite: 0,
+            input: 1.5,
+            output: 7.5
+          },
+          name: "Gemini 4 Hydrogen",
+          tiers: [],
+          release: "2026-11-12"
+        },
+        "gemini-4-neon": {
+          cost: {
+            cacheRead: 0.15,
+            cacheWrite: 0,
+            input: 3,
+            output: 15
+          },
+          name: "Gemini 4 Neon",
+          tiers: [],
+          release: "2026-11-18"
+        },
+        "gemini-embedding-001": {
+          cost: {
+            cacheRead: 0,
+            cacheWrite: 0,
+            input: 0.15,
+            output: 0
+          },
+          name: "Gemini Embedding 001",
+          tiers: [],
+          release: "2025-07-14"
+        },
+        "gemini-embedding-2": {
+          cost: {
+            cacheRead: 0,
+            cacheWrite: 0,
+            input: 0.2,
+            output: 0
+          },
+          name: "Gemini Embedding 2",
+          tiers: [],
+          release: "2026-04-22"
+        },
+        "gemini-flash-latest": {
+          cost: {
+            cacheRead: 0.075,
+            cacheWrite: 0,
+            input: 0.75,
+            output: 3.75
+          },
+          name: "Gemini Flash Latest",
+          tiers: [],
+          release: "2026-09-02"
+        },
+        "gemini-flash-lite-latest": {
+          cost: {
+            cacheRead: 0.03,
+            cacheWrite: 0,
+            input: 0.3,
+            output: 2.5
+          },
+          name: "Gemini Flash-Lite Latest",
+          tiers: [],
+          release: "2026-07-21"
+        },
+        "gemini-pro-latest": {
+          cost: {
+            cacheRead: 0.2,
+            cacheWrite: 0,
+            input: 2,
+            output: 12
+          },
+          name: "Gemini Pro Latest",
+          tiers: [
+            {
+              cost: {
+                cacheRead: 0.4,
+                cacheWrite: 0,
+                input: 4,
+                output: 18
+              },
+              minContext: 200000
+            }
+          ],
+          release: "2026-02-19"
+        },
+        "gemma-4-26b-a4b-it": {
+          cost: {
+            cacheRead: 0,
+            cacheWrite: 0,
+            input: 0,
+            output: 0
+          },
+          name: "Gemma 4 26B A4B IT",
+          tiers: [],
+          release: "2026-04-02"
+        },
+        "gemma-4-31b-it": {
+          cost: {
+            cacheRead: 0,
+            cacheWrite: 0,
+            input: 0,
+            output: 0
+          },
+          name: "Gemma 4 31B IT",
+          tiers: [],
+          release: "2026-04-02"
+        }
+      }
+    },
     openai: {
       name: "OpenAI",
       source: "OpenAI list",
@@ -3019,39 +3480,6 @@ var PRICE_BOOK = {
           name: "chatgpt-image-latest",
           tiers: [],
           release: "2025-12-16"
-        },
-        "gpt-3.5-turbo": {
-          cost: {
-            cacheRead: 0,
-            cacheWrite: 0,
-            input: 0.5,
-            output: 1.5
-          },
-          name: "GPT-3.5-turbo",
-          tiers: [],
-          release: "2023-03-01"
-        },
-        "gpt-4": {
-          cost: {
-            cacheRead: 0,
-            cacheWrite: 0,
-            input: 30,
-            output: 60
-          },
-          name: "GPT-4",
-          tiers: [],
-          release: "2023-11-06"
-        },
-        "gpt-4-turbo": {
-          cost: {
-            cacheRead: 0,
-            cacheWrite: 0,
-            input: 10,
-            output: 30
-          },
-          name: "GPT-4 Turbo",
-          tiers: [],
-          release: "2023-11-06"
         },
         "gpt-4.1": {
           cost: {
@@ -3075,17 +3503,6 @@ var PRICE_BOOK = {
           tiers: [],
           release: "2025-04-14"
         },
-        "gpt-4.1-nano": {
-          cost: {
-            cacheRead: 0.025,
-            cacheWrite: 0,
-            input: 0.1,
-            output: 0.4
-          },
-          name: "GPT-4.1 nano",
-          tiers: [],
-          release: "2025-04-14"
-        },
         "gpt-4o": {
           cost: {
             cacheRead: 1.25,
@@ -3094,17 +3511,6 @@ var PRICE_BOOK = {
             output: 10
           },
           name: "GPT-4o",
-          tiers: [],
-          release: "2024-05-13"
-        },
-        "gpt-4o-2024-05-13": {
-          cost: {
-            cacheRead: 0,
-            cacheWrite: 0,
-            input: 5,
-            output: 15
-          },
-          name: "GPT-4o (2024-05-13)",
           tiers: [],
           release: "2024-05-13"
         },
@@ -3226,17 +3632,6 @@ var PRICE_BOOK = {
             output: 14
           },
           name: "GPT-5.3 Codex",
-          tiers: [],
-          release: "2026-02-05"
-        },
-        "gpt-5.3-codex-spark": {
-          cost: {
-            cacheRead: 0.175,
-            cacheWrite: 0,
-            input: 1.75,
-            output: 14
-          },
-          name: "GPT-5.3 Codex Spark",
           tiers: [],
           release: "2026-02-05"
         },
@@ -3451,6 +3846,27 @@ var PRICE_BOOK = {
           ],
           release: "2026-09-04"
         },
+        "gpt-6-astra-healthcare": {
+          cost: {
+            cacheRead: 1,
+            cacheWrite: 0,
+            input: 10,
+            output: 50
+          },
+          name: "GPT-6 Astra Healthcare",
+          tiers: [
+            {
+              cost: {
+                cacheRead: 2,
+                cacheWrite: 0,
+                input: 20,
+                output: 75
+              },
+              minContext: 272000
+            }
+          ],
+          release: "2026-11-24"
+        },
         "gpt-6-luna": {
           cost: {
             cacheRead: 0.01,
@@ -3514,6 +3930,27 @@ var PRICE_BOOK = {
           ],
           release: "2026-09-29"
         },
+        "gpt-6.1-sol-healthcare": {
+          cost: {
+            cacheRead: 0.1,
+            cacheWrite: 0,
+            input: 2,
+            output: 10
+          },
+          name: "GPT-6.1 Sol Healthcare",
+          tiers: [
+            {
+              cost: {
+                cacheRead: 0.2,
+                cacheWrite: 0,
+                input: 4,
+                output: 15
+              },
+              minContext: 272000
+            }
+          ],
+          release: "2026-11-24"
+        },
         "gpt-6.1-terra": {
           cost: {
             cacheRead: 0.05,
@@ -3556,6 +3993,27 @@ var PRICE_BOOK = {
           ],
           release: "2026-11-17"
         },
+        "gpt-6.2-astra-healthcare": {
+          cost: {
+            cacheRead: 0.4,
+            cacheWrite: 10,
+            input: 8,
+            output: 40
+          },
+          name: "GPT-6.2 Astra Healthcare",
+          tiers: [
+            {
+              cost: {
+                cacheRead: 0.8,
+                cacheWrite: 20,
+                input: 16,
+                output: 60
+              },
+              minContext: 272000
+            }
+          ],
+          release: "2026-11-24"
+        },
         "gpt-6.2-sol": {
           cost: {
             cacheRead: 0.1,
@@ -3576,6 +4034,27 @@ var PRICE_BOOK = {
             }
           ],
           release: "2026-11-17"
+        },
+        "gpt-6.2-sol-healthcare": {
+          cost: {
+            cacheRead: 0.1,
+            cacheWrite: 2.5,
+            input: 2,
+            output: 10
+          },
+          name: "GPT-6.2 Sol Healthcare",
+          tiers: [
+            {
+              cost: {
+                cacheRead: 0.2,
+                cacheWrite: 5,
+                input: 4,
+                output: 15
+              },
+              minContext: 272000
+            }
+          ],
+          release: "2026-11-24"
         },
         "gpt-daybreak-blue-latest": {
           cost: {
@@ -3620,39 +4099,6 @@ var PRICE_BOOK = {
           tiers: [],
           release: "2025-11-25"
         },
-        "gpt-realtime-2.1": {
-          cost: {
-            cacheRead: 0.4,
-            cacheWrite: 0,
-            input: 4,
-            output: 24
-          },
-          name: "GPT-Realtime-2.1",
-          tiers: [],
-          release: "2026-07-06"
-        },
-        o1: {
-          cost: {
-            cacheRead: 7.5,
-            cacheWrite: 0,
-            input: 15,
-            output: 60
-          },
-          name: "o1",
-          tiers: [],
-          release: "2024-12-05"
-        },
-        "o1-pro": {
-          cost: {
-            cacheRead: 0,
-            cacheWrite: 0,
-            input: 150,
-            output: 600
-          },
-          name: "o1-pro",
-          tiers: [],
-          release: "2025-03-19"
-        },
         o3: {
           cost: {
             cacheRead: 0.5,
@@ -3664,17 +4110,6 @@ var PRICE_BOOK = {
           tiers: [],
           release: "2025-04-16"
         },
-        "o3-mini": {
-          cost: {
-            cacheRead: 0.55,
-            cacheWrite: 0,
-            input: 1.1,
-            output: 4.4
-          },
-          name: "o3-mini",
-          tiers: [],
-          release: "2024-12-20"
-        },
         "o3-pro": {
           cost: {
             cacheRead: 0,
@@ -3685,17 +4120,6 @@ var PRICE_BOOK = {
           name: "o3-pro",
           tiers: [],
           release: "2025-06-10"
-        },
-        "o4-mini": {
-          cost: {
-            cacheRead: 0.275,
-            cacheWrite: 0,
-            input: 1.1,
-            output: 4.4
-          },
-          name: "o4-mini",
-          tiers: [],
-          release: "2025-04-16"
         },
         "text-embedding-3-large": {
           cost: {
@@ -4054,10 +4478,10 @@ var PRICE_BOOK = {
         },
         "deepseek-v4.1-flash": {
           cost: {
-            cacheRead: 0.006,
+            cacheRead: 0.0024,
             cacheWrite: 0,
-            input: 0.3,
-            output: 1.2
+            input: 0.12,
+            output: 0.48
           },
           name: "DeepSeek V4.1 Flash 1017",
           tiers: [],
@@ -4248,6 +4672,17 @@ var PRICE_BOOK = {
           tiers: [],
           release: "2026-11-12"
         },
+        "gemini-4-neon": {
+          cost: {
+            cacheRead: 0.15,
+            cacheWrite: 0,
+            input: 3,
+            output: 15
+          },
+          name: "Gemini 4 Neon",
+          tiers: [],
+          release: "2026-11-18"
+        },
         "glm-4.6": {
           cost: {
             cacheRead: 0.1,
@@ -4327,10 +4762,10 @@ var PRICE_BOOK = {
         },
         "glm-5.3": {
           cost: {
-            cacheRead: 0.26,
+            cacheRead: 0.104,
             cacheWrite: 0,
-            input: 1.4,
-            output: 4.4
+            input: 0.56,
+            output: 1.76
           },
           name: "GLM-5.3",
           tiers: [],
@@ -4837,7 +5272,7 @@ var PRICE_BOOK = {
           },
           name: "Grok Code Fast 1",
           tiers: [],
-          release: "2025-09-02"
+          release: "2025-08-28"
         },
         "hy3-free": {
           cost: {
@@ -4970,6 +5405,17 @@ var PRICE_BOOK = {
           name: "Kimi K3",
           tiers: [],
           release: "2026-07-16"
+        },
+        "kimi-k3.1-pro": {
+          cost: {
+            cacheRead: 0.2,
+            cacheWrite: 2,
+            input: 2,
+            output: 10
+          },
+          name: "Kimi K3.1 Pro",
+          tiers: [],
+          release: "2026-10-23"
         },
         "laguna-s-2.1-free": {
           cost: {
@@ -5233,7 +5679,7 @@ var PRICE_BOOK = {
           },
           name: "Mistral Large 4",
           tiers: [],
-          release: "2026-10-06"
+          release: "2026-10-05"
         },
         "muse-ember-1.0": {
           cost: {
@@ -5443,6 +5889,17 @@ var PRICE_BOOK = {
           tiers: [],
           release: "2026-08-03"
         },
+        "qwen4-max-free": {
+          cost: {
+            cacheRead: 0,
+            cacheWrite: 0,
+            input: 0,
+            output: 0
+          },
+          name: "Qwen4 Max Free",
+          tiers: [],
+          release: "2026-11-16"
+        },
         "ring-2.6-1t-free": {
           cost: {
             cacheRead: 0,
@@ -5475,6 +5932,17 @@ var PRICE_BOOK = {
           name: "Step 5 Preview Free",
           tiers: [],
           release: "2026-09-16"
+        },
+        "tidepool-alpha-free": {
+          cost: {
+            cacheRead: 0,
+            cacheWrite: 0,
+            input: 0,
+            output: 0
+          },
+          name: "Tidepool Alpha Free",
+          tiers: [],
+          release: "2026-11-18"
         },
         "trinity-large-preview-free": {
           cost: {
@@ -5698,6 +6166,17 @@ var PRICE_BOOK = {
           ],
           release: "2026-09-21"
         },
+        "hungerg-free": {
+          cost: {
+            cacheRead: 0,
+            cacheWrite: 0,
+            input: 0,
+            output: 0
+          },
+          name: "HungerG Free",
+          tiers: [],
+          release: "2026-11-24"
+        },
         hy3: {
           cost: {
             cacheRead: 0.035,
@@ -5796,6 +6275,17 @@ var PRICE_BOOK = {
           name: "LongCat-2.0",
           tiers: [],
           release: "2026-06-30"
+        },
+        "longcat-2.5": {
+          cost: {
+            cacheRead: 0.006,
+            cacheWrite: 0,
+            input: 0.3,
+            output: 1.2
+          },
+          name: "LongCat-2.5",
+          tiers: [],
+          release: "2026-11-02"
         },
         "longcat-2.5-free": {
           cost: {
@@ -6032,12 +6522,122 @@ var PRICE_BOOK = {
   version: 1
 };
 
+// shared/price-book-build.js
+var PRICE_SOURCE = "https://models.dev/api.json";
+var PROVIDERS = {
+  anthropic: { name: "Anthropic", source: "Anthropic list" },
+  commandcode: { name: "Command Code", source: "Command Code list" },
+  deepseek: { name: "DeepSeek", source: "DeepSeek list" },
+  google: { name: "Google", source: "Google list" },
+  openai: { name: "OpenAI", source: "OpenAI list" },
+  opencode: { name: "OpenCode Zen", source: "OpenCode Zen list" },
+  "opencode-go": { name: "OpenCode Go", source: "OpenCode Go card" }
+};
+var ALIASES = {
+  providers: {
+    "antigravity-acp": "google",
+    "claude-agent": "anthropic",
+    "command-code": "commandcode",
+    commandcode: "commandcode",
+    deepseek: "deepseek",
+    google: "google",
+    openai: "openai",
+    opencode: "opencode",
+    "opencode-go": "opencode-go"
+  },
+  models: {
+    "claude-agent": {
+      fable: "claude-fable-5-2",
+      haiku: "claude-haiku-5-5",
+      opus: "claude-opus-5-5",
+      sonnet: "claude-sonnet-5-5"
+    }
+  },
+  labs: {
+    commandcode: { "claude-": "anthropic", "gpt-": "openai" }
+  }
+};
+var rate = (value) => Number.isFinite(value) ? value : 0;
+function tierCost(raw) {
+  return {
+    cacheRead: rate(raw.cache_read),
+    cacheWrite: rate(raw.cache_write),
+    input: rate(raw.input),
+    output: rate(raw.output)
+  };
+}
+function modelCard(id, raw) {
+  const cost = raw?.cost;
+  if (!cost || !Number.isFinite(cost.input) || !Number.isFinite(cost.output))
+    return null;
+  const tiers = [];
+  for (const tier of Array.isArray(cost.tiers) ? cost.tiers : []) {
+    const minContext = tier?.tier?.size;
+    if (tier?.tier?.type !== "context" || !Number.isFinite(minContext))
+      continue;
+    tiers.push({ cost: tierCost(tier), minContext });
+  }
+  tiers.sort((a, b) => a.minContext - b.minContext);
+  const card = {
+    cost: tierCost(cost),
+    name: raw.name ?? id,
+    tiers
+  };
+  if (typeof raw.release_date === "string")
+    card.release = raw.release_date;
+  return card;
+}
+function buildPriceBook(api, checkedAt) {
+  const providers = {};
+  for (const id of Object.keys(PROVIDERS).sort()) {
+    const upstream = api?.[id]?.models;
+    if (!upstream || typeof upstream !== "object")
+      throw new Error(`models.dev has no provider "${id}"`);
+    const models = {};
+    for (const modelId of Object.keys(upstream).sort()) {
+      const card = modelCard(modelId, upstream[modelId]);
+      if (card)
+        models[modelId] = card;
+    }
+    if (!Object.keys(models).length)
+      throw new Error(`provider "${id}" produced no priced model`);
+    providers[id] = { ...PROVIDERS[id], models };
+  }
+  return {
+    aliases: ALIASES,
+    checkedAt,
+    currency: "USD",
+    providers,
+    version: 1
+  };
+}
+function isValidPriceBook(book) {
+  if (!book || typeof book !== "object" || book.version !== 1)
+    return false;
+  if (typeof book.checkedAt !== "string" || !book.checkedAt)
+    return false;
+  if (!book.providers || typeof book.providers !== "object")
+    return false;
+  for (const id of Object.keys(PROVIDERS)) {
+    const models = book.providers[id]?.models;
+    if (!models || typeof models !== "object" || !Object.keys(models).length)
+      return false;
+  }
+  return true;
+}
+
 // service/src/prices.js
-import { readFileSync } from "node:fs";
+import { mkdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import path from "node:path";
 var RATES = ["cacheRead", "cacheWrite", "input", "output"];
+var MAX_BOOK_BYTES = 8 * 1024 * 1024;
+var DEFAULT_TIMEOUT_MS = 15000;
+var DEFAULT_COOLDOWN_MS = 60000;
 function priceOverrideFile(dataDir = process.env.OPENCHAMBER_SERVICE_DATA_DIR ?? null) {
   return dataDir ? path.join(dataDir, "price-overrides.json") : null;
+}
+function priceBookFile(dataDir = process.env.OPENCHAMBER_SERVICE_DATA_DIR ?? null) {
+  return dataDir ? path.join(dataDir, "price-book.json") : null;
 }
 function loadPriceOverrides({ file = priceOverrideFile(), log = () => {} } = {}) {
   if (!file)
@@ -6084,9 +6684,101 @@ function loadPriceOverrides({ file = priceOverrideFile(), log = () => {} } = {})
     log(`token-meter: ${count} price override${count === 1 ? "" : "s"} from ${file}`);
   return overrides;
 }
+function loadCachedPriceBook({ file = priceBookFile(), fallback = null, log = () => {} } = {}) {
+  if (!file)
+    return fallback;
+  try {
+    const stat = statSync(file);
+    if (stat.size > MAX_BOOK_BYTES) {
+      log(`token-meter: ${file} exceeds ${MAX_BOOK_BYTES} bytes; using bundled price book`);
+      return fallback;
+    }
+    const parsed = JSON.parse(readFileSync(file, "utf8"));
+    if (!isValidPriceBook(parsed)) {
+      log(`token-meter: ${file} failed schema check; using bundled price book`);
+      return fallback;
+    }
+    if (fallback?.checkedAt && parsed.checkedAt < fallback.checkedAt)
+      return fallback;
+    return parsed;
+  } catch (error) {
+    if (error?.code !== "ENOENT")
+      log(`token-meter: could not read ${file}: ${error?.message ?? error}`);
+    return fallback;
+  }
+}
+function writeAtomicJson(file, value, log = () => {}) {
+  mkdirSync(path.dirname(file), { recursive: true });
+  const temp = `${file}.tmp.${process.pid}.${Date.now()}`;
+  try {
+    writeFileSync(temp, JSON.stringify(value));
+    renameSync(temp, file);
+  } catch (error) {
+    try {
+      unlinkSync(temp);
+    } catch (cleanupError) {
+      if (cleanupError?.code !== "ENOENT") {
+        log(`token-meter: could not remove temp file ${temp}: ${cleanupError?.message ?? cleanupError}`);
+      }
+    }
+    throw error;
+  }
+}
+function createPriceRefresher({
+  initialBook = null,
+  file = priceBookFile(),
+  fetchImpl = fetch,
+  source = PRICE_SOURCE,
+  timeoutMs = DEFAULT_TIMEOUT_MS,
+  cooldownMs = DEFAULT_COOLDOWN_MS,
+  now = () => Date.now(),
+  log = () => {},
+  onBook = () => {}
+} = {}) {
+  let current = initialBook;
+  let inFlight = null;
+  let lastAttemptAt = -Infinity;
+  async function run() {
+    lastAttemptAt = now();
+    try {
+      const signal = typeof AbortSignal?.timeout === "function" ? AbortSignal.timeout(timeoutMs) : undefined;
+      const answer = await fetchImpl(source, signal ? { signal } : undefined);
+      if (!answer?.ok)
+        throw new Error(`HTTP ${answer?.status ?? "error"}`);
+      const api = await answer.json();
+      const today = new Date(now()).toISOString().slice(0, 10);
+      const next = buildPriceBook(api, today);
+      if (file) {
+        try {
+          writeAtomicJson(file, next, log);
+        } catch (writeError) {
+          log(`token-meter: could not cache ${file}: ${writeError?.message ?? writeError}`);
+        }
+      }
+      current = next;
+      onBook(next);
+      return next;
+    } catch (error) {
+      log(`token-meter: price refresh failed (keeping ${current?.checkedAt ?? "bundled"}): ${error?.message ?? error}`);
+      return current;
+    } finally {
+      inFlight = null;
+    }
+  }
+  return {
+    refresh({ force = false } = {}) {
+      if (inFlight)
+        return inFlight;
+      if (!force && now() - lastAttemptAt < cooldownMs)
+        return Promise.resolve(current);
+      inFlight = run();
+      return inFlight;
+    }
+  };
+}
 
 // service/src/recordings.js
-import { readFileSync as readFileSync2, readdirSync, statSync, unlinkSync } from "node:fs";
+import { readFileSync as readFileSync2, readdirSync, statSync as statSync2, unlinkSync as unlinkSync2 } from "node:fs";
 import { chmod, mkdir, rename, unlink, writeFile } from "node:fs/promises";
 import path2 from "node:path";
 var VERSION = 1;
@@ -6238,13 +6930,13 @@ function createRecordingStore({ dataDir = null, log = () => {}, maxSessions = MA
         if (!name.startsWith(`${FILE_NAME}.tmp-`))
           continue;
         try {
-          unlinkSync(path2.join(dir, name));
+          unlinkSync2(path2.join(dir, name));
         } catch {}
       }
     } catch {}
     let info;
     try {
-      info = statSync(file);
+      info = statSync2(file);
     } catch (error) {
       if (error?.code === "ENOENT")
         return;
@@ -6483,9 +7175,38 @@ if (!PORT || !TOKEN) {
   console.error("token-meter: OPENCHAMBER_SERVICE_PORT and OPENCHAMBER_SERVICE_TOKEN are required");
   process.exit(1);
 }
-function createService({ fetchImpl = fetch, log = () => {}, base = BASE, token = TOKEN, port = PORT, priceBook = PRICE_BOOK, overrides = null, dataDir = process.env.OPENCHAMBER_SERVICE_DATA_DIR ?? null } = {}) {
+var PRICE_REFRESH_MS = 12 * 60 * 60 * 1000;
+function createService({
+  fetchImpl = fetch,
+  log = () => {},
+  base = BASE,
+  token = TOKEN,
+  port = PORT,
+  priceBook = PRICE_BOOK,
+  overrides = null,
+  dataDir = process.env.OPENCHAMBER_SERVICE_DATA_DIR ?? null,
+  autoRefreshPrices = null,
+  priceSource = PRICE_SOURCE,
+  priceRefreshMs = PRICE_REFRESH_MS,
+  priceCooldownMs = 60000
+} = {}) {
   const collectors = new Map;
   const state = { stream: "idle", streamError: null, stopping: false, controller: null, since: Date.now() };
+  const refreshPrices = autoRefreshPrices ?? priceBook === PRICE_BOOK;
+  let activePriceBook = refreshPrices ? loadCachedPriceBook({ file: priceBookFile(dataDir), fallback: priceBook, log }) : priceBook;
+  const priceRefresher = refreshPrices ? createPriceRefresher({
+    initialBook: activePriceBook,
+    file: priceBookFile(dataDir),
+    fetchImpl,
+    source: priceSource,
+    cooldownMs: priceCooldownMs,
+    log,
+    onBook: (next) => {
+      if (!state.stopping)
+        activePriceBook = next;
+    }
+  }) : null;
+  let priceTimer = null;
   const priceOverrides = overrides ?? loadPriceOverrides({ file: priceOverrideFile(dataDir), log });
   const recordings = createRecordingStore({ dataDir, log, maxSessions: MAX_RECORDINGS });
   let seqEpoch = 0;
@@ -7001,6 +7722,8 @@ function createService({ fetchImpl = fetch, log = () => {}, base = BASE, token =
           throw new Error("event stream answered without a body");
         state.stream = "open";
         state.streamError = null;
+        if (!recycled)
+          priceRefresher?.refresh();
         await consume(answer.body);
       } catch (error) {
         if (!state.stopping && !cutByOurTimer) {
@@ -7098,7 +7821,7 @@ function createService({ fetchImpl = fetch, log = () => {}, base = BASE, token =
       const first = collector.historyAt === 0;
       if (!base || !upstreamIsLoopback) {
         json(res, 200, {
-          ...snapshot(collector, Date.now(), [collector], priceBook, priceOverrides),
+          ...snapshot(collector, Date.now(), [collector], activePriceBook, priceOverrides),
           ok: false,
           error: !base ? "OpenCode access is not available. Approve the extension in Settings → Extensions." : "OpenCode access is not on loopback; refusing to send the token.",
           stream: { state: "off", error: state.streamError },
@@ -7122,7 +7845,7 @@ function createService({ fetchImpl = fetch, log = () => {}, base = BASE, token =
       const tree = treeOf(collector);
       const snapshotAt = Date.now();
       sampleCollector(collector, snapshotAt, tree);
-      const answer = snapshot(collector, snapshotAt, tree, priceBook, priceOverrides);
+      const answer = snapshot(collector, snapshotAt, tree, activePriceBook, priceOverrides);
       const statusSurface = url.searchParams.get("surface") === "status";
       if (statusSurface) {
         delete answer.steps;
@@ -7151,6 +7874,11 @@ function createService({ fetchImpl = fetch, log = () => {}, base = BASE, token =
       server.listen(port, "127.0.0.1");
       streamLoop();
       discoverRunning();
+      if (priceRefresher) {
+        priceRefresher.refresh();
+        priceTimer = setInterval(() => void priceRefresher.refresh(), priceRefreshMs);
+        priceTimer.unref?.();
+      }
       return server;
     },
     async stop() {
@@ -7158,6 +7886,8 @@ function createService({ fetchImpl = fetch, log = () => {}, base = BASE, token =
       clearInterval(ticker);
       clearInterval(saveTimer);
       clearInterval(discoveryTimer);
+      if (priceTimer)
+        clearInterval(priceTimer);
       state.controller?.abort();
       server.close();
       for (const collector of collectors.values())

@@ -39,6 +39,25 @@ function bareId(model) {
   return cut === -1 ? model : model.slice(cut + 1);
 }
 
+const cardIndexCache = new WeakMap();
+const AMBIGUOUS = Symbol('ambiguous');
+
+function indexCards(cards) {
+  let cached = cardIndexCache.get(cards);
+  if (cached) return cached;
+  const byLower = new Map();
+  const byBare = new Map();
+  for (const id of Object.keys(cards)) {
+    const lower = id.toLowerCase();
+    byLower.set(lower, byLower.has(lower) ? AMBIGUOUS : id);
+    const bare = bareId(id);
+    byBare.set(bare, byBare.has(bare) ? AMBIGUOUS : id);
+  }
+  cached = { byLower, byBare };
+  cardIndexCache.set(cards, cached);
+  return cached;
+}
+
 /**
  * Resolve an OpenCode provider/model pair to a card.
  *
@@ -56,10 +75,10 @@ export function resolvePrice(book, { provider, model, promptTokens = 0, at = Dat
   // A case-only difference is the same model: vendors write `zai-org/GLM-5.3`
   // while a session records `zai-org/glm-5.3`.
   if (cards) {
-    const lower = model.toLowerCase();
-    const sameModel = Object.keys(cards).filter((id) => id.toLowerCase() === lower);
-    if (sameModel.length === 1) {
-      return finish(book, priceProvider, sameModel[0], cards[sameModel[0]], 'exact', promptTokens, at, overrides);
+    const idx = indexCards(cards);
+    const sameId = idx.byLower.get(model.toLowerCase());
+    if (sameId && sameId !== AMBIGUOUS) {
+      return finish(book, priceProvider, sameId, cards[sameId], 'exact', promptTokens, at, overrides);
     }
   }
 
@@ -71,13 +90,13 @@ export function resolvePrice(book, { provider, model, promptTokens = 0, at = Dat
 
   if (cards) {
     // Bare id: `deepseek/deepseek-v4.1-flash` is a Command Code model id.
+    const idx = indexCards(cards);
     const bare = bareId(model);
-    const matches = Object.keys(cards).filter((id) => id === bare || bareId(id) === bare);
-    if (matches.length === 1) {
-      return finish(book, priceProvider, matches[0], cards[matches[0]], 'bare', promptTokens, at, overrides);
+    const bareMatch = idx.byBare.get(bare);
+    if (bareMatch === AMBIGUOUS) return null;
+    if (bareMatch) {
+      return finish(book, priceProvider, bareMatch, cards[bareMatch], 'bare', promptTokens, at, overrides);
     }
-    // Two cards sharing a bare id inside one provider is ambiguous: no guess.
-    if (matches.length > 1) return null;
     // Family latest, only for a known Claude short name.
     if (FAMILIES.includes(model)) {
       const family = Object.keys(cards)

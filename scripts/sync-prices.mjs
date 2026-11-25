@@ -14,98 +14,13 @@
 import { readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { buildPriceBook, PRICE_SOURCE, PROVIDERS } from '../shared/price-book-build.js';
 import { diffBooks } from './price-diff.mjs';
 
-const SOURCE = 'https://models.dev/api.json';
+const SOURCE = PRICE_SOURCE;
 const TIMEOUT_MS = 15_000;
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const TARGET = path.join(ROOT, 'shared', 'price-book.js');
-
-// Order is alphabetical, the generator's output keeps it that way.
-const PROVIDERS = {
-  anthropic: { name: 'Anthropic', source: 'Anthropic list' },
-  commandcode: { name: 'Command Code', source: 'Command Code list' },
-  deepseek: { name: 'DeepSeek', source: 'DeepSeek list' },
-  openai: { name: 'OpenAI', source: 'OpenAI list' },
-  opencode: { name: 'OpenCode Zen', source: 'OpenCode Zen list' },
-  'opencode-go': { name: 'OpenCode Go', source: 'OpenCode Go card' },
-};
-
-// Static: how an OpenCode provider or model name reaches a card.
-const ALIASES = {
-  providers: {
-    'claude-agent': 'anthropic',
-    'command-code': 'commandcode',
-    commandcode: 'commandcode',
-    deepseek: 'deepseek',
-    openai: 'openai',
-    opencode: 'opencode',
-    'opencode-go': 'opencode-go',
-  },
-  models: {
-    'claude-agent': {
-      fable: 'claude-fable-5-2',
-      haiku: 'claude-haiku-5-5',
-      opus: 'claude-opus-5-5',
-      sonnet: 'claude-sonnet-5-5',
-    },
-  },
-  labs: {
-    commandcode: { 'claude-': 'anthropic', 'gpt-': 'openai' },
-  },
-};
-
-const rate = (value) => (Number.isFinite(value) ? value : 0);
-
-function tierCost(raw) {
-  return {
-    cacheRead: rate(raw.cache_read),
-    cacheWrite: rate(raw.cache_write),
-    input: rate(raw.input),
-    output: rate(raw.output),
-  };
-}
-
-function modelCard(id, raw) {
-  const cost = raw?.cost;
-  if (!cost || !Number.isFinite(cost.input) || !Number.isFinite(cost.output)) return null;
-  const tiers = [];
-  for (const tier of Array.isArray(cost.tiers) ? cost.tiers : []) {
-    const minContext = tier?.tier?.size;
-    if (tier?.tier?.type !== 'context' || !Number.isFinite(minContext)) continue;
-    tiers.push({ cost: tierCost(tier), minContext });
-  }
-  tiers.sort((a, b) => a.minContext - b.minContext);
-  const card = {
-    cost: tierCost(cost),
-    name: raw.name ?? id,
-    tiers,
-  };
-  if (typeof raw.release_date === 'string') card.release = raw.release_date;
-  return card;
-}
-
-function build(api, checkedAt) {
-  const providers = {};
-  for (const id of Object.keys(PROVIDERS).sort()) {
-    const upstream = api?.[id]?.models;
-    if (!upstream) throw new Error(`models.dev has no provider "${id}"`);
-    const models = {};
-    for (const modelId of Object.keys(upstream).sort()) {
-      const card = modelCard(modelId, upstream[modelId]);
-      if (card) models[modelId] = card;
-    }
-    if (!Object.keys(models).length) throw new Error(`provider "${id}" produced no priced model`);
-    providers[id] = { ...PROVIDERS[id], models };
-  }
-  return {
-    aliases: ALIASES,
-    checkedAt,
-    currency: 'USD',
-    providers,
-    version: 1,
-  };
-}
 
 function render(book) {
   return [
@@ -140,7 +55,7 @@ try {
   process.exit(2);
 }
 
-const output = render(build(api, checkedAt));
+const output = render(buildPriceBook(api, checkedAt));
 
 if (check) {
   if (existing === output) {
@@ -150,7 +65,7 @@ if (check) {
   // Say what moved, not only that something did: a scheduled check is read by
   // a person deciding whether a price change is worth a release.
   const committed = existing ? (await import(pathToFileURL(TARGET).href)).PRICE_BOOK : null;
-  const lines = diffBooks(committed, build(api, checkedAt));
+  const lines = diffBooks(committed, buildPriceBook(api, checkedAt));
   for (const line of lines) console.error(line);
   if (!lines.length) console.error('(no rate, model or tier moved: the file differs in aliases, labels or layout)');
   console.error(`sync-prices: committed book is stale, ${lines.length} model line(s) (run node scripts/sync-prices.mjs)`);

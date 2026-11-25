@@ -83,7 +83,7 @@ the step must store the split; not needed now.
 | D1 | `Total` becomes API value. `billed` is a secondary number in the tooltip and in `cost.billed`. |
 | D2 | The rates line shows the current model's own published rates, including cache write, with a source label. |
 | D3 | Scope is the six providers above. OpenRouter is not a source and is not priced. |
-| D4 | Prices come from a committed, curated snapshot generated from models.dev; no runtime network. |
+| D4 | Prices start from the committed snapshot (or newer cached `$OPENCHAMBER_SERVICE_DATA_DIR/price-book.json`) and refresh in the background on load/reconnect and every 12 h with fail-safe fallback. |
 | D5 | Unknown models show `no published rate`; no neighbour, no average, no guess. |
 | D6 | For metered models, API value is reconciled against billed cost; drift above 1% is flagged. |
 | D7 | Session-level first. 30-day dashboard and plan usage bars are later, separate work. |

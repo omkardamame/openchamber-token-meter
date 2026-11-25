@@ -284,6 +284,86 @@ check(
   JSON.stringify(mixedWrong.drift),
 );
 
+const antigravity = resolvePrice(PRICE_BOOK, { provider: 'antigravity-acp', model: 'gemini-4-hydrogen' });
+check(
+  'PR-37 antigravity-acp resolves Gemini models via Google list',
+  antigravity?.provider === 'google' &&
+    antigravity.source === 'Google list' &&
+    same(rates(antigravity), [1.5, 7.5, 0.075, 0]),
+  antigravity ? `${antigravity.provider}/${antigravity.model} (${antigravity.source})` : 'null',
+);
+
+// --- Service auto-refresh & fail-safes --------------------------------------
+const { mkdtempSync, rmSync, writeFileSync } = await import('node:fs');
+const { tmpdir } = await import('node:os');
+const { default: path } = await import('node:path');
+const { createPriceRefresher, loadCachedPriceBook, priceBookFile } = await import('../service/src/prices.js');
+const { PROVIDERS } = await import('../shared/price-book-build.js');
+
+const dir = mkdtempSync(path.join(tmpdir(), 'token-meter-prices-'));
+try {
+  const cacheFile = priceBookFile(dir);
+  const fallback = { ...PRICE_BOOK, checkedAt: '2026-11-20' };
+
+  // Corrupt JSON falls back cleanly without throwing.
+  writeFileSync(cacheFile, '{not-json');
+  check('AR-01 corrupt cache falls back to bundled book', loadCachedPriceBook({ file: cacheFile, fallback }) === fallback);
+
+  // Older cache never shadows a newer bundled release.
+  writeFileSync(cacheFile, JSON.stringify({ ...PRICE_BOOK, checkedAt: '2026-11-10' }));
+  check('AR-02 older cache yields to newer bundled book', loadCachedPriceBook({ file: cacheFile, fallback }) === fallback);
+
+  // Newer valid cache wins.
+  writeFileSync(cacheFile, JSON.stringify({ ...PRICE_BOOK, checkedAt: '2026-11-26' }));
+  check('AR-03 newer valid cache loads', loadCachedPriceBook({ file: cacheFile, fallback })?.checkedAt === '2026-11-26');
+
+  // Successful refresh writes cache atomically and updates live book.
+  const upstreamPayload = Object.fromEntries(
+    Object.keys(PROVIDERS).map((id) => [id, { models: { [`${id}-test`]: { name: `${id} test`, cost: { input: 1, output: 2, cache_read: 0.1 } } } }]),
+  );
+  let fetchCalls = 0;
+  let swapped = null;
+  let clock = 1_800_000_000_000;
+  const refresher = createPriceRefresher({
+    initialBook: fallback,
+    file: cacheFile,
+    now: () => clock,
+    cooldownMs: 60_000,
+    onBook: (next) => { swapped = next; },
+    fetchImpl: async () => {
+      fetchCalls += 1;
+      await new Promise((r) => setTimeout(r, 15));
+      return { ok: true, status: 200, json: async () => upstreamPayload };
+    },
+  });
+  const [r1, r2] = await Promise.all([refresher.refresh(), refresher.refresh()]);
+  check('AR-04 concurrent refresh coalesces single-flight', fetchCalls === 1 && r1 === r2 && swapped?.providers?.google?.models?.['google-test']?.cost?.input === 1);
+  check('AR-05 cooldown prevents rapid reconnect storms', (await refresher.refresh()) === swapped && fetchCalls === 1);
+  check('AR-06 refreshed book persisted to cache', loadCachedPriceBook({ file: cacheFile, fallback })?.providers?.google?.models?.['google-test']?.cost?.input === 1);
+
+  // Failed fetch after cooldown keeps the current book intact.
+  clock += 61_000;
+  const failing = createPriceRefresher({
+    initialBook: swapped,
+    file: cacheFile,
+    now: () => clock,
+    fetchImpl: async () => ({ ok: false, status: 503, json: async () => ({}) }),
+  });
+  const kept = await failing.refresh();
+  check('AR-07 HTTP failure keeps current book intact', kept === swapped && kept.providers.google.models['google-test']?.cost?.input === 1);
+
+  // Incomplete upstream payload (missing providers) is rejected.
+  const incomplete = createPriceRefresher({
+    initialBook: swapped,
+    file: cacheFile,
+    now: () => clock,
+    fetchImpl: async () => ({ ok: true, status: 200, json: async () => ({ google: upstreamPayload.google }) }),
+  });
+  check('AR-08 incomplete upstream payload is rejected', (await incomplete.refresh()) === swapped);
+} finally {
+  rmSync(dir, { recursive: true, force: true });
+}
+
 const passed = results.filter((result) => result.ok).length;
 console.log(`\n${passed}/${results.length} price checks passed`);
 process.exit(process.exitCode ?? 0);

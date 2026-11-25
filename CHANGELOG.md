@@ -2,6 +2,19 @@
 
 Every release of Token Meter, newest first; one line per change, grouped by area — what shipped in that tag.
 
+## [2.1.0] - 2026-11-26
+
+### Added
+
+- Automatic background price-book refresh from `models.dev` on service load, OpenCode connect/reconnect, and every 12 hours, with atomic cache persistence (`price-book.json`), single-flight coalescing, reconnect cooldown, and fail-safe fallback to the bundled snapshot.
+- Added the `google` provider (34 models) and `antigravity-acp` → `google` alias so Gemini models (including `gemini-4-hydrogen`, `gemini-4-carbon`, `gemini-4-argon`, and `gemini-4-neon`) price via Google's list regardless of whether `google` or `antigravity-acp` is used.
+- Updated the bundled `models.dev` price snapshot across all seven providers.
+
+### Changed
+
+- Added a `WeakMap` card index in the price resolver for O(1) case-insensitive and bare-ID lookups without per-step scans.
+- Shared the `models.dev` book builder between the sync script and the service refresher.
+
 ## [2.0.2] - 2026-11-23
 
 ### Added

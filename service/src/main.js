@@ -16,7 +16,14 @@ import {
   wantsEvent,
 } from './collector.js';
 import { PRICE_BOOK } from '../../shared/price-book.js';
-import { loadPriceOverrides, priceOverrideFile } from './prices.js';
+import { PRICE_SOURCE } from '../../shared/price-book-build.js';
+import {
+  createPriceRefresher,
+  loadCachedPriceBook,
+  loadPriceOverrides,
+  priceBookFile,
+  priceOverrideFile,
+} from './prices.js';
 import { createRecordingStore } from './recordings.js';
 
 const PORT = Number(process.env.OPENCHAMBER_SERVICE_PORT);
@@ -69,11 +76,42 @@ if (!PORT || !TOKEN) {
   process.exit(1);
 }
 
-export function createService({ fetchImpl = fetch, log = () => {}, base = BASE, token = TOKEN, port = PORT, priceBook = PRICE_BOOK, overrides = null, dataDir = process.env.OPENCHAMBER_SERVICE_DATA_DIR ?? null } = {}) {
+const PRICE_REFRESH_MS = 12 * 60 * 60 * 1000;
+
+export function createService({
+  fetchImpl = fetch,
+  log = () => {},
+  base = BASE,
+  token = TOKEN,
+  port = PORT,
+  priceBook = PRICE_BOOK,
+  overrides = null,
+  dataDir = process.env.OPENCHAMBER_SERVICE_DATA_DIR ?? null,
+  autoRefreshPrices = null,
+  priceSource = PRICE_SOURCE,
+  priceRefreshMs = PRICE_REFRESH_MS,
+  priceCooldownMs = 60_000,
+} = {}) {
   const collectors = new Map();
   const state = { stream: 'idle', streamError: null, stopping: false, controller: null, since: Date.now() };
-  // Prices are a committed snapshot plus an optional hand-written correction.
-  // Both are read once, here: no watcher, no per-poll file read.
+  const refreshPrices = autoRefreshPrices ?? priceBook === PRICE_BOOK;
+  let activePriceBook = refreshPrices
+    ? loadCachedPriceBook({ file: priceBookFile(dataDir), fallback: priceBook, log })
+    : priceBook;
+  const priceRefresher = refreshPrices
+    ? createPriceRefresher({
+        initialBook: activePriceBook,
+        file: priceBookFile(dataDir),
+        fetchImpl,
+        source: priceSource,
+        cooldownMs: priceCooldownMs,
+        log,
+        onBook: (next) => {
+          if (!state.stopping) activePriceBook = next;
+        },
+      })
+    : null;
+  let priceTimer = null;
   const priceOverrides = overrides ?? loadPriceOverrides({ file: priceOverrideFile(dataDir), log });
   const recordings = createRecordingStore({ dataDir, log, maxSessions: MAX_RECORDINGS });
   // A session-lifetime base for `stepsSeq`: a recreated collector must not
@@ -638,6 +676,7 @@ export function createService({ fetchImpl = fetch, log = () => {}, base = BASE, 
         if (!answer.body) throw new Error('event stream answered without a body');
         state.stream = 'open';
         state.streamError = null;
+        if (!recycled) void priceRefresher?.refresh();
         await consume(answer.body);
       } catch (error) {
         if (!state.stopping && !cutByOurTimer) {
@@ -743,7 +782,7 @@ export function createService({ fetchImpl = fetch, log = () => {}, base = BASE, 
       const first = collector.historyAt === 0;
       if (!base || !upstreamIsLoopback) {
         json(res, 200, {
-          ...snapshot(collector, Date.now(), [collector], priceBook, priceOverrides),
+          ...snapshot(collector, Date.now(), [collector], activePriceBook, priceOverrides),
           ok: false,
           error: !base
             ? 'OpenCode access is not available. Approve the extension in Settings → Extensions.'
@@ -778,7 +817,7 @@ export function createService({ fetchImpl = fetch, log = () => {}, base = BASE, 
       const tree = treeOf(collector);
       const snapshotAt = Date.now();
       sampleCollector(collector, snapshotAt, tree);
-      const answer = snapshot(collector, snapshotAt, tree, priceBook, priceOverrides);
+      const answer = snapshot(collector, snapshotAt, tree, activePriceBook, priceOverrides);
       // The Work Status section draws a spark and counters: `status`, `live`,
       // `totals`, the fine series and the step sequence. Everything else it
       // would parse and discard (the step list alone is 90% of a first answer).
@@ -811,6 +850,11 @@ export function createService({ fetchImpl = fetch, log = () => {}, base = BASE, 
       server.listen(port, '127.0.0.1');
       void streamLoop();
       void discoverRunning();
+      if (priceRefresher) {
+        void priceRefresher.refresh();
+        priceTimer = setInterval(() => void priceRefresher.refresh(), priceRefreshMs);
+        priceTimer.unref?.();
+      }
       return server;
     },
     async stop() {
@@ -818,6 +862,7 @@ export function createService({ fetchImpl = fetch, log = () => {}, base = BASE, 
       clearInterval(ticker);
       clearInterval(saveTimer);
       clearInterval(discoveryTimer);
+      if (priceTimer) clearInterval(priceTimer);
       state.controller?.abort();
       server.close();
       for (const collector of collectors.values()) recordings.capture(collector, Date.now());
